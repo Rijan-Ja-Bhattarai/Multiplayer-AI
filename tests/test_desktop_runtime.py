@@ -60,6 +60,25 @@ class DesktopRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.other.use_local()
         self.assertFalse(self.other.remote)
 
+    async def test_joined_devices_receive_visible_messages_in_both_directions(self):
+        invite = await self.runtime.invite("visible-device", self.runtime.active_url)
+        received = []
+        self.other = DesktopRuntime(Storage(Path(self.directory.name) / "visible", MemoryVault()),
+                                    lambda kind, data: received.append((kind, data)))
+        await self.other.start()
+        await self.other.join(invite["url"], invite["token"])
+        await self.runtime.send("visible-device", {"text": "Hello from the host"})
+        incoming = [data for kind, data in received if kind == "incoming"]
+        self.assertEqual(incoming[-1], {"from": self.runtime.active_id, "to": "visible-device", "text": "Hello from the host"})
+        self.assertTrue(any(kind == "incoming_reply" for kind, _ in received))
+        await self.other.send(self.runtime.active_id, {"messages": [{"role": "user", "content": "Reply from the guest"}]})
+        incoming = [data for kind, data in self.events if kind == "incoming"]
+        self.assertEqual(incoming[-1]["from"], "visible-device")
+        self.assertEqual(incoming[-1]["text"], "Reply from the guest")
+        count = len(incoming)
+        await self.runtime.send(self.runtime.active_id, {"text": "Self check"})
+        self.assertEqual(len([data for kind, data in self.events if kind == "incoming"]), count)
+
     async def test_saved_remote_workspace_restores_on_launch(self):
         invite = await self.runtime.invite("returning-device", self.runtime.active_url)
         directory = Path(self.directory.name) / "returning"
@@ -86,6 +105,14 @@ class DesktopRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.runtime.save_agent(profile, "private-provider-key")
         result = await self.runtime.send("researcher", {"text": "Hello"})
         self.assertEqual(result["text"], "Native model reply")
+        invite = await self.runtime.invite("model-guest", self.runtime.active_url)
+        self.other = DesktopRuntime(Storage(Path(self.directory.name) / "model-guest", MemoryVault()))
+        await self.other.start()
+        await self.other.join(invite["url"], invite["token"])
+        result = await self.other.send("researcher", {"text": "Use the host's model from the joined device"})
+        self.assertEqual(result["text"], "Native model reply")
+        self.assertTrue(any(kind == "incoming" and data["from"] == "model-guest" and data["to"] == "researcher"
+                            for kind, data in self.events))
         self.assertNotIn("private-provider-key", self.storage.path.read_text())
         await self.runtime.stop_agent("researcher")
         self.assertFalse(self.storage.settings["agents"][0]["autostart"])
