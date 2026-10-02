@@ -1,4 +1,161 @@
-"""Discord-inspired charcoal surfaces, blurple actions, and readable contrast."""
+"""Surfaces, accents, and readable contrast for the dark and light themes.
+
+Two mechanisms live here.
+
+``THEMES`` holds the Qt stylesheets. The stylesheet is applied once, at the
+top level widget, so a stylesheet can only style things it can select:
+either by Qt type (``QLabel``, ``QPushButton``) or by ``objectName``.
+Anything that sets its own stylesheet, or paints itself, has to come to
+this module for its colours instead, via the ``PALETTES`` tokens.
+
+``PALETTES`` holds those semantic colours, so that the ~23 colour literals
+that used to be scattered through window.py, dialogs.py and widgets.py
+have one definition per theme and change together.
+"""
+
+# --- semantic colour tokens ------------------------------------------------
+#
+# Every token below must exist in both palettes. Tokens used in hand-painted
+# code (OrbitArt) rather than in a stylesheet are marked below, because
+# those cannot be expressed in Qt Style Sheets at all.
+
+_DARK = {
+    "accent": "#5865f2",
+    "accent_hover": "#7983f5",
+    "accent_press": "#4752c4",
+    "on_accent": "#ffffff",
+    "text": "#dbdee1",
+    "text_strong": "#f2f3f5",
+    "text_muted": "#a2a5af",
+    "success": "#3ba55d",
+    "error": "#f38a8e",
+    "agent_title": "#a8b0ff",
+    "toast_bg": "#243c32",
+    "toast_fg": "#b3e4c7",
+    "provider_fallback": "#a59af5",
+    # Hand-painted OrbitArt only.
+    "orbit_ring": "#575580",
+    "orbit_ring_dashed": "#504e76",
+    "orbit_tile": "#514c8b",
+    "orbit_chip_bg": "#3c3b60",
+    "orbit_chip_ring": "#64608b",
+    "orbit_chip_text": "#bfbadc",
+    "orbit_ollama": "#b8adff",
+    "orbit_claude": "#e9b69b",
+    "orbit_gemini": "#a6c9ff",
+    "orbit_openai": "#97dcc0",
+}
+
+# Light values are chosen for contrast on white rather than being a
+# mechanical inversion: a mid-tone like #3ba55d reads fine on charcoal
+# but is far too pale on white, so success, error and the agent title
+# each get a darker counterpart.
+_LIGHT = {
+    "accent": "#4c56d8",
+    "accent_hover": "#5f68e2",
+    "accent_press": "#3f47b8",
+    "on_accent": "#ffffff",
+    "text": "#1f2124",
+    "text_strong": "#111214",
+    "text_muted": "#5c6069",
+    "success": "#1e7d43",
+    "error": "#c0392b",
+    "agent_title": "#3b3f9e",
+    "toast_bg": "#d8f0e2",
+    "toast_fg": "#14532d",
+    "provider_fallback": "#6f63d9",
+    "orbit_ring": "#b9b6d8",
+    "orbit_ring_dashed": "#c9c6e2",
+    "orbit_tile": "#d5d2f0",
+    "orbit_chip_bg": "#eceaf8",
+    "orbit_chip_ring": "#c4c1dd",
+    "orbit_chip_text": "#4a4757",
+    "orbit_ollama": "#5b4fd1",
+    "orbit_claude": "#a2603a",
+    "orbit_gemini": "#2f6ed0",
+    "orbit_openai": "#1f7a5e",
+}
+
+PALETTES = {"dark": _DARK, "light": _LIGHT}
+
+DARK = "dark"
+LIGHT = "light"
+THEME_NAMES = (DARK, LIGHT)
+
+
+def palette(name):
+    """The token dict for a theme, falling back to dark.
+
+    An unrecognised name must not raise: the theme comes from a settings
+    file a user can edit, and a typo there should not stop the app.
+    """
+    return PALETTES.get(name, PALETTES[DARK])
+
+
+def color(name, token):
+    """One colour for a theme, e.g. ``color("light", "error")``.
+
+    An unknown *theme* degrades to dark, but an unknown *token* raises.
+    The difference matters: the theme can come from a user-edited settings
+    file, whereas a token can only be wrong because of a typo in the code.
+    Substituting a different colour there would ship a silent mistake.
+    """
+    tokens = palette(name)
+    if token in tokens:
+        return tokens[token]
+    raise KeyError(f"unknown theme token {token!r}")
+
+
+def provider_color(name, provider_key):
+    """The accent for a provider, per theme.
+
+    Provider accents are tuned for the surface they sit on, so each theme
+    carries its own set rather than one shared list. An unrecognised
+    provider uses the theme's fallback accent, because agent records
+    persist across versions and may name a provider this build lacks.
+    """
+    accents = PROVIDER_ACCENTS.get(name, PROVIDER_ACCENTS[DARK])
+    return accents.get(provider_key, palette(name)["provider_fallback"])
+
+
+def system_theme(app=None):
+    """The OS light/dark preference, or None when it cannot be determined.
+
+    Qt reports ``Unknown`` on some platforms and in headless sessions, so
+    that is reported as "no preference" and the caller decides the
+    fallback rather than this function guessing.
+    """
+    try:
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QGuiApplication
+
+        holder = app if app is not None else QGuiApplication.instance()
+        if holder is None:
+            return None
+        scheme = holder.styleHints().colorScheme()
+        if scheme == Qt.ColorScheme.Light:
+            return LIGHT
+        if scheme == Qt.ColorScheme.Dark:
+            return DARK
+    except Exception:
+        return None
+    return None
+
+
+def resolve_theme(settings, app=None):
+    """Pick a theme from stored preferences, then the OS, then dark.
+
+    An explicit stored choice always wins, so a user who picks a theme
+    keeps it even if their OS later changes.
+    """
+    stored = (settings or {}).get("theme")
+    if stored in THEME_NAMES:
+        return stored
+    return system_theme(app) or DARK
+
+
+# --- stylesheets -----------------------------------------------------------
+
 THEME = """
 QWidget { color: #dbdee1; font-family: 'Segoe UI'; font-size: 13px; }
 QMainWindow, QDialog { background: #313338; }
@@ -55,13 +212,123 @@ QToolTip { background: #111214; color: #dbdee1; border: none; padding: 8px; }
 QDialogButtonBox QPushButton { min-width: 85px; }
 """
 
-PROVIDER_NAMES = {"ollama": ("Ollama", "Local models, on your terms.", "O", "#a59af5"),
-    "bionic": ("Bionic GPT", "Your private Bionic deployment.", "B", "#58b89c"),
-    "openai": ("OpenAI", "Responses API for your team.", "◎", "#67bd9a"),
-    "anthropic": ("Claude", "A thoughtful collaboration partner.", "✳", "#d8a184"),
-    "gemini": ("Gemini", "Google models in your workspace.", "✦", "#7eacff"),
-    "groq": ("Groq", "Fast inference. More momentum.", "g", "#ee9b7d"),
-    "deepseek": ("DeepSeek", "A fresh perspective on your work.", "≈", "#78a6eb"),
-    "mistral": ("Mistral", "Your choice of Mistral models.", "M", "#e7b16e"),
-    "openrouter": ("OpenRouter", "Many models. One connection.", "↗", "#a69aee"),
-    "openai-compatible": ("Custom endpoint", "Connect LM Studio, vLLM, and more.", "◇", "#a69aee")}
+LIGHT_THEME = """
+QWidget { color: #1f2124; font-family: 'Segoe UI'; font-size: 13px; }
+QMainWindow, QDialog { background: #f4f5f7; }
+QFrame#rail { background: #e3e5ea; border: none; }
+QFrame#sidebar { background: #ecedf1; border: none; }
+QFrame#topbar { background: #ffffff; border-bottom: 1px solid #dcdfe5; }
+QFrame#profile { background: #e6e8ed; border: none; }
+QFrame#card, QFrame#stat, QFrame#settings { background: #ffffff; border: 1px solid #dcdfe5; border-radius: 12px; }
+QFrame#hero { background: #e6e8fb; border: 1px solid #c3c7f0; border-radius: 16px; }
+QLabel { background: transparent; }
+QLabel#title { font-size: 31px; font-weight: 700; color: #111214; }
+QLabel#heroTitle { font-size: 34px; font-weight: 700; color: #1b1d3a; }
+QLabel#heading { font-size: 19px; font-weight: 650; color: #111214; }
+QLabel#muted { color: #5c6069; }
+QLabel#eyebrow { color: #4c56d8; font-size: 10px; font-weight: 650; }
+QLabel#statValue { font-size: 30px; color: #111214; font-weight: 650; }
+QLabel#online { color: #1e7d43; }
+QPushButton { background: #e2e4ea; border: 0; border-radius: 7px; padding: 10px 16px; color: #1f2124; font-weight: 550; }
+QPushButton:hover { background: #d5d8e0; color: #111214; }
+QPushButton:pressed { background: #ccd0da; }
+QPushButton:disabled { background: #eceef2; color: #a2a6ae; }
+QPushButton#primary { background: #4c56d8; color: white; }
+QPushButton#primary:hover { background: #5f68e2; }
+QPushButton#primary:pressed { background: #3f47b8; }
+QPushButton#primary:disabled { background: #b6bbe0; color: #ffffff; }
+QPushButton#nav { background: transparent; text-align: left; color: #4a4e57; padding: 11px 15px; }
+QPushButton#nav:hover { background: #dfe2e8; color: #1f2124; }
+QPushButton#nav:checked { background: #d5d8e0; color: #111214; }
+QPushButton#workspace { background: #ffffff; border-radius: 16px; font-size: 20px; padding: 0; color: #1f2124; }
+QPushButton#workspace:hover, QPushButton#workspace:checked { background: #4c56d8; border-radius: 16px; color: white; }
+QPushButton#ghost { background: transparent; color: #4a4e57; padding: 7px 10px; }
+QPushButton#ghost:hover { background: #dfe2e8; }
+QPushButton#danger { background: #fbe4e2; color: #c0392b; }
+QLineEdit, QPlainTextEdit, QComboBox { background: #ffffff; color: #1f2124; border: 1px solid #c8ccd4; border-radius: 7px; padding: 10px; selection-background-color: #4c56d8; }
+QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus { border: 1px solid #4c56d8; }
+QComboBox::drop-down { border: 0; width: 24px; }
+QComboBox QAbstractItemView { background: #ffffff; color: #1f2124; selection-background-color: #4c56d8; padding: 5px; border: 1px solid #c8ccd4; }
+QCheckBox { spacing: 8px; color: #3f434b; }
+QCheckBox::indicator { width: 16px; height: 16px; border-radius: 4px; background: #ffffff; border: 1px solid #a8adb8; }
+QCheckBox::indicator:checked { background: #4c56d8; border-color: #3f47b8; }
+QScrollArea { background: transparent; border: none; }
+QScrollArea > QWidget > QWidget { background: transparent; }
+QScrollBar:vertical { background: #eceef2; width: 7px; margin: 3px; }
+QScrollBar::handle:vertical { background: #b8bdc7; min-height: 28px; border-radius: 3px; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
+QListWidget { border: none; background: transparent; outline: 0; }
+QListWidget::item { padding: 14px 12px; border-radius: 7px; color: #3f434b; }
+QListWidget::item:selected { background: #e2e4ea; color: #111214; }
+QListWidget::item:hover { background: #eceef2; }
+QProgressBar { background: #e2e4ea; border: none; border-radius: 3px; max-height: 5px; }
+QProgressBar::chunk { background: #4c56d8; border-radius: 3px; }
+QToolTip { background: #23252a; color: #f2f3f5; border: none; padding: 8px; }
+QDialogButtonBox QPushButton { min-width: 85px; }
+"""
+
+THEMES = {DARK: THEME, LIGHT: LIGHT_THEME}
+
+
+def stylesheet(name):
+    """The Qt stylesheet for a theme, falling back to dark."""
+    return THEMES.get(name, THEMES[DARK])
+
+
+# --- providers -------------------------------------------------------------
+
+# (display name, blurb, glyph, accent) per provider.
+_PROVIDER_META = {
+    "ollama": ("Ollama", "Local models, on your terms.", "O"),
+    "bionic": ("Bionic GPT", "Your private Bionic deployment.", "B"),
+    "openai": ("OpenAI", "Responses API for your team.", "◎"),
+    "anthropic": ("Claude", "A thoughtful collaboration partner.", "✳"),
+    "gemini": ("Gemini", "Google models in your workspace.", "✦"),
+    "groq": ("Groq", "Fast inference. More momentum.", "g"),
+    "deepseek": ("DeepSeek", "A fresh perspective on your work.", "≈"),
+    "mistral": ("Mistral", "Your choice of Mistral models.", "M"),
+    "openrouter": ("OpenRouter", "Many models. One connection.", "↗"),
+    "openai-compatible": ("Custom endpoint", "Connect LM Studio, vLLM, and more.", "◇"),
+}
+
+_DARK_ACCENTS = {
+    "ollama": "#a59af5", "bionic": "#58b89c", "openai": "#67bd9a",
+    "anthropic": "#d8a184", "gemini": "#7eacff", "groq": "#ee9b7d",
+    "deepseek": "#78a6eb", "mistral": "#e7b16e", "openrouter": "#a69aee",
+    "openai-compatible": "#a69aee",
+}
+
+# Mint, lavender and sand all lose contrast on white, so the light set
+# deepens them rather than reusing the dark values.
+_LIGHT_ACCENTS = {
+    "ollama": "#5b4fd1", "bionic": "#1f7a63", "openai": "#1f7a5e",
+    "anthropic": "#a2603a", "gemini": "#2f6ed0", "groq": "#b4522a",
+    "deepseek": "#2f6bb5", "mistral": "#96601f", "openrouter": "#6357c4",
+    "openai-compatible": "#6357c4",
+}
+
+PROVIDER_ACCENTS = {DARK: _DARK_ACCENTS, LIGHT: _LIGHT_ACCENTS}
+
+
+def provider_entry(name, provider_key):
+    """``(display, blurb, glyph, accent)`` for a provider in a theme.
+
+    Unknown providers fall back to a neutral entry rather than raising:
+    agent records persist across versions, so a provider key the running
+    build no longer knows must not break the agent list. The fallback
+    glyph matches what the agent list used before this was centralised.
+    """
+    meta = _PROVIDER_META.get(provider_key)
+    accent = provider_color(name, provider_key)
+    if meta is None:
+        return ("Connectivity agent", "", "⌘", accent)
+    return (meta[0], meta[1], meta[2], accent)
+
+
+def provider_names(name):
+    """``{key: (display, blurb, glyph, accent)}`` for every provider."""
+    return {key: provider_entry(name, key) for key in _PROVIDER_META}
+
+
+PROVIDER_NAMES = provider_names(DARK)
