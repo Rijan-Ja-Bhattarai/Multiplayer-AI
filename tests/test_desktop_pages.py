@@ -17,7 +17,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6", reason="PySide6 is needed for the desktop page tests")
 pytest.importorskip("psutil", reason="psutil backs the Resources page")
 
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtCore import QTimer  # noqa: E402
+from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton  # noqa: E402
 
 from desktop_app import window as win  # noqa: E402
 from desktop_app.storage import Storage  # noqa: E402
@@ -258,3 +259,70 @@ def test_sidebar_hides_when_the_window_is_narrow(window) -> None:
     window.resize(1500, 900)
     window.apply_sidebar_density()
     assert window.sidebar.isHidden() is False
+
+
+
+def test_settings_page_offers_the_identity_reset(window) -> None:
+    """Settings is where a user goes to replace an exposed token."""
+    window.navigate(win.SETTINGS_PAGE)
+    labels = [button.text() for button in window.findChildren(QPushButton)]
+
+    assert any("Reset local identity" in text for text in labels)
+
+
+def _reset_dialog_answer(window, answer):
+    """Run confirm_reset_identity with the dialog auto-answered.
+
+    QMessageBox.exec() blocks, so it is entered through a timer that
+    clicks the chosen button. Without this the test would hang forever
+    under the offscreen platform, where nobody can dismiss a dialog.
+    """
+    calls = []
+    window.command = calls.append
+
+    def answer_it():
+        for widget in QApplication.topLevelWidgets():
+            if isinstance(widget, QMessageBox):
+                widget.button(answer).click()
+                return
+
+    QTimer.singleShot(0, answer_it)
+    window.confirm_reset_identity()
+    return calls
+
+
+def test_choosing_reset_dispatches_the_command(window) -> None:
+    """Confirming Reset asks the runtime to replace the identity."""
+    calls = _reset_dialog_answer(window, QMessageBox.StandardButton.Reset)
+
+    assert calls == ["reset_identity"]
+
+
+def test_cancelling_does_nothing(window) -> None:
+    """Cancelling must leave the identity alone."""
+    calls = _reset_dialog_answer(window, QMessageBox.StandardButton.Cancel)
+
+    assert calls == []
+
+
+def test_the_destructive_dialog_defaults_to_cancel(window) -> None:
+    """A stray Enter must not discard the token.
+
+    Otherwise the default button would reset the identity without the
+    user having chosen Reset.
+"""
+    seen = {}
+    original = QMessageBox.exec
+
+    def capture(self):
+        seen["box"] = self
+        return int(QMessageBox.StandardButton.Cancel)
+
+    QMessageBox.exec = capture
+    try:
+        _reset_dialog_answer(window, QMessageBox.StandardButton.Reset)
+    finally:
+        QMessageBox.exec = original
+
+    box = seen["box"]
+    assert box.defaultButton() is box.button(QMessageBox.StandardButton.Cancel)

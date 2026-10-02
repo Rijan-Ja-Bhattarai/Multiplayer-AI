@@ -10,7 +10,7 @@ from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt, QTimer
 from PySide6.QtGui import (QGuiApplication, QIcon, QKeySequence, QPixmap, QPainter, QColor,
                            QFont, QShortcut)
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QFrame, QGraphicsOpacityEffect, QGridLayout, QHBoxLayout,
-    QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QProgressBar, QScrollArea,
+    QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QProgressBar, QScrollArea,
     QStackedWidget, QVBoxLayout, QWidget)
 
 from .bridge import NetworkThread
@@ -482,6 +482,17 @@ class MainWindow(QMainWindow):
         self.storage_path.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         column.addWidget(self.storage_path)
         column.addWidget(action("Show in file manager", self.open_storage_folder))
+        identity, column = frame("settings")
+        column.setContentsMargins(22, 18, 22, 20)
+        column.addWidget(label("Device identity", "heading"))
+        column.addWidget(label(
+            "Your device holds a private token in the operating system's credential "
+            "store. Reset it if you think the token has been exposed. Workspaces "
+            "joined with the old identity will need new invitations.",
+            "muted", True))
+        column.addWidget(action("Reset local identity", self.confirm_reset_identity,
+                                name="danger"))
+        layout.addWidget(identity)
         layout.addWidget(storage)
 
         about, column = frame("settings")
@@ -493,6 +504,25 @@ class MainWindow(QMainWindow):
         layout.addWidget(about)
         layout.addStretch()
         return page
+
+    def confirm_reset_identity(self):
+        """Ask before discarding the device token.
+
+        The action cannot be undone and any joined workspace stops
+        working, so it is confirmed rather than fired on a single click.
+        """
+        confirm = QMessageBox(self)
+        confirm.setWindowTitle("Reset local identity?")
+        confirm.setIcon(QMessageBox.Icon.Warning)
+        confirm.setText("Your device will get a new private identity.")
+        confirm.setInformativeText(
+            "Workspaces joined with the current identity will stop connecting and "
+            "will need a new invitation. Connected agents are stopped and restarted.")
+        confirm.setStandardButtons(QMessageBox.StandardButton.Cancel |
+                                   QMessageBox.StandardButton.Reset)
+        confirm.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        if confirm.exec() == QMessageBox.StandardButton.Reset:
+            self.command("reset_identity")
 
     def open_storage_folder(self):
         """Reveal the preferences directory in the platform's file manager."""
