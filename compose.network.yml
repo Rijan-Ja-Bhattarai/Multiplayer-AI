@@ -1,0 +1,29 @@
+services:
+  relay:
+    build:
+      context: .
+      dockerfile: Dockerfile.network
+    restart: unless-stopped
+    environment:
+      A2A_CREDENTIALS_FILE: /run/secrets/credentials.json
+    volumes:
+      - ./credentials.json:/run/secrets/credentials.json:ro
+    expose:
+      - "8000"
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      A2A_DOMAIN: ${A2A_DOMAIN:?Set A2A_DOMAIN to your public DNS name}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile.network:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - relay
+volumes:
+  caddy_data:
+  caddy_config:
