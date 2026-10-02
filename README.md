@@ -27,8 +27,12 @@ in `src/agents/gateway.py`. See below and [Scope](#scope).
 
 The native Multiplayer AI desktop app starts its local relay, creates a private
 device identity, and connects automatically. Configure model providers, invite
-devices, join shared relays, and chat with agents from its dark desktop workspace.
+devices, join shared relays, and chat with agents from its desktop workspace.
 See the [desktop guide](DESKTOP_GUIDE.md) to get started.
+
+The desktop app runs in a dark or a light theme. With nothing stored it follows
+your operating system's light or dark preference; the **Light theme** checkbox on
+the Providers page switches immediately and the choice is remembered.
 
 The authenticated relay and reconnecting device client in `network_a2a/`
 connect multiple laptops/desktops over LAN or the internet. They route requests
@@ -314,11 +318,30 @@ that run a real relay, a real agent, and a real client together with nothing
 mocked. Additional relay and adapter tests cover multi-device messaging,
 reconnection, provider request formats, and safe failures.
 
+Theme tests come in two layers. The palette tests need nothing extra: they check
+that both themes style the same set of widgets and that every colour token
+exists in both. The widget tests need `PySide6` and build a real window
+headlessly, skipping themselves if it is absent.
+
 Run a subset:
 
 ```bash
 python -m pytest tests/test_agent_integration.py -v
 ```
+
+### Desktop dependencies
+
+The Connection Server and the relay need only what `environment.yml` declares.
+The **desktop app** additionally needs Qt and an OS credential store, which are
+not in that file:
+
+```bash
+python -m pip install "PySide6>=6.8,<7" "keyring>=25,<27"
+```
+
+Prefer that to `pip install -r requirements-desktop.txt`, which pins
+`starlette`, `uvicorn` and `websockets` to versions older than the ones in
+`environment.yml` and would downgrade them in the shared environment.
 
 Known warnings: Starlette's `TestClient` reports that `httpx` is deprecated
 in favour of `httpx2`; `websockets` reports an un-awaited `aclose` when a
