@@ -37,6 +37,10 @@ the activated `Multiplayer-AI` Conda environment, for the commands below.
 
 ## Ollama on a laptop
 
+You can configure providers directly in the native desktop app. Choose
+**Providers**, select a model, and click **Connect agent**. The app starts the
+agent in its own process; no terminal command is needed. See [DESKTOP_GUIDE.md](DESKTOP_GUIDE.md).
+
 Start Ollama and pull the model you want (for example `ollama pull llama3.2`).
 Set this device's relay token, then start its agent:
 
