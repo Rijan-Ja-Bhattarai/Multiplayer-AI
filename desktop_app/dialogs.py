@@ -6,8 +6,19 @@ from PySide6.QtWidgets import QCheckBox, QComboBox, QDialog, QFormLayout, QHBoxL
 
 from network_a2a.adapters import PROVIDERS
 
-from .theme import PROVIDER_NAMES
+from .theme import PROVIDER_NAMES, color
 from .widgets import action, label
+
+
+def _style_error(widget, window):
+    """Colour a dialog's error label for the window's current theme.
+
+    Each dialog already holds its parent window, so it can read the live
+    theme rather than being handed one. An error label carries its own
+    stylesheet, which outranks the application sheet and would otherwise
+    stay on the dark-theme colour after a light switch.
+    """
+    widget.setStyleSheet("color: " + color(window.theme, "error") + ";")
 
 
 class AgentDialog(QDialog):
@@ -56,7 +67,7 @@ class AgentDialog(QDialog):
         self.layout.addWidget(self.autostart)
         self.layout.addWidget(self.insecure)
         self.error = label("", "muted", True)
-        self.error.setStyleSheet("color: #f38a8e;")
+        _style_error(self.error, self.window)
         self.layout.addWidget(self.error)
         row = QHBoxLayout()
         row.addWidget(action("Cancel", self.reject))
@@ -147,7 +158,7 @@ class JoinDialog(QDialog):
         self.insecure = QCheckBox("This is a trusted LAN connection (allow ws://)")
         layout.addWidget(self.insecure)
         self.error = label("", "muted", True)
-        self.error.setStyleSheet("color:#f38a8e")
+        _style_error(self.error, self.window)
         layout.addWidget(self.error)
         self.connect_button = action("Join workspace", self.join, True)
         layout.addWidget(self.connect_button)
@@ -209,7 +220,7 @@ class InviteDialog(QDialog):
         layout.addWidget(self.url)
         layout.addWidget(label("LAN sharing makes this relay listen for connections from other devices while the app is open. Your firewall must allow its port. For internet access, enter the WSS address of a TLS proxy pointing to this relay, or join a hosted relay.", "muted", True))
         self.error = label("", "muted", True)
-        self.error.setStyleSheet("color:#f38a8e")
+        _style_error(self.error, self.window)
         layout.addWidget(self.error)
         self.create_button = action("Create invitation", self.create, True)
         layout.addWidget(self.create_button)

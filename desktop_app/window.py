@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (QCheckBox, QFrame, QGraphicsOpacityEffect, QGridL
 
 from .bridge import NetworkThread
 from .dialogs import AgentDialog, InviteDialog, JoinDialog
-from .theme import PROVIDER_NAMES, THEME
+from .theme import DARK, LIGHT, color, provider_entry, provider_names, resolve_theme, stylesheet
 from .widgets import Composer, OrbitArt, WorkspaceButton, action, label
 
 
@@ -29,15 +29,20 @@ def clear_layout(layout):
             clear_layout(item.layout())
 
 
-def app_icon():
+def app_icon(theme_name=DARK):
+    """The window and taskbar icon, drawn in the accent colour.
+
+    Painted rather than themed, so the accent is read from the palette
+    instead of hardcoded.
+    """
     pixmap = QPixmap(64, 64)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    painter.setBrush(QColor("#5865f2"))
+    painter.setBrush(QColor(color(theme_name, "accent")))
     painter.setPen(Qt.PenStyle.NoPen)
     painter.drawRoundedRect(0, 0, 64, 64, 20, 20)
-    painter.setPen(QColor("white"))
+    painter.setPen(QColor(color(theme_name, "on_accent")))
     painter.setFont(QFont("Segoe UI", 27, QFont.Weight.Bold))
     painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "M")
     painter.end()
@@ -59,10 +64,13 @@ class MainWindow(QMainWindow):
         self.ready = False
         self.closing = False
         self.setWindowTitle("Multiplayer AI")
-        self.setWindowIcon(app_icon())
+        # Resolved before any widget is built so everything created below
+        # picks up the right colours the first time.
+        self.theme = resolve_theme(storage.settings)
+        self.setWindowIcon(app_icon(self.theme))
         self.resize(1330, 910)
         self.setMinimumSize(1010, 690)
-        self.setStyleSheet(THEME)
+        self.setStyleSheet(stylesheet(self.theme))
         self.network = NetworkThread(storage, self)
         self.network.event.connect(self.network_event)
         self.network.completed.connect(self.command_success)
@@ -90,7 +98,8 @@ class MainWindow(QMainWindow):
         local.clicked.connect(lambda: self.navigate(0))
         rail_layout.addWidget(local)
         join = WorkspaceButton("+")
-        join.setStyleSheet("color:#3ba55d")
+        self.join_button = join
+        join.setStyleSheet("color:" + color(self.theme, "success"))
         join.setToolTip("Join a workspace")
         join.clicked.connect(self.join_workspace)
         rail_layout.addWidget(join)
@@ -131,8 +140,11 @@ class MainWindow(QMainWindow):
         profile, row = frame("profile", QHBoxLayout)
         row.setContentsMargins(10, 16, 10, 16)
         avatar = label(" M ")
+        self.avatar = avatar
         avatar.setFixedWidth(34)
-        avatar.setStyleSheet("background:#5865f2; border-radius:14px; padding:6px; font-weight:700;")
+        avatar.setStyleSheet("background:" + color(self.theme, "accent")
+                             + "; border-radius:14px; padding:6px; font-weight:700;"
+                             + " color:" + color(self.theme, "on_accent") + ";")
         row.addWidget(avatar)
         copy = QVBoxLayout()
         copy.addWidget(label("This device"))
@@ -158,7 +170,7 @@ class MainWindow(QMainWindow):
         top_layout.addWidget(self.add_button)
         body_layout.addWidget(top)
         self.toast = label("", wrap=True)
-        self.toast.setStyleSheet("background:#243c32; color:#b3e4c7; padding:12px 24px;")
+        self.style_toast()
         self.toast.hide()
         body_layout.addWidget(self.toast)
         self.progress = QProgressBar()
@@ -291,9 +303,11 @@ class MainWindow(QMainWindow):
         layout.addWidget(label("Configure a provider once. The app starts its agent for you, every time.", "muted"))
         grid = QGridLayout()
         grid.setSpacing(16)
-        for index, (provider, info) in enumerate(PROVIDER_NAMES.items()):
+        providers = provider_names(self.theme)
+        for index, provider in enumerate(providers):
             card, column = frame("card")
             column.setContentsMargins(21, 20, 21, 20)
+            info = providers[provider]
             glyph = label(info[2])
             glyph.setStyleSheet(f"font-size:27px; color:{info[3]}; font-weight:650;")
             column.addWidget(glyph)
@@ -309,6 +323,12 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.reduce_motion)
         layout.addStretch()
         return page
+
+    def style_toast(self):
+        """Repaint the toast in the current theme's success colours."""
+        self.toast.setStyleSheet("background:" + color(self.theme, "toast_bg")
+                                 + "; color:" + color(self.theme, "toast_fg")
+                                 + "; padding:12px 24px;")
 
     def motion_changed(self, reduced):
         self.storage.settings["reduce_motion"] = reduced
@@ -346,7 +366,7 @@ class MainWindow(QMainWindow):
                 card, column = frame("card")
                 column.setContentsMargins(18, 17, 18, 17)
                 top = QHBoxLayout()
-                info = PROVIDER_NAMES.get(agent.get("provider"), ("Connectivity agent", "", "⌘", "#a59af5"))
+                info = provider_entry(self.theme, agent.get("provider"))
                 glyph = label(info[2])
                 glyph.setStyleSheet(f"color:{info[3]}; font-size:24px;")
                 top.addWidget(glyph)
@@ -410,7 +430,8 @@ class MainWindow(QMainWindow):
             bubble, column = frame("card")
             column.setContentsMargins(17, 13, 17, 13)
             title = label("You" if role == "user" else "Request unsuccessful" if role == "error" else "Agent on this device" if role == "local_agent" else self.selected)
-            title.setStyleSheet("font-weight:650; color:" + ("#f38a8e" if role == "error" else "#a8b0ff") + ";")
+            title.setStyleSheet("font-weight:650; color:"
+                                + color(self.theme, "error" if role == "error" else "agent_title") + ";")
             column.addWidget(title)
             body = label(text, wrap=True)
             body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
