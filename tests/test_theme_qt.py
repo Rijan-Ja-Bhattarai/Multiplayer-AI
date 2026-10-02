@@ -107,26 +107,6 @@ def test_apply_theme_replaces_the_stylesheet(window) -> None:
     assert window.styleSheet() == stylesheet(DARK)
 
 
-def test_apply_theme_updates_the_toggle_without_recursion(window) -> None:
-    """The checkbox reflects the applied theme and does not re-trigger."""
-    window.apply_theme(LIGHT)
-
-    assert window.light_theme.isChecked() is True
-
-    window.apply_theme(DARK)
-    assert window.light_theme.isChecked() is False
-
-
-def test_theme_changed_persists_the_choice(window) -> None:
-    """Toggling the checkbox writes an explicit preference."""
-    window.light_theme.setChecked(True)
-    assert window.storage.settings["theme"] == LIGHT
-    assert window.theme == LIGHT
-
-    window.light_theme.setChecked(False)
-    assert window.storage.settings["theme"] == DARK
-
-
 def test_apply_theme_repaints_the_custom_painted_widget(window) -> None:
     """OrbitArt is hand-painted, so it needs telling about the theme."""
     window.apply_theme(LIGHT)

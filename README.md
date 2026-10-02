@@ -30,9 +30,16 @@ device identity, and connects automatically. Configure model providers, invite
 devices, join shared relays, and chat with agents from its desktop workspace.
 See the [desktop guide](DESKTOP_GUIDE.md) to get started.
 
-The desktop app runs in a dark or a light theme. With nothing stored it follows
-your operating system's light or dark preference; the **Light theme** checkbox on
-the Providers page switches immediately and the choice is remembered.
+The desktop app runs in a dark, a light, or a Miku theme. With nothing stored
+it follows your operating system's light or dark preference; the **Theme**
+setting on the Settings page switches immediately and the choice is remembered.
+Selecting "Follow system" again returns control to the OS.
+
+Text contrast is enforced by the test suite rather than by eye: the pairings
+that carry text are declared in `desktop_app/theme.py` and checked, so a theme
+that measured badly could not be added. The Miku palette supplied for this work
+had every text pairing between 1.09:1 and 2.00:1, so its colours are used as
+accents over a neutral scale rather than as given.
 
 The authenticated relay and reconnecting device client in `network_a2a/`
 connect multiple laptops/desktops over LAN or the internet. They route requests
@@ -318,15 +325,20 @@ that run a real relay, a real agent, and a real client together with nothing
 mocked. Additional relay and adapter tests cover multi-device messaging,
 reconnection, provider request formats, and safe failures.
 
-Theme tests come in two layers. The palette tests need nothing extra: they check
-that both themes style the same set of widgets and that every colour token
-exists in both. The widget tests need `PySide6` and build a real window
-headlessly, skipping themselves if it is absent.
+Theme tests come in three layers. The palette tests need nothing extra: they
+check that every theme styles the same set of widgets and that every colour
+token exists in all of them. The contrast tests check each declared text
+pairing against the ratio its class requires. The widget tests need `PySide6`
+and build a real window headlessly, skipping themselves if it is absent.
+
+Window sizing is tested as plain arithmetic against common screen shapes, so
+a request that does not fit a 1366x768 laptop fails the build rather than
+opening clipped.
 
 Run a subset:
 
 ```bash
-python -m pytest tests/test_agent_integration.py -v
+python -m pytest tests/test_desktop_pages.py -v
 ```
 
 ### Desktop dependencies

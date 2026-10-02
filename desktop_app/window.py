@@ -1,15 +1,24 @@
+import PySide6
 import json
+import os
+import platform
+import subprocess
+import sys
 from datetime import datetime
 
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt, QTimer
-from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QFont
-from PySide6.QtWidgets import (QCheckBox, QFrame, QGraphicsOpacityEffect, QGridLayout, QHBoxLayout,
+from PySide6.QtGui import (QGuiApplication, QIcon, QKeySequence, QPixmap, QPainter, QColor,
+                           QFont, QShortcut)
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QFrame, QGraphicsOpacityEffect, QGridLayout, QHBoxLayout,
     QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QProgressBar, QScrollArea,
     QStackedWidget, QVBoxLayout, QWidget)
 
 from .bridge import NetworkThread
 from .dialogs import AgentDialog, InviteDialog, JoinDialog
-from .theme import DARK, LIGHT, color, provider_entry, provider_names, resolve_theme, stylesheet
+from .layout import minimum_size, sidebar_should_collapse, window_size
+from .resources import ResourceSampler
+from .theme import (DARK, LIGHT, THEME_CHOICES, color, provider_entry, provider_names,
+                    resolve_theme, stylesheet, system_theme)
 from .widgets import Composer, OrbitArt, WorkspaceButton, action, label
 
 
@@ -27,6 +36,23 @@ def clear_layout(layout):
             item.widget().deleteLater()
         elif item.layout():
             clear_layout(item.layout())
+
+
+# Navigation is declarative because the nav buttons, the stacked pages and
+# the page title all have to agree on order and length. Adding a page here
+# and nowhere else used to mean fixing the title list as well, which is
+# exactly the kind of duplication that goes stale.
+PAGES = (
+    ("◫   Overview", "overview"),
+    ("⌘   Agents", "agents"),
+    ("▤   Conversations", "conversations"),
+    ("◇   Providers", "providers"),
+    ("◴   Resources", "resources"),
+    ("⚙   Settings", "settings"),
+)
+PAGE_TITLES = tuple(f"#  {key}" for _, key in PAGES)
+RESOURCES_PAGE = 4
+SETTINGS_PAGE = 5
 
 
 def app_icon(theme_name=DARK):
@@ -68,9 +94,17 @@ class MainWindow(QMainWindow):
         # picks up the right colours the first time.
         self.theme = resolve_theme(storage.settings)
         self.setWindowIcon(app_icon(self.theme))
-        self.resize(1330, 910)
-        self.setMinimumSize(1010, 690)
+        width, height = window_size(self.stored_window_size(), storage.settings,
+                                    self.primary_screen_size())
+        self.resize(width, height)
+        self.setMinimumSize(*minimum_size(self.primary_screen_size()))
         self.setStyleSheet(stylesheet(self.theme))
+        # Measuring the disk the preferences live on is what the Resources
+        # page reports, so it is resolved once here.
+        try:
+            self.sampler = ResourceSampler(storage.directory)
+        except Exception:
+            self.sampler = None
         self.network = NetworkThread(storage, self)
         self.network.event.connect(self.network_event)
         self.network.completed.connect(self.command_success)
@@ -111,6 +145,7 @@ class MainWindow(QMainWindow):
         shell.addWidget(rail)
         sidebar, side = frame("sidebar")
         sidebar.setFixedWidth(238)
+        self.sidebar = sidebar
         side.setContentsMargins(14, 22, 14, 0)
         side.setSpacing(8)
         self.workspace_label = label("My workspace", "heading")
@@ -119,7 +154,7 @@ class MainWindow(QMainWindow):
         side.addSpacing(25)
         side.addWidget(label("WORKSPACE", "eyebrow"))
         self.nav_buttons = []
-        for index, name in enumerate(("◫   Overview", "⌘   Agents", "▤   Conversations", "◇   Providers")):
+        for index, (name, _key) in enumerate(PAGES):
             button = action(name, lambda checked=False, page=index: self.navigate(page), name="nav")
             button.setCheckable(True)
             self.nav_buttons.append(button)
@@ -181,9 +216,40 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.agents_page())
         self.stack.addWidget(self.chat_page())
         self.stack.addWidget(self.providers_page())
+        self.stack.addWidget(self.resources_page())
+        self.stack.addWidget(self.settings_page())
         body_layout.addWidget(self.stack, 1)
         shell.addWidget(body, 1)
+        self.install_shortcuts()
+        self.apply_sidebar_density()
+        self.about_label.setText(
+            f"Multiplayer AI desktop · Python {platform.python_version()} · "
+            f"Qt {PySide6.__version__}"
+        )
+        self.update_theme_hint()
         self.navigate(0)
+
+    def install_shortcuts(self):
+        """Keyboard navigation, so the app is usable without a mouse."""
+        for index in range(len(PAGES)):
+            shortcut = QShortcut(QKeySequence(f"Ctrl+{index + 1}"), self)
+            shortcut.activated.connect(lambda page=index: self.navigate(page))
+        QShortcut(QKeySequence("Ctrl+,"), self).activated.connect(
+            lambda: self.navigate(SETTINGS_PAGE)
+        )
+        QShortcut(QKeySequence("F5"), self).activated.connect(self.refresh_resources)
+        QShortcut(QKeySequence("Ctrl+R"), self).activated.connect(self.refresh_resources)
+
+    def apply_sidebar_density(self):
+        """Hide the agent sidebar on a window too narrow to carry it."""
+        collapse = sidebar_should_collapse(self.width(), self.primary_screen_size())
+        self.sidebar.setVisible(not collapse)
+        if getattr(self, "chat_agents", None) is not None:
+            self.chat_agents.setVisible(not collapse)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.apply_sidebar_density()
 
     def scroll_page(self):
         scroll = QScrollArea()
@@ -317,18 +383,251 @@ class MainWindow(QMainWindow):
             column.addWidget(action("Connect model  →", lambda checked=False, key=provider: self.add_agent(key), True))
             grid.addWidget(card, index // 2, index % 2)
         layout.addLayout(grid)
+        layout.addStretch()
+        return page
+
+    def resources_page(self):
+        """Live CPU, memory, disk and process usage.
+
+        Sampling stops while this page is off screen. Polling a panel
+        nobody is looking at would spend the app's own CPU to display
+        nothing, which is self-defeating on a page about CPU usage.
+        """
+        page, layout = self.scroll_page()
+        layout.addWidget(label("WHAT YOUR MACHINE IS DOING", "eyebrow"))
+        layout.addWidget(label("Resources", "title"))
+        layout.addWidget(label("Live readings from this device. Nothing is sent anywhere.", "muted", True))
+
+        self.resource_timer = QTimer(self)
+        self.resource_timer.setInterval(2000)
+        self.resource_timer.timeout.connect(self.refresh_resources)
+
+        def meter(title, subtitle):
+            card, column = frame("stat")
+            column.setContentsMargins(18, 15, 18, 15)
+            column.addWidget(label(title, "muted"))
+            reading = label("—", "statValue")
+            column.addWidget(reading)
+            column.addWidget(label(subtitle, "muted"))
+            bar = QProgressBar()
+            bar.setRange(0, 100)
+            column.addSpacing(6)
+            column.addWidget(bar)
+            layout.addWidget(card)
+            return reading, bar
+
+        self.resource_rows = {
+            "cpu": meter("Processor", "Total load across all cores"),
+            "memory": meter("Memory", "In use across the whole system"),
+            "disk": meter("Disk", "Used on the drive holding this app's data"),
+        }
+
+        layout.addWidget(label("Per-core load", "heading"))
+        self.core_bars = []
+        self.core_grid = QGridLayout()
+        self.core_grid.setSpacing(10)
+        layout.addLayout(self.core_grid)
+
+        detail, column = frame("card")
+        column.setContentsMargins(20, 18, 20, 18)
+        column.addWidget(label("This application", "heading"))
+        self.app_detail = label("", "muted", True)
+        self.app_detail.setWordWrap(True)
+        column.addWidget(self.app_detail)
+        layout.addWidget(detail)
+
+        self.system_detail = label("", "muted", True)
+        self.system_detail.setWordWrap(True)
+        layout.addWidget(self.system_detail)
+        layout.addWidget(action("Refresh now", self.refresh_resources))
+        layout.addStretch()
+        return page
+
+    def settings_page(self):
+        """Appearance, motion, and where preferences live."""
+        page, layout = self.scroll_page()
+        layout.addWidget(label("MAKE IT YOURS", "eyebrow"))
+        layout.addWidget(label("Settings", "title"))
+
+        appearance, column = frame("settings")
+        column.setContentsMargins(22, 18, 22, 20)
+        column.addWidget(label("Appearance", "heading"))
+        column.addWidget(label("Theme", "muted"))
+        self.theme_picker = QComboBox()
+        for choice in THEME_CHOICES:
+            self.theme_picker.addItem(choice[0], choice[1])
+        self.theme_picker.setCurrentIndex(self._theme_choice_index())
+        self.theme_picker.currentIndexChanged.connect(self.theme_choice_changed)
+        column.addWidget(self.theme_picker)
+        self.theme_hint = label("", "muted", True)
+        self.theme_hint.setWordWrap(True)
+        column.addWidget(self.theme_hint)
+        layout.addWidget(appearance)
+
+        motion, column = frame("settings")
+        column.setContentsMargins(22, 18, 22, 20)
+        column.addWidget(label("Motion", "heading"))
         self.reduce_motion = QCheckBox("Reduce animations")
         self.reduce_motion.setChecked(self.storage.settings.get("reduce_motion", False))
         self.reduce_motion.toggled.connect(self.motion_changed)
-        layout.addWidget(self.reduce_motion)
-        self.light_theme = QCheckBox("Light theme")
-        # Reflects the theme in use, including one inherited from the OS,
-        # so the box never disagrees with what is on screen.
-        self.light_theme.setChecked(self.theme == LIGHT)
-        self.light_theme.toggled.connect(self.theme_changed)
-        layout.addWidget(self.light_theme)
+        column.addWidget(self.reduce_motion)
+        column.addWidget(label("Turns off the welcome animation and page fades.", "muted", True))
+        layout.addWidget(motion)
+
+        storage, column = frame("settings")
+        column.setContentsMargins(22, 18, 22, 20)
+        column.addWidget(label("Data on this device", "heading"))
+        self.storage_path = label(str(self.storage.directory), "muted", True)
+        self.storage_path.setWordWrap(True)
+        self.storage_path.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        column.addWidget(self.storage_path)
+        column.addWidget(action("Show in file manager", self.open_storage_folder))
+        layout.addWidget(storage)
+
+        about, column = frame("settings")
+        column.setContentsMargins(22, 18, 22, 20)
+        column.addWidget(label("About", "heading"))
+        self.about_label = label("", "muted", True)
+        self.about_label.setWordWrap(True)
+        column.addWidget(self.about_label)
+        layout.addWidget(about)
         layout.addStretch()
         return page
+
+    def open_storage_folder(self):
+        """Reveal the preferences directory in the platform's file manager."""
+        path = str(self.storage.directory)
+        try:
+            if os.name == "nt":
+                os.startfile(path)  # noqa: S606 - Windows shell open is intended
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", path])
+            else:
+                subprocess.Popen(["xdg-open", path])
+        except Exception as exc:
+            self.notice(f"Could not open {path}: {exc}")
+
+    def refresh_resources(self):
+        """Take one reading and update every meter."""
+        if getattr(self, "sampler", None) is None:
+            return
+        reading = self.sampler.sample()
+
+        self.resource_rows["cpu"][0].setText(f"{reading['cpu']:.0f}%")
+        self.resource_rows["cpu"][1].setValue(int(reading["cpu"]))
+
+        memory = reading["memory"]
+        if memory:
+            self.resource_rows["memory"][0].setText(f"{memory['percent']:.0f}%")
+            self.resource_rows["memory"][1].setValue(int(memory["percent"]))
+        else:
+            self.resource_rows["memory"][0].setText("Unavailable")
+            self.resource_rows["memory"][1].setValue(0)
+
+        disk = reading["disk"]
+        if disk:
+            self.resource_rows["disk"][0].setText(f"{disk['percent']:.0f}%")
+            self.resource_rows["disk"][1].setValue(int(disk["percent"]))
+        else:
+            self.resource_rows["disk"][0].setText("Unavailable")
+            self.resource_rows["disk"][1].setValue(0)
+
+        cores = reading["per_core"] or []
+        while len(self.core_bars) < len(cores):
+            bar = QProgressBar()
+            bar.setRange(0, 100)
+            self.core_bars.append(bar)
+            self.core_grid.addWidget(bar, len(self.core_bars) // 2,
+                                     len(self.core_bars) % 2)
+        for bar, value in zip(self.core_bars, cores):
+            bar.setValue(int(value))
+
+        process = reading["process"]
+        if process:
+            self.app_detail.setText(
+                f"{process['memory_human']} resident · {process['cpu']:.0f}% of one "
+                f"core · {process['threads']} threads"
+            )
+        else:
+            self.app_detail.setText("Unavailable")
+
+        self.system_detail.setText(
+            f"Uptime {reading['uptime']} · {reading['core_count']} logical cores · "
+            f"preferences at {self.storage.directory}"
+        )
+
+    def _theme_choice_index(self):
+        """Where the stored preference sits in the picker.
+
+        An absent key means follow the system, which is the default entry.
+        """
+        stored = self.storage.settings.get("theme")
+        for index, choice in enumerate(THEME_CHOICES):
+            if choice[1] == stored:
+                return index
+        return 0
+
+    def update_theme_hint(self):
+        """Explain what the picker is currently doing."""
+        stored = self.storage.settings.get("theme")
+        if stored is None:
+            detected = system_theme() or "unknown"
+            self.theme_hint.setText(
+                f"Following your system, which reports {detected}. "
+                "Pick a theme to override it."
+            )
+        else:
+            self.theme_hint.setText("Your choice is remembered and overrides the system.")
+
+    def theme_choice_changed(self, index):
+        """Persist the picked theme and apply it.
+
+        Signals are blocked while the index is set programmatically so
+        applying a theme does not write the preference back and fight the
+        user's click.
+        """
+        if index < 0 or index >= len(THEME_CHOICES):
+            return
+        name = THEME_CHOICES[index][1]
+        if name is None:
+            self.storage.settings.pop("theme", None)
+            self.apply_theme(resolve_theme({}))
+        else:
+            self.storage.settings["theme"] = name
+            self.storage.save()
+            self.apply_theme(name)
+        self.update_theme_hint()
+
+    def primary_screen_size(self):
+        """Usable area of the screen the window is opening on.
+
+        Read from the screen the window actually lands on rather than the
+        primary one, so a window dragged to a second monitor is sized for
+        that monitor.
+        """
+        try:
+            screen = self.screen() or QGuiApplication.primaryScreen()
+            if screen is not None:
+                area = screen.availableGeometry()
+                return area.width(), area.height()
+        except Exception:
+            pass
+        return None
+
+    def stored_window_size(self):
+        """The size saved from the previous session, if any."""
+        stored = self.storage.settings.get("window_size")
+        if not stored:
+            return None
+        try:
+            return int(stored[0]), int(stored[1])
+        except (TypeError, ValueError, IndexError):
+            return None
+
+    def remember_window_size(self):
+        """Save the current size so the next launch opens at the same one."""
+        self.storage.settings["window_size"] = [self.width(), self.height()]
+        self.storage.save()
 
     def style_toast(self):
         """Repaint the toast in the current theme's success colours."""
@@ -356,10 +655,10 @@ class MainWindow(QMainWindow):
                                   + " color:" + color(name, "on_accent") + ";")
         if hasattr(self, "orbit"):
             self.orbit.set_theme(name)
-        if hasattr(self, "light_theme"):
-            self.light_theme.blockSignals(True)
-            self.light_theme.setChecked(name == LIGHT)
-            self.light_theme.blockSignals(False)
+        if hasattr(self, "theme_picker"):
+            self.theme_picker.blockSignals(True)
+            self.theme_picker.setCurrentIndex(self._theme_choice_index())
+            self.theme_picker.blockSignals(False)
         if hasattr(self, "selected"):
             self.render_agents()
             self.render_messages()
@@ -380,7 +679,14 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentIndex(index)
         for number, button in enumerate(self.nav_buttons):
             button.setChecked(number == index)
-        self.page_title.setText(("#  overview", "#  agents", "#  conversations", "#  providers")[index])
+        self.page_title.setText(PAGE_TITLES[index])
+        # Sampling runs only while the Resources page is on screen.
+        if getattr(self, "resource_timer", None) is not None:
+            if index == RESOURCES_PAGE:
+                self.refresh_resources()
+                self.resource_timer.start()
+            else:
+                self.resource_timer.stop()
         if not self.storage.settings.get("reduce_motion"):
             widget = self.stack.currentWidget()
             effect = QGraphicsOpacityEffect(widget)
@@ -631,6 +937,12 @@ class MainWindow(QMainWindow):
         event.ignore()
         if not self.closing:
             self.closing = True
+            # Remembered before the shutdown begins, because that path
+            # ends in a second close that must not overwrite it.
+            try:
+                self.remember_window_size()
+            except Exception:
+                pass
             self.setEnabled(False)
             self.toast.setText("Disconnecting agents and shutting down your local relay…")
             self.toast.show()

@@ -255,13 +255,24 @@ def system_theme(app=None):
 def resolve_theme(settings, app=None):
     """Pick a theme from stored preferences, then the OS, then dark.
 
-    An explicit stored choice always wins, so a user who picks a theme
-    keeps it even if their OS later changes.
+    A stored name always wins, so a user who picks a theme keeps it even
+    if their OS later changes. An absent key means follow the system, and
+    so does an explicit "system".
     """
     stored = (settings or {}).get("theme")
     if stored in THEME_NAMES:
         return stored
     return system_theme(app) or DARK
+
+
+# (label, stored value). A stored value of None means "follow the system",
+# which is represented by leaving the key out of settings entirely.
+THEME_CHOICES = (
+    ("Follow system", None),
+    ("Dark", DARK),
+    ("Light", LIGHT),
+    ("Miku", MIKU),
+)
 
 
 # --- stylesheets -----------------------------------------------------------
