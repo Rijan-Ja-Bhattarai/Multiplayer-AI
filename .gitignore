@@ -1,0 +1,16 @@
+agent.md
+
+# Python build and cache artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Local environments
+.venv/
+venv/
+
+# Local configuration and logs
+.env
+*.log
