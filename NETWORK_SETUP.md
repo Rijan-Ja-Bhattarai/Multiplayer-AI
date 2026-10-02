@@ -82,6 +82,10 @@ Caddy terminates TLS and forwards WebSocket traffic to the relay. Once DNS and
 certificate issuance succeed, devices use `wss://agents.example.com/connect`.
 The public health endpoint is `https://agents.example.com/health`.
 
+Use the native desktop app's **Join workspace** dialog to connect to this relay
+with `wss://agents.example.com/connect` and your device token. The public server
+is API-only; it does not serve a browser dashboard. See [the desktop guide](DESKTOP_GUIDE.md).
+
 A home-hosted relay needs router forwarding and a reachable public IP; carrier
 NAT may prevent that. A VPS avoids that dependency. Device networks must permit
 outbound TLS/WebSocket connections to port 443. No implementation can guarantee
