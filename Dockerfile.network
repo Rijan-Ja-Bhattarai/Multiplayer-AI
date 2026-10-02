@@ -1,0 +1,8 @@
+FROM python:3.13-slim
+WORKDIR /app
+COPY requirements-network.txt .
+RUN pip install --no-cache-dir -r requirements-network.txt
+COPY network_a2a ./network_a2a
+USER 10001
+EXPOSE 8000
+CMD ["python", "-m", "uvicorn", "network_a2a.server:app_from_env", "--factory", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--ws-max-size", "262144", "--ws-ping-interval", "20", "--ws-ping-timeout", "20", "--no-proxy-headers"]
