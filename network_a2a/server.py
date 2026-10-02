@@ -14,6 +14,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocketDisconnect
 
+
 MAX_BYTES = 262144
 
 
@@ -170,8 +171,8 @@ class Relay:
         source = self.authenticate(request.headers.get("authorization", ""))
         if not source:
             return JSONResponse({"error": "Unauthorized"}, 401, headers={"WWW-Authenticate": "Bearer"})
-        return JSONResponse({"agents": [{"id": agent, "online": agent in self.peers}
-            for agent in self.credentials if self.allowed(source, agent)]})
+        return JSONResponse({"self": source, "agents": [{"id": agent, "online": agent in self.peers}
+            for agent in self.credentials if self.allowed(source, agent)]}, headers={"Cache-Control": "no-store"})
 
     async def http_invoke(self, request):
         source = self.authenticate(request.headers.get("authorization", ""))
