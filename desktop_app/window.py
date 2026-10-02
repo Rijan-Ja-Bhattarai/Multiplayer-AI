@@ -321,6 +321,12 @@ class MainWindow(QMainWindow):
         self.reduce_motion.setChecked(self.storage.settings.get("reduce_motion", False))
         self.reduce_motion.toggled.connect(self.motion_changed)
         layout.addWidget(self.reduce_motion)
+        self.light_theme = QCheckBox("Light theme")
+        # Reflects the theme in use, including one inherited from the OS,
+        # so the box never disagrees with what is on screen.
+        self.light_theme.setChecked(self.theme == LIGHT)
+        self.light_theme.toggled.connect(self.theme_changed)
+        layout.addWidget(self.light_theme)
         layout.addStretch()
         return page
 
@@ -329,6 +335,41 @@ class MainWindow(QMainWindow):
         self.toast.setStyleSheet("background:" + color(self.theme, "toast_bg")
                                  + "; color:" + color(self.theme, "toast_fg")
                                  + "; padding:12px 24px;")
+
+    def apply_theme(self, name):
+        """Switch themes live.
+
+        Re-applying the stylesheet is not enough on its own. A widget that
+        carries its own stylesheet outranks the application sheet and
+        keeps whatever colour it was given, so the hand-styled widgets are
+        refreshed here and the visible page is re-rendered. Without the
+        re-render, an open conversation would keep the accent colours from
+        the theme it was drawn in.
+        """
+        self.theme = name
+        self.setStyleSheet(stylesheet(name))
+        self.setWindowIcon(app_icon(name))
+        self.style_toast()
+        self.join_button.setStyleSheet("color:" + color(name, "success"))
+        self.avatar.setStyleSheet("background:" + color(name, "accent")
+                                  + "; border-radius:14px; padding:6px; font-weight:700;"
+                                  + " color:" + color(name, "on_accent") + ";")
+        if hasattr(self, "orbit"):
+            self.orbit.set_theme(name)
+        if hasattr(self, "light_theme"):
+            self.light_theme.blockSignals(True)
+            self.light_theme.setChecked(name == LIGHT)
+            self.light_theme.blockSignals(False)
+        if hasattr(self, "selected"):
+            self.render_agents()
+            self.render_messages()
+
+    def theme_changed(self, light):
+        """Persist the theme chosen in the UI and apply it."""
+        name = LIGHT if light else DARK
+        self.storage.settings["theme"] = name
+        self.storage.save()
+        self.apply_theme(name)
 
     def motion_changed(self, reduced):
         self.storage.settings["reduce_motion"] = reduced
