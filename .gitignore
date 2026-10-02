@@ -17,3 +17,8 @@ venv/
 .env
 credentials*.json
 *.log
+
+# Desktop build output
+build/
+dist/
+.desktop-venv/

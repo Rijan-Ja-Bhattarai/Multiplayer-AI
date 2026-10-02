@@ -1,0 +1,562 @@
+import json
+from datetime import datetime
+
+from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt, QTimer
+from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QFont
+from PySide6.QtWidgets import (QCheckBox, QFrame, QGraphicsOpacityEffect, QGridLayout, QHBoxLayout,
+    QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QProgressBar, QScrollArea,
+    QStackedWidget, QVBoxLayout, QWidget)
+
+from .bridge import NetworkThread
+from .dialogs import AgentDialog, InviteDialog, JoinDialog
+from .theme import PROVIDER_NAMES, THEME
+from .widgets import Composer, OrbitArt, WorkspaceButton, action, label
+
+
+def frame(name, layout_type=QVBoxLayout):
+    widget = QFrame()
+    widget.setObjectName(name)
+    layout = layout_type(widget)
+    return widget, layout
+
+
+def clear_layout(layout):
+    while layout.count():
+        item = layout.takeAt(0)
+        if item.widget():
+            item.widget().deleteLater()
+        elif item.layout():
+            clear_layout(item.layout())
+
+
+def app_icon():
+    pixmap = QPixmap(64, 64)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setBrush(QColor("#5865f2"))
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.drawRoundedRect(0, 0, 64, 64, 20, 20)
+    painter.setPen(QColor("white"))
+    painter.setFont(QFont("Segoe UI", 27, QFont.Weight.Bold))
+    painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "M")
+    painter.end()
+    return QIcon(pixmap)
+
+
+class MainWindow(QMainWindow):
+    def __init__(self, storage):
+        super().__init__()
+        self.storage = storage
+        self.agents = []
+        self.identity = ""
+        self.remote = False
+        self.port = 0
+        self.selected = None
+        self.chats = {}
+        self.callbacks = {}
+        self.request_count = 0
+        self.ready = False
+        self.closing = False
+        self.setWindowTitle("Multiplayer AI")
+        self.setWindowIcon(app_icon())
+        self.resize(1330, 910)
+        self.setMinimumSize(1010, 690)
+        self.setStyleSheet(THEME)
+        self.network = NetworkThread(storage, self)
+        self.network.event.connect(self.network_event)
+        self.network.completed.connect(self.command_success)
+        self.network.failed.connect(self.command_failure)
+        self.network.finished.connect(self.finish_close)
+        self.build_ui()
+        self.network.start()
+
+    def build_ui(self):
+        root = QWidget()
+        self.setCentralWidget(root)
+        shell = QHBoxLayout(root)
+        shell.setContentsMargins(0, 0, 0, 0)
+        shell.setSpacing(0)
+        rail, rail_layout = frame("rail")
+        rail.setFixedWidth(72)
+        rail_layout.setContentsMargins(12, 20, 12, 18)
+        rail_layout.setSpacing(16)
+        home = WorkspaceButton("M")
+        home.setToolTip("Your local workspace")
+        home.clicked.connect(lambda: self.command("use_local"))
+        rail_layout.addWidget(home)
+        local = WorkspaceButton("⌘")
+        local.setToolTip("Workspace overview")
+        local.clicked.connect(lambda: self.navigate(0))
+        rail_layout.addWidget(local)
+        join = WorkspaceButton("+")
+        join.setStyleSheet("color:#3ba55d")
+        join.setToolTip("Join a workspace")
+        join.clicked.connect(self.join_workspace)
+        rail_layout.addWidget(join)
+        rail_layout.addStretch()
+        help_button = WorkspaceButton("?")
+        help_button.clicked.connect(lambda: self.notice("The app starts your local relay automatically. Connect a model in Providers, or join a team with an invitation."))
+        help_button.setToolTip("Quick help")
+        rail_layout.addWidget(help_button)
+        shell.addWidget(rail)
+        sidebar, side = frame("sidebar")
+        sidebar.setFixedWidth(238)
+        side.setContentsMargins(14, 22, 14, 0)
+        side.setSpacing(8)
+        self.workspace_label = label("My workspace", "heading")
+        side.addWidget(self.workspace_label)
+        side.addWidget(label("Your intelligence, connected.", "muted"))
+        side.addSpacing(25)
+        side.addWidget(label("WORKSPACE", "eyebrow"))
+        self.nav_buttons = []
+        for index, name in enumerate(("◫   Overview", "⌘   Agents", "▤   Conversations", "◇   Providers")):
+            button = action(name, lambda checked=False, page=index: self.navigate(page), name="nav")
+            button.setCheckable(True)
+            self.nav_buttons.append(button)
+            side.addWidget(button)
+        side.addSpacing(23)
+        side.addWidget(label("CONNECTED AGENTS", "eyebrow"))
+        self.sidebar_agents = QListWidget()
+        self.sidebar_agents.setMaximumHeight(245)
+        self.sidebar_agents.itemClicked.connect(lambda item: self.select_agent(item.data(Qt.ItemDataRole.UserRole)))
+        side.addWidget(self.sidebar_agents)
+        side.addStretch()
+        self.connection_status = label("●  Starting your network…", "online", True)
+        side.addWidget(self.connection_status)
+        self.identity_label = label("Creating a private device identity", "muted", True)
+        self.identity_label.setStyleSheet("font-size:11px")
+        side.addWidget(self.identity_label)
+        side.addSpacing(14)
+        profile, row = frame("profile", QHBoxLayout)
+        row.setContentsMargins(10, 16, 10, 16)
+        avatar = label(" M ")
+        avatar.setFixedWidth(34)
+        avatar.setStyleSheet("background:#5865f2; border-radius:14px; padding:6px; font-weight:700;")
+        row.addWidget(avatar)
+        copy = QVBoxLayout()
+        copy.addWidget(label("This device"))
+        copy.addWidget(label("Desktop app", "muted"))
+        row.addLayout(copy)
+        side.addWidget(profile)
+        shell.addWidget(sidebar)
+        body = QWidget()
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(0)
+        top, top_layout = frame("topbar", QHBoxLayout)
+        top.setFixedHeight(68)
+        top_layout.setContentsMargins(28, 0, 25, 0)
+        self.page_title = label("#  overview", "heading")
+        top_layout.addWidget(self.page_title)
+        top_layout.addStretch()
+        self.invite_button = action("Invite a device", self.invite_device)
+        self.add_button = action("+  Connect a model", self.add_agent, True)
+        self.invite_button.setEnabled(False)
+        self.add_button.setEnabled(False)
+        top_layout.addWidget(self.invite_button)
+        top_layout.addWidget(self.add_button)
+        body_layout.addWidget(top)
+        self.toast = label("", wrap=True)
+        self.toast.setStyleSheet("background:#243c32; color:#b3e4c7; padding:12px 24px;")
+        self.toast.hide()
+        body_layout.addWidget(self.toast)
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 0)
+        body_layout.addWidget(self.progress)
+        self.stack = QStackedWidget()
+        self.stack.addWidget(self.overview_page())
+        self.stack.addWidget(self.agents_page())
+        self.stack.addWidget(self.chat_page())
+        self.stack.addWidget(self.providers_page())
+        body_layout.addWidget(self.stack, 1)
+        shell.addWidget(body, 1)
+        self.navigate(0)
+
+    def scroll_page(self):
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(30, 27, 30, 27)
+        layout.setSpacing(22)
+        scroll.setWidget(content)
+        return scroll, layout
+
+    def overview_page(self):
+        page, layout = self.scroll_page()
+        layout.addWidget(label("YOUR COLLABORATION HUB", "eyebrow"))
+        layout.addWidget(label("A place for all your intelligence.", "title"))
+        layout.addWidget(label("Your agents. Your devices. A team that works wherever you do.", "muted"))
+        hero, row = frame("hero", QHBoxLayout)
+        row.setContentsMargins(28, 20, 12, 20)
+        copy = QVBoxLayout()
+        copy.setSpacing(14)
+        copy.addWidget(label("BETTER TOGETHER", "eyebrow"))
+        copy.addWidget(label("Your agents.\nAll in one place.", "heroTitle"))
+        copy.addWidget(label("The networking is already taken care of.\nConnect a model, invite a device, and get to work.", "muted", True))
+        call = action("Connect your first model  →", self.add_agent, True)
+        copy.addWidget(call, alignment=Qt.AlignmentFlag.AlignLeft)
+        row.addLayout(copy, 1)
+        self.orbit = OrbitArt()
+        row.addWidget(self.orbit, 1)
+        layout.addWidget(hero)
+        stats = QHBoxLayout()
+        stats.setSpacing(16)
+        self.stat_values = []
+        for title, subtitle in (("Agents in your group", "Ready for teamwork"), ("Online right now", "Connected devices"), ("Requests this visit", "Ideas on the move")):
+            card, column = frame("stat")
+            column.setContentsMargins(18, 15, 18, 15)
+            column.addWidget(label(title, "muted"))
+            value = label("0", "statValue")
+            column.addWidget(value)
+            column.addWidget(label(subtitle, "muted"))
+            self.stat_values.append(value)
+            stats.addWidget(card, 1)
+        layout.addLayout(stats)
+        layout.addWidget(label("Your agents", "heading"))
+        self.overview_cards = QGridLayout()
+        self.overview_cards.setSpacing(14)
+        layout.addLayout(self.overview_cards)
+        activity_card, column = frame("card")
+        column.setContentsMargins(20, 18, 20, 18)
+        column.addWidget(label("Workspace activity", "heading"))
+        self.activity_list = QListWidget()
+        self.activity_list.setMinimumHeight(140)
+        self.activity_list.setMaximumHeight(210)
+        column.addWidget(self.activity_list)
+        layout.addWidget(activity_card)
+        layout.addWidget(label("Private keys stay on your device. Possibilities go everywhere.", "muted"))
+        layout.addStretch()
+        return page
+
+    def agents_page(self):
+        page, layout = self.scroll_page()
+        layout.addWidget(label("YOUR DISTRIBUTED TEAM", "eyebrow"))
+        layout.addWidget(label("Agents", "title"))
+        layout.addWidget(label("Every laptop and desktop has a place here.", "muted"))
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Search agents or models…")
+        self.search.textChanged.connect(self.render_agents)
+        layout.addWidget(self.search)
+        self.agent_cards = QGridLayout()
+        self.agent_cards.setSpacing(16)
+        layout.addLayout(self.agent_cards)
+        layout.addStretch()
+        return page
+
+    def chat_page(self):
+        page = QWidget()
+        layout = QHBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        self.chat_agents = QListWidget()
+        self.chat_agents.setFixedWidth(200)
+        self.chat_agents.itemClicked.connect(lambda item: self.select_agent(item.data(Qt.ItemDataRole.UserRole)))
+        layout.addWidget(self.chat_agents)
+        panel = QWidget()
+        column = QVBoxLayout(panel)
+        column.setContentsMargins(22, 22, 22, 20)
+        self.chat_title = label("Choose an agent", "heading")
+        column.addWidget(self.chat_title)
+        self.chat_subtitle = label("Start a conversation with a connected device.", "muted")
+        column.addWidget(self.chat_subtitle)
+        self.messages_scroll = QScrollArea()
+        self.messages_scroll.setWidgetResizable(True)
+        self.messages_widget = QWidget()
+        self.messages = QVBoxLayout(self.messages_widget)
+        self.messages.setContentsMargins(0, 16, 5, 16)
+        self.messages.setSpacing(16)
+        self.messages.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.messages_scroll.setWidget(self.messages_widget)
+        column.addWidget(self.messages_scroll, 1)
+        self.composer = Composer()
+        self.composer.setPlaceholderText("What would you like to work on?")
+        self.composer.setMaximumHeight(105)
+        self.composer.submitted.connect(self.send_message)
+        column.addWidget(self.composer)
+        footer = QHBoxLayout()
+        footer.addWidget(label("Enter to send · Shift + Enter for a new line", "muted"))
+        footer.addStretch()
+        self.send_button = action("Send request  ↑", self.send_message, True)
+        footer.addWidget(self.send_button)
+        column.addLayout(footer)
+        layout.addWidget(panel, 1)
+        return page
+
+    def providers_page(self):
+        page, layout = self.scroll_page()
+        layout.addWidget(label("CHOOSE YOUR INTELLIGENCE", "eyebrow"))
+        layout.addWidget(label("Your next teammate starts here.", "title"))
+        layout.addWidget(label("Configure a provider once. The app starts its agent for you, every time.", "muted"))
+        grid = QGridLayout()
+        grid.setSpacing(16)
+        for index, (provider, info) in enumerate(PROVIDER_NAMES.items()):
+            card, column = frame("card")
+            column.setContentsMargins(21, 20, 21, 20)
+            glyph = label(info[2])
+            glyph.setStyleSheet(f"font-size:27px; color:{info[3]}; font-weight:650;")
+            column.addWidget(glyph)
+            column.addWidget(label(info[0], "heading"))
+            column.addWidget(label(info[1], "muted", True))
+            column.addSpacing(10)
+            column.addWidget(action("Connect model  →", lambda checked=False, key=provider: self.add_agent(key), True))
+            grid.addWidget(card, index // 2, index % 2)
+        layout.addLayout(grid)
+        self.reduce_motion = QCheckBox("Reduce animations")
+        self.reduce_motion.setChecked(self.storage.settings.get("reduce_motion", False))
+        self.reduce_motion.toggled.connect(self.motion_changed)
+        layout.addWidget(self.reduce_motion)
+        layout.addStretch()
+        return page
+
+    def motion_changed(self, reduced):
+        self.storage.settings["reduce_motion"] = reduced
+        self.storage.save()
+        self.orbit.animation.stop() if reduced else self.orbit.animation.start()
+
+    def navigate(self, index):
+        self.stack.setCurrentIndex(index)
+        for number, button in enumerate(self.nav_buttons):
+            button.setChecked(number == index)
+        self.page_title.setText(("#  overview", "#  agents", "#  conversations", "#  providers")[index])
+        if not self.storage.settings.get("reduce_motion"):
+            widget = self.stack.currentWidget()
+            effect = QGraphicsOpacityEffect(widget)
+            widget.setGraphicsEffect(effect)
+            animation = QPropertyAnimation(effect, b"opacity", widget)
+            animation.setDuration(200)
+            animation.setStartValue(.25)
+            animation.setEndValue(1.0)
+            animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+            self.page_animation = animation
+            animation.start()
+
+    def render_agents(self):
+        clear_layout(self.overview_cards)
+        clear_layout(self.agent_cards)
+        for grid, agents in ((self.overview_cards, self.agents[:3]),
+                             (self.agent_cards, [agent for agent in self.agents if self.search.text().lower() in f"{agent['id']} {agent.get('model') or ''}".lower()])):
+            if not agents:
+                card, column = frame("card")
+                column.addWidget(label("Your team is getting ready.", "heading"))
+                column.addWidget(label("Connect a model or invite a device to collaborate.", "muted", True))
+                grid.addWidget(card, 0, 0)
+            for index, agent in enumerate(agents):
+                card, column = frame("card")
+                column.setContentsMargins(18, 17, 18, 17)
+                top = QHBoxLayout()
+                info = PROVIDER_NAMES.get(agent.get("provider"), ("Connectivity agent", "", "⌘", "#a59af5"))
+                glyph = label(info[2])
+                glyph.setStyleSheet(f"color:{info[3]}; font-size:24px;")
+                top.addWidget(glyph)
+                top.addStretch()
+                status = label("● Online" if agent["online"] else "● Offline", "online" if agent["online"] else "muted")
+                top.addWidget(status)
+                column.addLayout(top)
+                column.addWidget(label(agent["id"], "heading", True))
+                column.addWidget(label(agent.get("model") or info[0], "muted", True))
+                column.addSpacing(7)
+                talk = action("Open conversation  →", lambda checked=False, id=agent["id"]: self.select_agent(id))
+                talk.setEnabled(agent["online"])
+                column.addWidget(talk)
+                if agent.get("profile"):
+                    row = QHBoxLayout()
+                    row.addWidget(action("Edit", lambda checked=False, data=agent: self.edit_agent(data), name="ghost"))
+                    if agent.get("local"):
+                        row.addWidget(action("Stop", lambda checked=False, id=agent["id"]: self.command("stop_agent", id), name="ghost"))
+                    column.addLayout(row)
+                grid.addWidget(card, index // 3 if grid is self.overview_cards else index // 2,
+                               index % 3 if grid is self.overview_cards else index % 2)
+        for listing in (self.sidebar_agents, self.chat_agents):
+            listing.clear()
+            for agent in self.agents:
+                item = QListWidgetItem(("●  " if agent["online"] else "○  ") + agent["id"])
+                item.setData(Qt.ItemDataRole.UserRole, agent["id"])
+                item.setToolTip(agent.get("model") or "Connectivity agent")
+                listing.addItem(item)
+                if agent["id"] == self.selected:
+                    listing.setCurrentItem(item)
+        self.stat_values[0].setText(str(len(self.agents)))
+        self.stat_values[1].setText(str(sum(agent["online"] for agent in self.agents)))
+        self.stat_values[2].setText(str(self.request_count))
+        self.update_chat_controls()
+
+    def update_chat_controls(self):
+        agent = next((item for item in self.agents if item["id"] == self.selected), None)
+        chat = self.chats.get(self.selected, {})
+        self.send_button.setEnabled(bool(agent and agent["online"] and not chat.get("pending")))
+        self.send_button.setText("Working…" if chat.get("pending") else "Send request  ↑")
+        self.chat_title.setText(self.selected or "Choose an agent")
+        self.chat_subtitle.setText("Your agent is working…" if chat.get("pending") else "Online · Ready to collaborate" if agent and agent["online"] else "Start this agent on its device to continue" if agent else "Choose a connected agent to begin")
+
+    def select_agent(self, agent_id):
+        self.selected = agent_id
+        self.chats.setdefault(agent_id, {"messages": [], "history": [], "pending": False})
+        self.navigate(2)
+        self.render_messages()
+        self.composer.setFocus()
+
+    def render_messages(self):
+        clear_layout(self.messages)
+        chat = self.chats.get(self.selected, {})
+        if not chat.get("messages"):
+            self.messages.addWidget(label("#  This is the beginning of your collaboration.", "heading", True))
+            self.messages.addWidget(label("Ask a question, explore an idea, or simply say hello.", "muted", True))
+        for role, text in chat.get("messages", []):
+            bubble, column = frame("card")
+            column.setContentsMargins(17, 13, 17, 13)
+            title = label("You" if role == "user" else "Request unsuccessful" if role == "error" else self.selected)
+            title.setStyleSheet("font-weight:650; color:" + ("#f38a8e" if role == "error" else "#a8b0ff") + ";")
+            column.addWidget(title)
+            body = label(text, wrap=True)
+            body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            column.addWidget(body)
+            self.messages.addWidget(bubble)
+        if chat.get("pending"):
+            self.messages.addWidget(label("● ● ●   Waiting for your agent…", "muted"))
+        self.update_chat_controls()
+        QTimer.singleShot(0, lambda: self.messages_scroll.verticalScrollBar().setValue(self.messages_scroll.verticalScrollBar().maximum()))
+
+    def send_message(self):
+        if not self.selected or not self.send_button.isEnabled():
+            return
+        text = self.composer.toPlainText().strip()
+        if not text:
+            return
+        if len(text.encode()) > 180000:
+            self.notice("This message is too large. Send a shorter request.")
+            return
+        target = self.selected
+        chat = self.chats[target]
+        payload = {"messages": [*chat["history"], {"role": "user", "content": text}]} if chat["history"] else {"text": text}
+        chat["pending"] = True
+        chat["messages"].append(("user", text))
+        self.composer.clear()
+        self.request_count += 1
+        self.stat_values[2].setText(str(self.request_count))
+        self.render_messages()
+        def success(result):
+            if self.chats.get(target) is not chat:
+                return
+            response = result.get("text") if isinstance(result, dict) else result
+            if not isinstance(response, str):
+                response = json.dumps(result, indent=2)
+            chat["messages"].append(("assistant", response))
+            if isinstance(result, dict) and result.get("provider"):
+                chat["history"] = [*chat["history"], {"role": "user", "content": text}, {"role": "assistant", "content": response}][-98:]
+            chat["pending"] = False
+            self.add_activity(f"{target} replied", "Request completed")
+            if target == self.selected:
+                self.render_messages()
+        def failure(message):
+            if self.chats.get(target) is not chat:
+                return
+            chat["pending"] = False
+            chat["messages"].append(("error", message + "\nThe app did not replay this request."))
+            if target == self.selected:
+                self.render_messages()
+        self.command("send", target, payload, success=success, failure=failure)
+
+    def add_activity(self, title, detail):
+        stamp = datetime.now().strftime("%H:%M")
+        self.activity_list.insertItem(0, f"{title}   ·   {stamp}\n{detail}")
+        while self.activity_list.count() > 8:
+            self.activity_list.takeItem(self.activity_list.count() - 1)
+
+    def notice(self, message):
+        self.toast.setText(message)
+        self.toast.show()
+        QTimer.singleShot(7500, self.toast.hide)
+
+    def command(self, method, *args, success=None, failure=None):
+        if not self.ready and method != "close":
+            self.notice("Your network is still starting. Please wait a moment.")
+            if failure:
+                failure("Networking is still starting")
+            return
+        request_id = self.network.submit(method, *args)
+        self.callbacks[request_id] = (success, failure)
+
+    def command_success(self, request_id, result):
+        success, _ = self.callbacks.pop(request_id, (None, None))
+        if success:
+            success(result)
+
+    def command_failure(self, request_id, message):
+        _, failure = self.callbacks.pop(request_id, (None, None))
+        if failure:
+            failure(message)
+        else:
+            self.notice(message)
+
+    def network_event(self, event, data):
+        if event == "ready":
+            self.ready = True
+            self.port = data["port"]
+            self.progress.hide()
+            self.add_button.setEnabled(True)
+            self.invite_button.setEnabled(not self.remote)
+            self.add_activity("Your desktop is connected", "Local relay and device identity started automatically")
+            if self.storage.settings.get("reduce_motion"):
+                self.orbit.animation.stop()
+        elif event == "workspace":
+            self.remote = data["remote"]
+            self.identity = data["self"]
+            self.workspace_label.setText(data["name"])
+            self.identity_label.setText(data["self"])
+            self.invite_button.setEnabled(self.ready and not self.remote)
+            self.chats.clear()
+            self.selected = None
+            self.request_count = 0
+            self.render_messages()
+        elif event == "agents":
+            self.agents = data["agents"]
+            self.connection_status.setText("●  Relay connected" if data["connected"] else "●  Reconnecting…")
+            self.render_agents()
+        elif event == "activity":
+            self.add_activity(data["title"], data["detail"])
+        elif event in ("notice", "fatal"):
+            self.notice(data)
+            if event == "fatal":
+                self.progress.hide()
+                self.connection_status.setText("●  Startup needs attention")
+        elif event == "offline":
+            self.connection_status.setText("●  Relay unavailable")
+
+    def add_agent(self, provider="ollama"):
+        if not self.ready:
+            self.notice("Your network is still starting.")
+            return
+        if not isinstance(provider, str):
+            provider = "ollama"
+        AgentDialog(self, provider).exec()
+
+    def edit_agent(self, agent):
+        AgentDialog(self, agent["provider"], agent["profile"]).exec()
+
+    def join_workspace(self):
+        if self.ready:
+            JoinDialog(self).exec()
+        else:
+            self.notice("Your network is still starting.")
+
+    def invite_device(self):
+        if self.ready and not self.remote:
+            InviteDialog(self).exec()
+
+    def closeEvent(self, event):
+        if self.closing and not self.network.isRunning():
+            event.accept()
+            return
+        event.ignore()
+        if not self.closing:
+            self.closing = True
+            self.setEnabled(False)
+            self.toast.setText("Disconnecting agents and shutting down your local relay…")
+            self.toast.show()
+            self.network.shutdown()
+
+    def finish_close(self):
+        if self.closing:
+            self.close()
