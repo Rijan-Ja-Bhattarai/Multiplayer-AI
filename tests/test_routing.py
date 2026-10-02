@@ -46,12 +46,16 @@ def stub() -> StubRegistry:
 
 
 async def test_routes_to_destination_client(stub: StubRegistry) -> None:
-    """A client destination is delivered through the registry."""
+    """A client destination is delivered through the registry.
+
+    Nothing is returned for the sender to receive: the destination holds
+    the message, which is the established client-to-client behaviour.
+    """
     message = MessageEnvelope.from_wire(envelope())
 
-    destination = await route_message(message, "client-A", stub)
+    reply = await route_message(message, "client-A", stub)
 
-    assert destination == {"type": "client", "id": "client-B"}
+    assert reply is None
     assert len(stub.delivered["client-B"]) == 1
 
 
