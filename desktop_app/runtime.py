@@ -122,7 +122,30 @@ class DesktopRuntime:
                 await asyncio.sleep(.02)
 
     async def _attach(self, agent_id, token, handler, allow_insecure=False):
-        client = AgentClient(self.active_url, token, handler, allow_insecure=allow_insecure)
+        generation = self.generation
+        async def visible_handler(payload, source):
+            incoming = source != self.active_id and generation == self.generation
+            if incoming:
+                text = payload.get("text") if isinstance(payload, dict) else payload
+                if isinstance(payload, dict) and isinstance(payload.get("messages"), list):
+                    messages = payload["messages"]
+                    text = messages[-1].get("content") if messages and isinstance(messages[-1], dict) else text
+                if not isinstance(text, str):
+                    text = json.dumps(payload)
+                self.emit("incoming", {"from": source, "to": agent_id, "text": text})
+            try:
+                result = await handler(payload, source)
+            except Exception:
+                if incoming and generation == self.generation:
+                    self.emit("incoming_reply", {"from": source, "to": agent_id,
+                                                "text": "The local agent could not complete this request.", "error": True})
+                raise
+            if incoming and generation == self.generation:
+                text = result.get("text") if isinstance(result, dict) else result
+                self.emit("incoming_reply", {"from": source, "to": agent_id,
+                                            "text": text if isinstance(text, str) else json.dumps(result)})
+            return result
+        client = AgentClient(self.active_url, token, visible_handler, allow_insecure=allow_insecure)
         task = asyncio.create_task(client.run())
         self.runners[agent_id] = (client, task)
         waiter = asyncio.create_task(client.ready.wait())

@@ -114,6 +114,11 @@ workspace stop while you use a remote workspace, and resume when you return.
 model agents. **Conversations** sends requests to connected agents and includes
 history in follow-ups to provider agents. Unconfigured device agents reply with
 connectivity echoes rather than AI-generated text.
+Requests from another device appear in its conversation on the receiving desktop,
+with an unread count in the agent list and the local agent's response below.
+Select the sending device to read incoming messages and send a request back.
+This is agent request/response messaging; joining does not share another laptop's
+screen, files, or conversations with other agents.
 
 The design uses charcoal surfaces, blurple actions, a workspace rail, an agent
 sidebar, fading page transitions, animated hover shapes, and quiet orbital
@@ -136,6 +141,10 @@ build on each operating system you want to distribute to, and sign releases
 before public distribution. The checked build in this workspace targets Windows.
 The packaging script creates `dist/MultiplayerAI-Windows-x64.zip` with the
 complete app, installer scripts, and this guide. Upload that ZIP as a release asset.
+The Windows build omits unused Qt QML, PDF, virtual keyboard, translation,
+and image-format components. It retains the native interface, animations,
+networking, credentials, and all supported provider adapters. Source code,
+tests, build tools, and local settings are not included in the release ZIP.
 
 ## Verify
 
