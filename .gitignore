@@ -1,0 +1,7 @@
+__pycache__/
+.vscode/
+.venv/
+credentials*.json
+.env
+.pytest_cache/
+.tmp/
