@@ -41,6 +41,23 @@ that measured badly could not be added. The Miku palette supplied for this work
 had every text pairing between 1.09:1 and 2.00:1, so its colours are used as
 accents over a neutral scale rather than as given.
 
+The desktop app has a **Resources** page showing live Processor, Memory and Disk
+use for this machine, plus per-core load. It resamples every two seconds, and
+pauses while the page is off screen. **Settings** holds the theme, an animation
+preference, the path to this device's data, and a way to reveal it in the file
+manager.
+
+Identity handling is written to recover rather than to strand you. Each device
+holds a private token in the OS credential store, while the list of identities
+lives in `settings.json`. If a token goes missing — a cleared keyring, a locked
+store, settings restored on another machine — the app replaces that identity and
+tells you at startup instead of refusing to open. Workspaces joined with the old
+identity need a fresh invitation. To discard an identity deliberately, use
+**Settings → Reset local identity**; it asks first, and stops and restarts
+connected agents. An *unavailable* credential store is still reported as an
+error, because a replacement token could not be written either. See
+[recover a lost device identity](DESKTOP_GUIDE.md#recover-a-lost-device-identity).
+
 The authenticated relay and reconnecting device client in `network_a2a/`
 connect multiple laptops/desktops over LAN or the internet. They route requests
 between local agents and can forward requests to a local A2A server.
@@ -334,6 +351,15 @@ and build a real window headlessly, skipping themselves if it is absent.
 Window sizing is tested as plain arithmetic against common screen shapes, so
 a request that does not fit a 1366x768 laptop fails the build rather than
 opening clipped.
+
+Credential handling is tested for the failure that matters: a token that has
+disappeared is replaced, an unavailable store is still an error, and one bad
+identity does not discard the good ones.
+
+Note that `--data-dir` redirects `settings.json` but **not** the OS credential
+store, so hand-running `--check-startup` leaves real entries in the system
+keyring. The tests use an in-memory vault to avoid exactly that; clean up
+afterwards if you run the app directly.
 
 Run a subset:
 
