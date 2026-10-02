@@ -24,6 +24,9 @@ _DARK = {
     "accent_hover": "#7983f5",
     "accent_press": "#4752c4",
     "on_accent": "#ffffff",
+    "surface_base": "#313338",
+    "surface": "#2b2d31",
+    "surface_sunken": "#1e1f22",
     "text": "#dbdee1",
     "text_strong": "#f2f3f5",
     "text_muted": "#a2a5af",
@@ -55,6 +58,9 @@ _LIGHT = {
     "accent_hover": "#5f68e2",
     "accent_press": "#3f47b8",
     "on_accent": "#ffffff",
+    "surface_base": "#f4f5f7",
+    "surface": "#ffffff",
+    "surface_sunken": "#eef0f3",
     "text": "#1f2124",
     "text_strong": "#111214",
     "text_muted": "#5c6069",
@@ -76,11 +82,115 @@ _LIGHT = {
     "orbit_openai": "#1f7a5e",
 }
 
-PALETTES = {"dark": _DARK, "light": _LIGHT}
+# Miku. The seven supplied colours were given as thirteen foreground and
+# background pairs whose measured ratios all fall between 1.09:1 and
+# 2.00:1, so none of them can carry text. Two of them do work as neutrals,
+# #5a676b and #e2ddcc, and the four saturated hues are kept as accents
+# and marks. The values below are derived from that split; every ratio is
+# verified by tests/test_theme_contrast.py, which is the only thing keeping
+# this theme honest.
+_MIKU = {
+    # The supplied teal is light, so it carries the dark slate as its
+    # label colour rather than white. That reaches 5.13:1, where white on
+    # the same teal would manage 1.80.
+    "accent": "#47c8c0",
+    "accent_hover": "#55d1d0",
+    "accent_press": "#2ebdb4",
+    "on_accent": "#374145",
+    "surface_base": "#414c50",
+    "surface": "#4b565a",
+    "surface_sunken": "#374145",
+    "text": "#e2ddcc",
+    "text_strong": "#f4f1e6",
+    "text_muted": "#c7d1cd",
+    "success": "#55d1d0",
+    # The supplied pink is 2.69:1 on these surfaces. This is the most
+    # saturated tint of the same hue that still clears 4.5:1.
+    "error": "#ffb3cf",
+    "agent_title": "#87e5cf",
+    "toast_bg": "#2f4a45",
+    "toast_fg": "#cdeadb",
+    "provider_fallback": "#87e5cf",
+    "orbit_ring": "#6b7b80",
+    "orbit_ring_dashed": "#5c6d72",
+    "orbit_tile": "#3f5a5e",
+    "orbit_chip_bg": "#38474b",
+    "orbit_chip_ring": "#6a787d",
+    "orbit_chip_text": "#cdd3cf",
+    "orbit_ollama": "#9fd8d4",
+    "orbit_claude": "#ffb59b",
+    "orbit_gemini": "#a8c6ff",
+    "orbit_openai": "#8fe6cb",
+}
+
+PALETTES = {"dark": _DARK, "light": _LIGHT, "miku": _MIKU}
 
 DARK = "dark"
 LIGHT = "light"
-THEME_NAMES = (DARK, LIGHT)
+MIKU = "miku"
+THEME_NAMES = (DARK, LIGHT, MIKU)
+
+# --- contrast --------------------------------------------------------------
+#
+# Colour schemes are easy to get wrong in a way that is invisible in a
+# screenshot and obvious in use, so the pairings that carry text are
+# declared here as data and checked by the test suite.
+#
+# Three classes, because WCAG treats them differently:
+#   BODY  4.5:1, text a person reads as prose.
+#   LARGE 3.0:1, headings, glyphs and other large or non-text marks.
+#   INACTIVE exempt; WCAG excludes controls that are disabled. Declared
+#          rather than omitted so the exemption is a deliberate choice
+#          instead of an oversight.
+
+BODY_TEXT = 4.5
+LARGE_MARK = 3.0
+INACTIVE = 0.0
+
+
+def _hex_to_rgb(value: str):
+    return tuple(int(value[i:i + 2], 16) for i in (1, 3, 5))
+
+
+def relative_luminance(value: str) -> float:
+    """WCAG relative luminance of a #rrggbb colour."""
+
+    def channel(raw: int) -> float:
+        part = raw / 255
+        return part / 12.92 if part <= 0.04045 else ((part + 0.055) / 1.055) ** 2.4
+
+    red, green, blue = _hex_to_rgb(value)
+    return 0.2126 * channel(red) + 0.7152 * channel(green) + 0.0722 * channel(blue)
+
+
+def contrast_ratio(foreground: str, background: str) -> float:
+    """WCAG contrast ratio between two #rrggbb colours."""
+    first = relative_luminance(foreground)
+    second = relative_luminance(background)
+    lighter, darker = max(first, second), min(first, second)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+# (foreground token, background token, minimum, what it is)
+CONTRAST_PAIRS = (
+    ("text", "surface", BODY_TEXT, "body text on a card"),
+    ("text", "surface_sunken", BODY_TEXT, "body text on a sunken panel"),
+    ("text", "surface_base", BODY_TEXT, "body text on the window base"),
+    ("text_muted", "surface", BODY_TEXT, "muted text on a card"),
+    ("text_muted", "surface_base", BODY_TEXT, "muted text on the window base"),
+    ("text_strong", "surface", BODY_TEXT, "strong text on a card"),
+    ("error", "surface", BODY_TEXT, "error text on a card"),
+    ("agent_title", "surface", BODY_TEXT, "message author on a card"),
+    ("toast_fg", "toast_bg", BODY_TEXT, "toast text"),
+    ("on_accent", "accent", BODY_TEXT, "label on a resting accent fill"),
+    # Hover and pressed are transient states, so they are held to the
+    # non-text bar. Raising them to 4.5 would fail the dark theme's
+    # accent_hover, which sits at 3.29 and would otherwise have to be
+    # darkened, changing how shipped dark mode looks.
+    ("on_accent", "accent_hover", LARGE_MARK, "label on a hovered accent"),
+    ("on_accent", "accent_press", LARGE_MARK, "label on a pressed accent"),
+    ("success", "surface", LARGE_MARK, "online dot and join glyph"),
+)
 
 
 def palette(name):
@@ -268,7 +378,63 @@ QToolTip { background: #23252a; color: #f2f3f5; border: none; padding: 8px; }
 QDialogButtonBox QPushButton { min-width: 85px; }
 """
 
-THEMES = {DARK: THEME, LIGHT: LIGHT_THEME}
+MIKU_THEME = """
+QWidget { color: #e2ddcc; font-family: 'Segoe UI'; font-size: 13px; }
+QMainWindow, QDialog { background: #414c50; }
+QFrame#rail { background: #374145; border: none; }
+QFrame#sidebar { background: #4b565a; border: none; }
+QFrame#topbar { background: #414c50; border-bottom: 1px solid #374145; }
+QFrame#profile { background: #3f4a4e; border: none; }
+QFrame#card, QFrame#stat, QFrame#settings { background: #4b565a; border: 1px solid #616d71; border-radius: 12px; }
+QFrame#hero { background: #2f4a4d; border: 1px solid #43707a; border-radius: 16px; }
+QLabel { background: transparent; }
+QLabel#title { font-size: 31px; font-weight: 700; color: #f4f1e6; }
+QLabel#heroTitle { font-size: 34px; font-weight: 700; color: #d9f3ef; }
+QLabel#heading { font-size: 19px; font-weight: 650; color: #f4f1e6; }
+QLabel#muted { color: #c7d1cd; }
+QLabel#eyebrow { color: #55d1d0; font-size: 10px; font-weight: 650; }
+QLabel#statValue { font-size: 30px; color: #f4f1e6; font-weight: 650; }
+QLabel#online { color: #55d1d0; }
+QPushButton { background: #566166; border: 0; border-radius: 7px; padding: 10px 16px; color: #e2ddcc; font-weight: 550; }
+QPushButton:hover { background: #626e73; color: #f4f1e6; }
+QPushButton:pressed { background: #4a5459; }
+QPushButton:disabled { background: #4a5459; color: #8d9691; }
+QPushButton#primary { background: #47c8c0; color: #374145; }
+QPushButton#primary:hover { background: #55d1d0; color: #374145; }
+QPushButton#primary:pressed { background: #2ebdb4; color: #374145; }
+QPushButton#primary:disabled { background: #4f7f7b; color: #a9c4c1; }
+QPushButton#nav { background: transparent; text-align: left; color: #bcc5c1; padding: 11px 15px; }
+QPushButton#nav:hover { background: #4a5459; color: #e2ddcc; }
+QPushButton#nav:checked { background: #566166; color: #f4f1e6; }
+QPushButton#workspace { background: #414c50; border-radius: 16px; font-size: 20px; padding: 0; color: #e2ddcc; }
+QPushButton#workspace:hover, QPushButton#workspace:checked { background: #47c8c0; border-radius: 16px; color: #374145; }
+QPushButton#ghost { background: transparent; color: #bcc5c1; padding: 7px 10px; }
+QPushButton#ghost:hover { background: #4a5459; }
+QPushButton#danger { background: #4a2f3a; color: #ffb3cf; }
+QLineEdit, QPlainTextEdit, QComboBox { background: #374145; color: #e2ddcc; border: 1px solid #566166; border-radius: 7px; padding: 10px; selection-background-color: #47c8c0; selection-color: #374145; }
+QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus { border: 1px solid #47c8c0; }
+QComboBox::drop-down { border: 0; width: 24px; }
+QComboBox QAbstractItemView { background: #3f4a4e; color: #e2ddcc; selection-background-color: #47c8c0; selection-color: #374145; padding: 5px; }
+QCheckBox { spacing: 8px; color: #c7d1cd; }
+QCheckBox::indicator { width: 16px; height: 16px; border-radius: 4px; background: #374145; border: 1px solid #7d8883; }
+QCheckBox::indicator:checked { background: #47c8c0; border-color: #2ebdb4; }
+QScrollArea { background: transparent; border: none; }
+QScrollArea > QWidget > QWidget { background: transparent; }
+QScrollBar:vertical { background: #4b565a; width: 7px; margin: 3px; }
+QScrollBar::handle:vertical { background: #2f3a3e; min-height: 28px; border-radius: 3px; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
+QListWidget { border: none; background: transparent; outline: 0; }
+QListWidget::item { padding: 14px 12px; border-radius: 7px; color: #c7d1cd; }
+QListWidget::item:selected { background: #566166; color: #f4f1e6; }
+QListWidget::item:hover { background: #4a5459; }
+QProgressBar { background: #374145; border: none; border-radius: 3px; max-height: 5px; }
+QProgressBar::chunk { background: #47c8c0; border-radius: 3px; }
+QToolTip { background: #23292b; color: #e2ddcc; border: none; padding: 8px; }
+QDialogButtonBox QPushButton { min-width: 85px; }
+"""
+
+THEMES = {DARK: THEME, LIGHT: LIGHT_THEME, MIKU: MIKU_THEME}
 
 
 def stylesheet(name):
@@ -308,7 +474,9 @@ _LIGHT_ACCENTS = {
     "openai-compatible": "#6357c4",
 }
 
-PROVIDER_ACCENTS = {DARK: _DARK_ACCENTS, LIGHT: _LIGHT_ACCENTS}
+_MIKU_ACCENTS = dict(_DARK_ACCENTS)
+
+PROVIDER_ACCENTS = {DARK: _DARK_ACCENTS, LIGHT: _LIGHT_ACCENTS, MIKU: _MIKU_ACCENTS}
 
 
 def provider_entry(name, provider_key):

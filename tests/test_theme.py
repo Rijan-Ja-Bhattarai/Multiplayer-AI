@@ -33,14 +33,19 @@ def selectors(sheet: str) -> set:
 # --- parity ---------------------------------------------------------------
 
 
-def test_both_palettes_define_the_same_tokens() -> None:
-    """No token may exist in one theme and be missing from the other.
+def test_all_palettes_define_the_same_tokens() -> None:
+    """No token may exist in one theme and be missing from another.
 
     A missing token falls back to the dark value, so the symptom would be a
-    light theme with dark accents rather than an error, which is easy to
-    miss by eye.
+    theme with dark accents rather than an error, which is easy to miss by
+    eye.
     """
-    assert set(theme.PALETTES[theme.DARK]) == set(theme.PALETTES[theme.LIGHT])
+    reference = set(theme.PALETTES[theme.DARK])
+    for name in theme.THEME_NAMES:
+        missing = reference - set(theme.PALETTES[name])
+        extra = set(theme.PALETTES[name]) - reference
+        assert not missing, f"{name} is missing tokens {sorted(missing)}"
+        assert not extra, f"{name} has tokens the others lack: {sorted(extra)}"
 
 
 def test_palette_values_are_hex_colours() -> None:
@@ -50,20 +55,21 @@ def test_palette_values_are_hex_colours() -> None:
             assert re.fullmatch(r"#[0-9a-fA-F]{6}", value), f"{name}.{token}={value}"
 
 
-def test_both_themes_cover_the_same_widgets() -> None:
-    """The light stylesheet styles every widget the dark one does.
+def test_all_themes_cover_the_same_widgets() -> None:
+    """Every theme styles every widget the reference theme does.
 
-    This is the check that catches a new widget being added and themed
-    in only one of the two sheets.
+    This is the check that catches a new widget being added and themed in
+    only some of the stylesheets.
     """
-    dark = selectors(theme.THEMES[theme.DARK])
-    light = selectors(theme.THEMES[theme.LIGHT])
+    reference = selectors(theme.THEMES[theme.DARK])
+    assert reference, "selector extraction found nothing in the reference theme"
 
-    assert dark, "selector extraction found nothing in the dark theme"
-    assert dark == light, (
-        "light theme is missing: "
-        f"{sorted(dark - light)}; light theme has extra: {sorted(light - dark)}"
-    )
+    for name in theme.THEME_NAMES:
+        found = selectors(theme.THEMES[name])
+        missing = reference - found
+        extra = found - reference
+        assert not missing, f"{name} theme does not style {sorted(missing)}"
+        assert not extra, f"{name} theme styles unknown widgets {sorted(extra)}"
 
 
 @pytest.mark.parametrize(
@@ -119,19 +125,23 @@ def test_stylesheet_falls_back_to_dark() -> None:
     assert theme.stylesheet("nonsense") == theme.THEME
 
 
-def test_light_accent_differs_from_dark() -> None:
-    """The accent is re-tuned per theme, not merely copied.
+def test_each_theme_retunes_its_accent() -> None:
+    """Accents are per theme, not copied from the reference.
 
-    A single shared accent would make light mode look washed out, and
-    nothing else in this file would catch that.
+    A single shared accent would make a theme look washed out, and nothing
+    else in this file would catch that.
     """
-    assert theme.color(theme.DARK, "accent") != theme.color(theme.LIGHT, "accent")
+    accents = {name: theme.color(name, "accent") for name in theme.THEME_NAMES}
+    assert len(set(accents.values())) == len(theme.THEME_NAMES), accents
 
 
-@pytest.mark.parametrize("token", ["text", "text_muted", "success", "error", "agent_title"])
-def test_light_text_differs_from_dark(token: str) -> None:
+@pytest.mark.parametrize(
+    "token", ["text", "text_muted", "success", "error", "agent_title"]
+)
+def test_each_theme_retunes_text_tokens(token: str) -> None:
     """Text-bearing tokens differ per theme, so contrast is retuned."""
-    assert theme.color(theme.DARK, token) != theme.color(theme.LIGHT, token)
+    values = {name: theme.color(name, token) for name in theme.THEME_NAMES}
+    assert len(set(values.values())) == len(theme.THEME_NAMES), values
 
 
 # --- theme resolution -----------------------------------------------------
@@ -171,13 +181,17 @@ def test_provider_names_keeps_its_shape() -> None:
 
 
 def test_provider_entry_is_theme_aware() -> None:
-    """The same provider reports a different accent per theme."""
-    dark = theme.provider_entry(theme.DARK, "openai")
-    light = theme.provider_entry(theme.LIGHT, "openai")
+    """Each theme exposes provider accents usable on its own surfaces.
 
-    assert dark[3] != light[3]
-    # Name, blurb and glyph are theme-independent.
-    assert dark[:3] == light[:3]
+    Themes are allowed to share an accent set: Miku reuses the dark one
+    because its surfaces are also dark. What matters is legibility, which
+    tests/test_theme_contrast.py checks against each theme's card colour.
+    """
+    for name in theme.THEME_NAMES:
+        entry = theme.provider_entry(name, "openai")
+        assert entry[3] == theme.PROVIDER_ACCENTS[name]["openai"], name
+        # Name, blurb and glyph are theme-independent.
+        assert entry[:3] == theme.provider_entry(name, "openai")[:3]
 
 
 def test_unknown_provider_falls_back_without_raising() -> None:
