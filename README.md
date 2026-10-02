@@ -25,6 +25,9 @@ adapters are available in `network_a2a/`; see below and [Scope](#scope).
 The native Multiplayer AI desktop app starts its local relay, creates a private
 device identity, and connects automatically. Configure model providers, invite
 devices, join shared relays, and chat with agents from its dark desktop workspace.
+Named workspaces have separate conversations, models, and memberships. Owners
+can rename them, invite or remove members, and delete them. Saved chat history
+and follow-up model context survive switching workspaces and restarting the app.
 See the [desktop guide](DESKTOP_GUIDE.md) to get started.
 
 The authenticated relay and reconnecting device client in `network_a2a/`
@@ -80,6 +83,10 @@ with the client Connection Server is not built yet — see [Scope](#scope).
 | `scripts/demo_client.py` | Command-line client for manual testing |
 | `network_a2a/server.py` | Authenticated multi-device agent relay |
 | `network_a2a/conversations.py` | Shared AI chat history and conversation membership |
+| `network_a2a/persistence.py` | SQLite chat archives and bounded model context |
+| `desktop_app/runtime.py` | Saved workspace catalog and switching |
+| `desktop_app/workspace_runtime.py` | Per-workspace relays, agents, and membership |
+| `desktop_app/window.py` | Native workspace rail and saved chat interface |
 | `network_a2a/client.py` | Reconnecting agent client and request correlation |
 | `network_a2a/adapters/` | Model provider handlers |
 | `network_a2a/__main__.py` | Agent client CLI and local A2A bridge |

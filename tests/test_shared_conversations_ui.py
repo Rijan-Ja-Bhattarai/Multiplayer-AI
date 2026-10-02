@@ -17,6 +17,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from desktop_app.dialogs import AgentDialog, InviteDialog, JoinDialog
+from desktop_app.markdown import MarkdownMessage
 from desktop_app.storage import Storage
 from desktop_app.window import MainWindow
 from tests.test_desktop_runtime import MemoryVault
@@ -104,3 +105,19 @@ class SharedConversationUITests(unittest.TestCase):
         self.assertIn(("member:guest-laptop", "Guest message"), self.host.chats[room_id]["messages"])
         self.assertIn(("user", "Guest message"), self.guest.chats[room_id]["messages"])
         invite.close()
+
+    def test_model_replies_render_markdown_without_changing_conversation_history(self):
+        text = "## Model heading\n\nHere is **bold text** and `inline code`."
+        self.host.select_agent(self.host.identity)
+        chat = self.host.chats[self.host.identity]
+        chat["messages"] = [("user", text), ("assistant", text), ("local_agent", text)]
+        self.host.render_messages()
+        replies = self.host.messages_widget.findChildren(MarkdownMessage)
+        self.assertEqual(len(replies), 2)
+        for reply in replies:
+            self.assertEqual(reply.document().begin().blockFormat().headingLevel(), 2)
+            self.assertNotIn("**", reply.toPlainText())
+            self.assertIn("bold text", reply.toPlainText())
+        self.assertEqual(chat["messages"], [("user", text), ("assistant", text), ("local_agent", text)])
+        user_bubble = self.host.messages.itemAt(0).widget()
+        self.assertEqual(user_bubble.layout().itemAt(1).widget().text(), text)

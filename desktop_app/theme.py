@@ -49,6 +49,13 @@ QListWidget { border: none; background: transparent; outline: 0; }
 QListWidget::item { padding: 14px 12px; border-radius: 7px; color: #b5bac1; }
 QListWidget::item:selected { background: #404249; color: white; }
 QListWidget::item:hover { background: #383a40; }
+QTableWidget { background: #2b2d31; alternate-background-color: #313338; color: #dbdee1; border: 1px solid #404249; gridline-color: #404249; selection-background-color: #404249; selection-color: white; }
+QTableWidget::item { padding: 8px; }
+QHeaderView::section { background: #232428; color: #b5bac1; border: none; border-right: 1px solid #404249; border-bottom: 1px solid #404249; padding: 10px 8px; }
+QTableCornerButton::section { background: #232428; border: none; }
+QMenu { background: #232428; color: #dbdee1; border: 1px solid #404249; padding: 5px; }
+QMenu::item { padding: 9px 16px; border-radius: 4px; }
+QMenu::item:selected { background: #5865f2; color: white; }
 QProgressBar { background: #26272c; border: none; border-radius: 3px; max-height: 5px; }
 QProgressBar::chunk { background: #5865f2; border-radius: 3px; }
 QToolTip { background: #111214; color: #dbdee1; border: none; padding: 8px; }

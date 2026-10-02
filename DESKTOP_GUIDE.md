@@ -41,12 +41,36 @@ On launch, the app:
 3. Connects a device agent so you can exchange real connectivity messages
    immediately, without configuring a model.
 4. Restores model agents marked **Start automatically**.
-5. Rejoins the saved remote workspace if there is one. If it is temporarily
-   unavailable, your local workspace remains usable and the app retries.
+5. Restores the selected workspace, its saved conversations, and any draft.
+   Rejoins a selected remote workspace; if its host is unavailable, saved history
+   remains readable and the app retries. You can switch to an owned workspace
+   while waiting.
 
 Closing the app disconnects its agents and shuts down its local relay. There is
 no background service left running after the window closes. The app supports a
 single instance per preferences directory.
+
+## Create and manage workspaces
+
+Click **+** in the left rail and choose **Create a workspace**. Give it a name;
+the app opens a separate workspace with its own chats, models, members, and
+invitations. Click a workspace's initials in the rail to switch to it. Your owned
+workspaces keep their relays and models running while you view another workspace,
+so their members can continue working. All owned relays stop when the app closes.
+
+Open **Workspace settings** to rename a workspace and see its members and online
+status. Owners can invite members and click **Remove** to revoke a member's
+invitation, close its connection, and remove access to shared chats. Removing a
+local model also removes its configuration and saved credentials. Members can
+view the list; the owner controls the workspace name and membership.
+
+**Delete workspace** removes the owned workspace's saved chats, configuration,
+and credentials on this device and disconnects its members. Other workspaces
+remain available; deleting the last workspace creates a fresh one. In a joined
+workspace, **Leave workspace** removes its local history and saved invitation.
+When the host is reachable, leaving also revokes that invitation on the host.
+If the host is offline or its membership is managed separately by an operator,
+the invitation is forgotten locally; the owner can revoke it on the host.
 
 ## Connect a model
 
@@ -68,6 +92,10 @@ Tokens and API keys are stored in the OS credential store. Nonsecret settings
 - macOS: `~/.config/multiplayer-ai/settings.json`
 
 Use `--data-dir PATH` to select a different preferences directory.
+The same directory contains `workspaces.json` and the default workspace's
+`history.sqlite3`. Additional workspaces keep separate settings and history
+under `workspaces/<workspace-id>/`. Chat history is saved on disk; tokens and
+provider keys remain in the OS credential store with workspace-specific keys.
 
 ## Invite another device
 
@@ -96,11 +124,12 @@ stay open if its relay is serving the workspace.
 
 ## Join a workspace
 
-Click **+** in the left workspace rail. Paste the invitation, or enter the WSS
+Click **+** in the left workspace rail and choose **Join a workspace**. Paste the invitation, or enter the WSS
 relay address and the device's token. The app validates the invitation, connects
 the device, and shows the agents in its group. This workspace is remembered for
-the next launch. Click **M** in the rail to return to your local workspace and
-stop automatic remote reconnection.
+the next launch. Use the workspace's initials to return to it, or click **M** to
+open your first owned workspace. Joining another workspace keeps the existing
+ones in the rail.
 While joining, the button shows **Connecting…**. Success opens an online peer's
 conversation; if nobody else is online, the app shows the agent list instead.
 A timeout or unreachable host produces a visible error. LAN invitations require
@@ -111,7 +140,7 @@ another device cannot be reused.
 In a remote workspace, configuring a model uses your invited identity. Hosts
 can create multiple local model identities; a remote device needs additional
 invited tokens to expose additional identities. Provider agents in your local
-workspace stop while you use a remote workspace, and resume when you return.
+workspace continue running while you use a remote workspace.
 
 ## Work with your team
 
@@ -120,12 +149,15 @@ workspace stop while you use a remote workspace, and resume when you return.
 model agents. **Conversations** sends requests to connected agents and includes
 history in follow-ups to provider agents. Unconfigured device agents reply with
 connectivity echoes rather than AI-generated text.
+Model replies display Markdown headings, bold and italic text, lists, links,
+tables, and code blocks. You can select and copy their rendered text; the
+original message stays intact for conversation history and follow-up requests.
 Requests from another device appear in its conversation on the receiving desktop,
 with an unread count in the agent list and the local agent's response below.
 Select the sending device to read incoming messages and send a request back.
 To share the **same AI conversation**, open the model's chat and click **Invite
 to conversation**. Create a new invitation for the other device, then paste it
-into **+** on that device. The shared chat appears on both devices with the
+into **+ → Join a workspace** on that device. The shared chat appears on both devices with the
 existing messages. Either participant can send the next message; everyone sees
 the AI reply and the model receives their combined conversation history.
 An ordinary **Invite a device** invitation connects the workspace without sharing
@@ -134,12 +166,19 @@ a chat. Shared chats are visible only to their invited devices.
 The design uses charcoal surfaces, blurple actions, a workspace rail, an agent
 sidebar, fading page transitions, animated hover shapes, and quiet orbital
 motion. **Reduce animations** in Providers disables the welcome animation and
-page fades. Direct message history stays in memory and clears when switching
-workspaces or closing the app. Shared conversation history stays on the host
-relay while its app remains open, including when a guest reconnects. Closing the
-host app clears shared conversations; create a fresh invitation after restarting
-it. Shared chats retain up to 100 recent messages within the relay's size limit.
-Failed requests are never automatically replayed.
+page fades.
+
+Direct chats, shared chats, and their model context are saved as messages arrive
+and restored after switching workspaces or reopening the app. Shared history and
+membership persist on the host; guests also keep a local copy for offline
+reading. Existing invitations remain valid across a host restart unless revoked.
+Keep the host app open to send new requests and synchronize a shared workspace.
+
+The complete chat archive remains saved. Follow-up requests send up to 100 recent
+user and assistant messages within a 190 KB transport budget; older messages
+remain readable but are outside that model context window. Large individual
+shared replies can be shortened to fit the relay. Requests interrupted by an
+app shutdown are marked unsuccessful and never automatically replayed.
 
 ## Build a Windows distribution
 
@@ -168,7 +207,8 @@ python -m pytest
 ```
 
 Desktop runtime tests cover automatic relay startup, secure-token separation,
-provider routing, two-desktop messaging, saved workspace restoration, invalid
+provider routing, two-desktop messaging, saved chat context after reopening,
+workspace creation/switching/deletion, member revocation, invalid
 invitation recovery, TLS validation, and orderly shutdown. Native UI flows are
 also checked with Qt's offscreen platform. Provider calls in verification use
 mock endpoints; no paid cloud calls are made.

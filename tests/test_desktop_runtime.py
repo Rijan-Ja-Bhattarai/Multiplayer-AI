@@ -20,6 +20,9 @@ class MemoryVault:
     def set(self, name, value):
         self.values[name] = value
 
+    def delete(self, name):
+        self.values.pop(name, None)
+
 
 class DesktopRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
