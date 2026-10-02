@@ -1,5 +1,6 @@
 """Reusable client; handlers run on the device that owns the agent."""
 import asyncio
+import contextlib
 import json
 from uuid import uuid4
 from urllib.parse import urlsplit
@@ -94,4 +95,17 @@ class AgentClient:
                 for job in jobs:
                     job.cancel()
                 await asyncio.gather(*jobs, return_exceptions=True)
+                # Close the connection rather than only dropping the
+                # reference to it. Cancelling this task raises
+                # CancelledError, which is a BaseException and so is not
+                # caught by the `except Exception` above, but the finally
+                # block still runs. Without an explicit close the relay
+                # keeps this agent registered as a peer and answers the
+                # next connection for the same id with close code 1008,
+                # leaving the restarted agent unable to connect at all.
+                # desktop_app/runtime.py cancels the task this way when it
+                # stops agents, so this is a normal shutdown path rather
+                # than only interpreter exit.
+                with contextlib.suppress(Exception):
+                    await socket.close()
             await asyncio.sleep(1)
