@@ -371,7 +371,8 @@ class MainWindow(QMainWindow):
         for listing in (self.sidebar_agents, self.chat_agents):
             listing.clear()
             for agent in self.agents:
-                item = QListWidgetItem(("●  " if agent["online"] else "○  ") + agent["id"])
+                unread = self.chats.get(agent["id"], {}).get("unread", 0)
+                item = QListWidgetItem(("●  " if agent["online"] else "○  ") + agent["id"] + (f"  ({unread} new)" if unread else ""))
                 item.setData(Qt.ItemDataRole.UserRole, agent["id"])
                 item.setToolTip(agent.get("model") or "Connectivity agent")
                 listing.addItem(item)
@@ -393,7 +394,9 @@ class MainWindow(QMainWindow):
     def select_agent(self, agent_id):
         self.selected = agent_id
         self.chats.setdefault(agent_id, {"messages": [], "history": [], "pending": False})
+        self.chats[agent_id]["unread"] = 0
         self.navigate(2)
+        self.render_agents()
         self.render_messages()
         self.composer.setFocus()
 
@@ -406,7 +409,7 @@ class MainWindow(QMainWindow):
         for role, text in chat.get("messages", []):
             bubble, column = frame("card")
             column.setContentsMargins(17, 13, 17, 13)
-            title = label("You" if role == "user" else "Request unsuccessful" if role == "error" else self.selected)
+            title = label("You" if role == "user" else "Request unsuccessful" if role == "error" else "Agent on this device" if role == "local_agent" else self.selected)
             title.setStyleSheet("font-weight:650; color:" + ("#f38a8e" if role == "error" else "#a8b0ff") + ";")
             column.addWidget(title)
             body = label(text, wrap=True)
@@ -514,6 +517,20 @@ class MainWindow(QMainWindow):
             self.agents = data["agents"]
             self.connection_status.setText("●  Relay connected" if data["connected"] else "●  Reconnecting…")
             self.render_agents()
+        elif event in ("incoming", "incoming_reply"):
+            source = data["from"]
+            chat = self.chats.setdefault(source, {"messages": [], "history": [], "pending": False})
+            if event == "incoming":
+                chat["messages"].append(("peer", data["text"]))
+                if self.selected != source:
+                    chat["unread"] = chat.get("unread", 0) + 1
+                self.add_activity(f"Message from {source}", f"Received by {data['to']}")
+                self.notice(f"Message from {source}. Open their conversation to view it.")
+            else:
+                chat["messages"].append(("error" if data.get("error") else "local_agent", data["to"] + ":\n" + data["text"]))
+            self.render_agents()
+            if self.selected == source:
+                self.render_messages()
         elif event == "activity":
             self.add_activity(data["title"], data["detail"])
         elif event in ("notice", "fatal"):
