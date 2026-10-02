@@ -5,6 +5,17 @@ been removed. The networking APIs and command-line agent tools remain available.
 
 ## Launch the Windows app
 
+Download `MultiplayerAI-Windows-x64.zip` from the release and extract **all**
+files. Double-click **Install-MultiplayerAI.cmd**. It installs the bundled app
+for your Windows account, adds Desktop and Start menu shortcuts, and opens it.
+No Python installation, dependency commands, or administrator access is needed.
+Keep the two installer scripts beside the `MultiplayerAI` folder until installation
+finishes. Close the app and run the installer from a new release to update it;
+your settings and saved credentials are preserved. Installation needs no download.
+
+The installer is unsigned. Only run a release you trust. You can also use the app
+directly without installing:
+
 Open `dist/MultiplayerAI/MultiplayerAI.exe`. Keep the executable and its
 `_internal` folder together when copying the application to another Windows
 device. The app runs without a separately installed Python environment.
@@ -117,11 +128,14 @@ From an environment with the desktop dependencies installed:
 ```sh
 python -m pip install pyinstaller
 python -m PyInstaller --noconfirm MultiplayerAI.spec
+python package_windows_release.py
 ```
 
 The build creates `dist/MultiplayerAI/`. This is a local, unsigned distribution;
 build on each operating system you want to distribute to, and sign releases
 before public distribution. The checked build in this workspace targets Windows.
+The packaging script creates `dist/MultiplayerAI-Windows-x64.zip` with the
+complete app, installer scripts, and this guide. Upload that ZIP as a release asset.
 
 ## Verify
 
