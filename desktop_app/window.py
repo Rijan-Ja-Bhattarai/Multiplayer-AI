@@ -482,6 +482,7 @@ class MainWindow(QMainWindow):
         self.storage_path.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         column.addWidget(self.storage_path)
         column.addWidget(action("Show in file manager", self.open_storage_folder))
+        layout.addWidget(storage)
         identity, column = frame("settings")
         column.setContentsMargins(22, 18, 22, 20)
         column.addWidget(label("Device identity", "heading"))
@@ -493,7 +494,6 @@ class MainWindow(QMainWindow):
         column.addWidget(action("Reset local identity", self.confirm_reset_identity,
                                 name="danger"))
         layout.addWidget(identity)
-        layout.addWidget(storage)
 
         about, column = frame("settings")
         column.setContentsMargins(22, 18, 22, 20)
