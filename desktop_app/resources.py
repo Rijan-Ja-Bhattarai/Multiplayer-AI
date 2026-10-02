@@ -27,7 +27,11 @@ class ResourceSampler:
     """
 
     def __init__(self, disk_path=None, process=None):
-        self.disk_path = disk_path or os.path.abspath(os.sep)
+        # Coerced to str because psutil.disk_usage rejects os.PathLike on
+        # Windows, and Storage.directory is a Path. Passing it straight
+        # through raised TypeError, which the sample() guard below turned
+        # into a silently unavailable meter.
+        self.disk_path = str(disk_path) if disk_path else os.path.abspath(os.sep)
         self.process = process or psutil.Process()
         self.started = time.time()
         # Prime the CPU counters, otherwise the first sample is zero.

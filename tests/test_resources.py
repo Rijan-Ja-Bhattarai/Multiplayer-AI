@@ -87,6 +87,28 @@ def test_humanize_bytes_picks_a_sensible_unit(size, expected_unit) -> None:
     assert ResourceSampler._humanize_bytes(size).endswith(expected_unit)
 
 
+def test_accepts_a_path_object(sampler: ResourceSampler) -> None:
+    """A Path works, because Storage.directory is one.
+
+    psutil.disk_usage rejects os.PathLike on Windows, so passing the Path
+    straight through raised TypeError and the meter silently reported
+    "Unavailable". This test exists to keep that from coming back.
+    """
+    from pathlib import Path
+
+    assert ResourceSampler(Path(tempfile.gettempdir())).sample()["disk"] is not None
+
+
+def test_the_disk_meter_is_available_for_a_real_directory(
+    sampler: ResourceSampler,
+) -> None:
+    """The default configuration reports a disk, not an error state."""
+    reading = sampler.sample()
+
+    assert reading["disk"] is not None, "disk meter unavailable with a valid path"
+    assert reading["disk"]["percent"] >= 0
+
+
 def test_missing_disk_path_falls_back_to_the_root(sampler: ResourceSampler) -> None:
     """A preferences path that no longer exists does not break the page."""
     sampler.disk_path = os.path.join(tempfile.gettempdir(), "not-created-yet")
