@@ -123,8 +123,8 @@ class DesktopRuntime:
 
     async def _attach(self, agent_id, token, handler, allow_insecure=False):
         generation = self.generation
-        async def visible_handler(payload, source):
-            incoming = source != self.active_id and generation == self.generation
+        async def visible_handler(payload, source, shared=False):
+            incoming = not shared and source != self.active_id and generation == self.generation
             if incoming:
                 text = payload.get("text") if isinstance(payload, dict) else payload
                 if isinstance(payload, dict) and isinstance(payload.get("messages"), list):
@@ -145,7 +145,9 @@ class DesktopRuntime:
                 self.emit("incoming_reply", {"from": source, "to": agent_id,
                                             "text": text if isinstance(text, str) else json.dumps(result)})
             return result
-        client = AgentClient(self.active_url, token, visible_handler, allow_insecure=allow_insecure)
+        async def handle_frame(frame):
+            return await visible_handler(frame["payload"], frame["from"], bool(frame.get("conversation_id")))
+        client = AgentClient(self.active_url, token, visible_handler, allow_insecure=allow_insecure, frame_handler=handle_frame)
         task = asyncio.create_task(client.run())
         self.runners[agent_id] = (client, task)
         waiter = asyncio.create_task(client.ready.wait())
@@ -194,15 +196,35 @@ class DesktopRuntime:
                 except Exception:
                     self.emit("notice", f"Could not restore {profile['id']}. Open Providers to check its configuration.")
 
-    async def join(self, url, token, allow_insecure=False, save=True):
+    async def join(self, url, token, allow_insecure=False, save=True, conversation_id=None):
         async with self.mutation:
+            if conversation_id is not None and (not isinstance(conversation_id, str)
+                    or not re.fullmatch(r"conversation-[0-9a-f]{32}", conversation_id)):
+                raise ValueError("Use a valid shared conversation invitation")
             base = relay_http_url(url, allow_insecure)
-            response = await self.http.get(base + "/agents", headers={"Authorization": "Bearer " + token}, timeout=10)
+            try:
+                response = await self.http.get(base + "/agents", headers={"Authorization": "Bearer " + token}, timeout=10)
+            except httpx.TimeoutException:
+                raise ConnectionError("The relay did not respond within 10 seconds. Keep the host app open and check the address, network, and host firewall. A LAN invitation works only on the same reachable network.") from None
+            except httpx.HTTPError:
+                raise ConnectionError("Could not connect to the relay. Check the address and port, keep the host app open, and allow its port through the host firewall. Internet connections need a reachable WSS relay.") from None
             if response.status_code != 200:
                 raise ValueError("Relay rejected this invitation. Check the token and address.")
-            result = response.json()
+            try:
+                result = response.json()
+            except ValueError:
+                raise ValueError("This address did not return a relay response. Use the host's invitation URL ending in /connect.") from None
+            if not isinstance(result, dict):
+                raise ValueError("This address did not return a relay response")
             if not isinstance(result.get("self"), str):
                 raise ValueError("This relay does not support desktop identity discovery")
+            if any(item.get("id") == result["self"] and item.get("online") for item in result.get("agents", [])):
+                raise ValueError("This invitation's device identity is already connected. Ask the host to create a new invitation with a unique device name for this laptop.")
+            if conversation_id:
+                conversation = await self.http.get(base + f"/conversations/{conversation_id}",
+                    headers={"Authorization": "Bearer " + token}, timeout=10)
+                if conversation.status_code != 200:
+                    raise ValueError("This shared conversation is unavailable. Keep the host app open and ask for a new conversation invitation.")
             previous = (self.active_url, self.active_token, self.active_id, self.remote)
             await self._stop_agents()
             self.active_url, self.active_token, self.active_id, self.remote = url, token, result["self"], True
@@ -226,6 +248,8 @@ class DesktopRuntime:
                 raise
             self.emit("workspace", {"name": "Shared workspace", "url": url, "self": self.active_id, "remote": True})
             await self.refresh()
+            if conversation_id:
+                self.emit("conversation_joined", conversation_id)
 
     async def _remove_runner(self, agent_id):
         entry = self.runners.pop(agent_id, None)
@@ -322,6 +346,13 @@ class DesktopRuntime:
                            "local": item["id"] in self.runners, "profile": profile})
         self.emit("agents", {"agents": agents, "self": self.active_id,
                             "connected": bool(self.runners.get(self.active_id, (None,))[0] and self.runners[self.active_id][0].ready.is_set())})
+        response = await self.http.get(base + "/conversations", headers={"Authorization": "Bearer " + self.active_token}, timeout=8)
+        # Older relays still support direct agent chats.
+        if response.status_code == 404:
+            return
+        response.raise_for_status()
+        if generation == self.generation:
+            self.emit("conversations", response.json()["conversations"])
 
     async def _poll(self):
         next_join = time.monotonic() + 15
@@ -358,19 +389,41 @@ class DesktopRuntime:
         except httpx.HTTPError:
             raise RuntimeError("Could not reach the relay. Your request was not replayed.") from None
 
+    async def send_conversation(self, conversation_id, text):
+        generation = self.generation
+        base = relay_http_url(self.active_url, allow_insecure=True)
+        try:
+            response = await self.http.post(base + f"/conversations/{conversation_id}/messages",
+                json={"text": text}, headers={"Authorization": "Bearer " + self.active_token}, timeout=65)
+            if generation != self.generation:
+                raise RuntimeError("Workspace changed while the request was running; it was not replayed")
+            await self.refresh()
+            if response.status_code != 200:
+                raise RuntimeError(response.json().get("error", "Could not send to the shared conversation"))
+            return response.json()
+        except httpx.TimeoutException:
+            raise RuntimeError("The request timed out and was not replayed. Check the shared conversation for the reply.") from None
+        except httpx.HTTPError:
+            raise RuntimeError("Could not reach the relay. Your request was not replayed.") from None
+
     async def ollama_models(self, base_url="http://127.0.0.1:11434"):
         ProviderConfig("ollama", "validation", base_url)
         response = await self.http.get(base_url.rstrip("/") + "/api/tags", timeout=5)
         response.raise_for_status()
         return [item["name"] for item in response.json()["models"]]
 
-    async def invite(self, agent_id, public_url, lan=False):
+    async def invite(self, agent_id, public_url, lan=False, conversation_id=None, target=None, messages=None):
         async with self.mutation:
             if self.remote:
                 raise ValueError("Only this workspace's host can create invitations")
             if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", agent_id) or agent_id in self.credentials:
                 raise ValueError("Choose a new device identity with 1–64 letters, numbers, underscores, or hyphens")
             relay_http_url(public_url, allow_insecure=lan)
+            conversations = self.app.state.relay.conversations
+            if conversation_id and not conversations.get(conversation_id, self.active_id):
+                raise ValueError("Choose an existing conversation in this workspace")
+            if target and not self.app.state.relay.allowed(self.active_id, target):
+                raise ValueError("Choose an agent in this workspace")
             if lan and not self.sharing:
                 await self._stop_agents()
                 self.server.should_exit = True
@@ -387,9 +440,16 @@ class DesktopRuntime:
             self.storage.save_credentials(updated)
             self.credentials = updated
             self.app.state.relay.credentials = updated
+            if target and not conversation_id:
+                conversation_id = conversations.create(self.active_id, target, messages or ())["id"]
+            if conversation_id:
+                conversations.invite(conversation_id, self.active_id, agent_id)
             self.emit("activity", {"title": "Device invitation created", "detail": agent_id})
             await self.refresh()
-            return {"version": 1, "agent_id": agent_id, "url": public_url, "token": updated[agent_id]["token"], "allow_insecure": lan}
+            invitation = {"version": 1, "agent_id": agent_id, "url": public_url, "token": updated[agent_id]["token"], "allow_insecure": lan}
+            if conversation_id:
+                invitation["conversation_id"] = conversation_id
+            return invitation
 
     async def close(self):
         self.closed = True

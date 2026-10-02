@@ -54,6 +54,7 @@ class MainWindow(QMainWindow):
         self.port = 0
         self.selected = None
         self.chats = {}
+        self.conversations = {}
         self.callbacks = {}
         self.request_count = 0
         self.ready = False
@@ -116,7 +117,7 @@ class MainWindow(QMainWindow):
             self.nav_buttons.append(button)
             side.addWidget(button)
         side.addSpacing(23)
-        side.addWidget(label("CONNECTED AGENTS", "eyebrow"))
+        side.addWidget(label("CHATS AND AGENTS", "eyebrow"))
         self.sidebar_agents = QListWidget()
         self.sidebar_agents.setMaximumHeight(245)
         self.sidebar_agents.itemClicked.connect(lambda item: self.select_agent(item.data(Qt.ItemDataRole.UserRole)))
@@ -261,6 +262,8 @@ class MainWindow(QMainWindow):
         column.addWidget(self.chat_title)
         self.chat_subtitle = label("Start a conversation with a connected device.", "muted")
         column.addWidget(self.chat_subtitle)
+        self.share_conversation_button = action("Invite to conversation", self.invite_conversation)
+        column.addWidget(self.share_conversation_button, alignment=Qt.AlignmentFlag.AlignLeft)
         self.messages_scroll = QScrollArea()
         self.messages_scroll.setWidgetResizable(True)
         self.messages_widget = QWidget()
@@ -370,6 +373,14 @@ class MainWindow(QMainWindow):
                                index % 3 if grid is self.overview_cards else index % 2)
         for listing in (self.sidebar_agents, self.chat_agents):
             listing.clear()
+            for room in self.conversations.values():
+                unread = self.chats.get(room["id"], {}).get("unread", 0)
+                item = QListWidgetItem("▤  " + room["title"] + (f"  ({unread} new)" if unread else ""))
+                item.setData(Qt.ItemDataRole.UserRole, room["id"])
+                item.setToolTip("Shared conversation · " + ", ".join(room["members"]))
+                listing.addItem(item)
+                if room["id"] == self.selected:
+                    listing.setCurrentItem(item)
             for agent in self.agents:
                 unread = self.chats.get(agent["id"], {}).get("unread", 0)
                 item = QListWidgetItem(("●  " if agent["online"] else "○  ") + agent["id"] + (f"  ({unread} new)" if unread else ""))
@@ -384,12 +395,17 @@ class MainWindow(QMainWindow):
         self.update_chat_controls()
 
     def update_chat_controls(self):
-        agent = next((item for item in self.agents if item["id"] == self.selected), None)
+        room = self.conversations.get(self.selected)
+        target = room["target"] if room else self.selected
+        agent = next((item for item in self.agents if item["id"] == target), None)
         chat = self.chats.get(self.selected, {})
-        self.send_button.setEnabled(bool(agent and agent["online"] and not chat.get("pending")))
-        self.send_button.setText("Working…" if chat.get("pending") else "Send request  ↑")
-        self.chat_title.setText(self.selected or "Choose an agent")
-        self.chat_subtitle.setText("Your agent is working…" if chat.get("pending") else "Online · Ready to collaborate" if agent and agent["online"] else "Start this agent on its device to continue" if agent else "Choose a connected agent to begin")
+        pending = chat.get("pending") or chat.get("local_pending")
+        self.send_button.setEnabled(bool(agent and agent["online"] and not pending))
+        self.send_button.setText("Working…" if pending else "Send request  ↑")
+        self.chat_title.setText(room["title"] if room else self.selected or "Choose an agent")
+        subtitle = "Your agent is working…" if pending else "Online · Ready to collaborate" if agent and agent["online"] else "Start this agent on its device to continue" if agent else "Choose a connected agent to begin"
+        self.chat_subtitle.setText((f"Shared with {len(room['members'])} devices · " if room else "") + subtitle)
+        self.share_conversation_button.setEnabled(bool(self.ready and not self.remote and agent and agent["online"] and not pending))
 
     def select_agent(self, agent_id):
         self.selected = agent_id
@@ -409,14 +425,17 @@ class MainWindow(QMainWindow):
         for role, text in chat.get("messages", []):
             bubble, column = frame("card")
             column.setContentsMargins(17, 13, 17, 13)
-            title = label("You" if role == "user" else "Request unsuccessful" if role == "error" else "Agent on this device" if role == "local_agent" else self.selected)
+            names = {"user": "You", "error": "Request unsuccessful", "local_agent": "Agent on this device"}
+            room = self.conversations.get(self.selected)
+            speaker = role.removeprefix("member:") if role.startswith("member:") else names.get(role, room["target"] if room else self.selected)
+            title = label(speaker)
             title.setStyleSheet("font-weight:650; color:" + ("#f38a8e" if role == "error" else "#a8b0ff") + ";")
             column.addWidget(title)
             body = label(text, wrap=True)
             body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             column.addWidget(body)
             self.messages.addWidget(bubble)
-        if chat.get("pending"):
+        if chat.get("pending") or chat.get("local_pending"):
             self.messages.addWidget(label("● ● ●   Waiting for your agent…", "muted"))
         self.update_chat_controls()
         QTimer.singleShot(0, lambda: self.messages_scroll.verticalScrollBar().setValue(self.messages_scroll.verticalScrollBar().maximum()))
@@ -432,6 +451,22 @@ class MainWindow(QMainWindow):
             return
         target = self.selected
         chat = self.chats[target]
+        if target in self.conversations:
+            chat["local_pending"] = True
+            self.composer.clear()
+            self.request_count += 1
+            self.stat_values[2].setText(str(self.request_count))
+            self.render_messages()
+            def finished(result):
+                if self.chats.get(target) is chat:
+                    chat["local_pending"] = False
+                    if target == self.selected:
+                        self.render_messages()
+            def failed(message):
+                finished(None)
+                self.notice(message)
+            self.command("send_conversation", target, text, success=finished, failure=failed)
+            return
         payload = {"messages": [*chat["history"], {"role": "user", "content": text}]} if chat["history"] else {"text": text}
         chat["pending"] = True
         chat["messages"].append(("user", text))
@@ -510,6 +545,7 @@ class MainWindow(QMainWindow):
             self.identity_label.setText(data["self"])
             self.invite_button.setEnabled(self.ready and not self.remote)
             self.chats.clear()
+            self.conversations.clear()
             self.selected = None
             self.request_count = 0
             self.render_messages()
@@ -517,6 +553,29 @@ class MainWindow(QMainWindow):
             self.agents = data["agents"]
             self.connection_status.setText("●  Relay connected" if data["connected"] else "●  Reconnecting…")
             self.render_agents()
+        elif event == "conversations":
+            self.conversations = {room["id"]: room for room in data}
+            selected_changed = False
+            for room in data:
+                chat = self.chats.setdefault(room["id"], {"messages": [], "history": [], "pending": False})
+                if chat.get("revision") == room["revision"]:
+                    continue
+                selected_changed = selected_changed or self.selected == room["id"]
+                previous_ids = chat.get("message_ids", set())
+                new_ids = {message["id"] for message in room["messages"]}
+                if self.selected != room["id"]:
+                    chat["unread"] = chat.get("unread", 0) + len(new_ids - previous_ids)
+                chat["message_ids"] = new_ids
+                chat["revision"] = room["revision"]
+                chat["messages"] = [("user" if message["role"] == "user" and message["from"] == self.identity
+                    else "member:" + message["from"] if message["role"] == "user" else message["role"], message["content"])
+                    for message in room["messages"]]
+                chat["pending"] = room["pending"]
+            self.render_agents()
+            if selected_changed:
+                self.render_messages()
+        elif event == "conversation_joined":
+            self.select_agent(data)
         elif event in ("incoming", "incoming_reply"):
             source = data["from"]
             chat = self.chats.setdefault(source, {"messages": [], "history": [], "pending": False})
@@ -561,6 +620,17 @@ class MainWindow(QMainWindow):
     def invite_device(self):
         if self.ready and not self.remote:
             InviteDialog(self).exec()
+
+    def invite_conversation(self):
+        if not self.ready or self.remote or not self.selected:
+            return
+        if self.selected in self.conversations:
+            InviteDialog(self, conversation_id=self.selected).exec()
+        else:
+            chat = self.chats.get(self.selected, {})
+            history = [{"role": role, "content": text} for role, text in chat.get("messages", [])
+                       if role in ("user", "assistant")]
+            InviteDialog(self, target=self.selected, messages=history).exec()
 
     def closeEvent(self, event):
         if self.closing and not self.network.isRunning():

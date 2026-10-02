@@ -101,6 +101,12 @@ relay address and the device's token. The app validates the invitation, connects
 the device, and shows the agents in its group. This workspace is remembered for
 the next launch. Click **M** in the rail to return to your local workspace and
 stop automatic remote reconnection.
+While joining, the button shows **Connecting…**. Success opens an online peer's
+conversation; if nobody else is online, the app shows the agent list instead.
+A timeout or unreachable host produces a visible error. LAN invitations require
+a reachable host address on your network and an allowed host firewall port.
+Use a different invitation for each laptop: an identity already connected on
+another device cannot be reused.
 
 In a remote workspace, configuring a model uses your invited identity. Hosts
 can create multiple local model identities; a remote device needs additional
@@ -117,14 +123,23 @@ connectivity echoes rather than AI-generated text.
 Requests from another device appear in its conversation on the receiving desktop,
 with an unread count in the agent list and the local agent's response below.
 Select the sending device to read incoming messages and send a request back.
-This is agent request/response messaging; joining does not share another laptop's
-screen, files, or conversations with other agents.
+To share the **same AI conversation**, open the model's chat and click **Invite
+to conversation**. Create a new invitation for the other device, then paste it
+into **+** on that device. The shared chat appears on both devices with the
+existing messages. Either participant can send the next message; everyone sees
+the AI reply and the model receives their combined conversation history.
+An ordinary **Invite a device** invitation connects the workspace without sharing
+a chat. Shared chats are visible only to their invited devices.
 
 The design uses charcoal surfaces, blurple actions, a workspace rail, an agent
 sidebar, fading page transitions, animated hover shapes, and quiet orbital
 motion. **Reduce animations** in Providers disables the welcome animation and
-page fades. Message history stays in memory and clears when switching workspaces
-or closing the app. Failed requests are never automatically replayed.
+page fades. Direct message history stays in memory and clears when switching
+workspaces or closing the app. Shared conversation history stays on the host
+relay while its app remains open, including when a guest reconnects. Closing the
+host app clears shared conversations; create a fresh invitation after restarting
+it. Shared chats retain up to 100 recent messages within the relay's size limit.
+Failed requests are never automatically replayed.
 
 ## Build a Windows distribution
 

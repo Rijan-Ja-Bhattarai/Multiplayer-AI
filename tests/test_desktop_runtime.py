@@ -126,6 +126,30 @@ class DesktopRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.runtime.remote)
         self.assertIn("still connected", (await self.runtime.send(identity, {"text": "still connected"}))["text"])
 
+    async def test_unreachable_join_has_visible_error_and_preserves_workspace(self):
+        original_http = self.runtime.http
+        identity = self.runtime.active_id
+        try:
+            for exception, expected in ((httpx.ReadTimeout(""), "did not respond"),
+                                        (httpx.ConnectError(""), "Could not connect")):
+                def fail(request):
+                    raise exception
+                self.runtime.http = httpx.AsyncClient(transport=httpx.MockTransport(fail))
+                with self.assertRaisesRegex(ConnectionError, expected):
+                    await self.runtime.join("wss://unreachable.example/connect", "x" * 32)
+                self.assertEqual(self.runtime.active_id, identity)
+                self.assertFalse(self.runtime.remote)
+                await self.runtime.http.aclose()
+        finally:
+            self.runtime.http = original_http
+
+    async def test_join_rejects_identity_already_in_use_without_disconnect(self):
+        identity = self.runtime.active_id
+        with self.assertRaisesRegex(ValueError, "already connected"):
+            await self.runtime.join(self.runtime.active_url, self.runtime.active_token)
+        self.assertTrue(self.runtime.runners[identity][0].ready.is_set())
+        self.assertFalse(self.runtime.remote)
+
     async def test_shutdown_releases_sockets_and_preserves_identity(self):
         identity = self.runtime.active_id
         await self.runtime.close()

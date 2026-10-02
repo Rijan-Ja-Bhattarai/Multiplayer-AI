@@ -30,6 +30,8 @@ See the [desktop guide](DESKTOP_GUIDE.md) to get started.
 The authenticated relay and reconnecting device client in `network_a2a/`
 connect multiple laptops/desktops over LAN or the internet. They route requests
 between local agents and can forward requests to a local A2A server.
+Desktop conversation invitations share one AI chat, including its existing
+history and subsequent messages and replies, across invited devices.
 
 See [setup and deployment instructions](NETWORK_SETUP.md) for credentials,
 client commands, HTTPS/WSS deployment, and current limits. This relay uses a
@@ -77,6 +79,7 @@ with the client Connection Server is not built yet — see [Scope](#scope).
 | `src/errors.py` | Error codes and the error frame format |
 | `scripts/demo_client.py` | Command-line client for manual testing |
 | `network_a2a/server.py` | Authenticated multi-device agent relay |
+| `network_a2a/conversations.py` | Shared AI chat history and conversation membership |
 | `network_a2a/client.py` | Reconnecting agent client and request correlation |
 | `network_a2a/adapters/` | Model provider handlers |
 | `network_a2a/__main__.py` | Agent client CLI and local A2A bridge |
@@ -248,9 +251,10 @@ The following remain unimplemented in the client Connection Server (`src/`):
 - Persistence; the registry is in-memory and resets on restart
 
 The separate `network_a2a/` relay already provides per-agent authentication,
-group isolation, request/response correlation, and reconnecting clients. It
-keeps connections in memory and requires a single worker and replica; it has
-no session management or durable offline queue.
+group isolation, request/response correlation, shared desktop conversations,
+and reconnecting clients. Connections and shared chats are kept in memory and
+require a single worker and replica. Shared chats last while the host relay
+stays open; there is no durable offline queue.
 
 Two client Connection Server behaviours worth knowing about:
 
