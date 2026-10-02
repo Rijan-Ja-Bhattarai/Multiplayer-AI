@@ -22,6 +22,11 @@ adapters are available in `network_a2a/`; see below and [Scope](#scope).
 
 ## Multi-device agent networking
 
+The native Multiplayer AI desktop app starts its local relay, creates a private
+device identity, and connects automatically. Configure model providers, invite
+devices, join shared relays, and chat with agents from its dark desktop workspace.
+See the [desktop guide](DESKTOP_GUIDE.md) to get started.
+
 The authenticated relay and reconnecting device client in `network_a2a/`
 connect multiple laptops/desktops over LAN or the internet. They route requests
 between local agents and can forward requests to a local A2A server.
