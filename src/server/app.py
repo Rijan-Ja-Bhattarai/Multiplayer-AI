@@ -35,6 +35,14 @@ from src.messages.envelope import MessageEnvelope
 from src.routing.router import route_message
 from src.server.connection_manager import ConnectionManager
 
+# Configure before creating the logger, otherwise the INFO events listed in
+# agent.md section 23 are discarded: Python's default root level is WARNING
+# and no handler is attached, so logger.info() would emit nothing at all.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+
 logger = logging.getLogger("connection_server")
 
 # One registry per process. The prototype runs a single process, so there
