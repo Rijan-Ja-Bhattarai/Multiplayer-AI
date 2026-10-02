@@ -16,12 +16,32 @@ Implemented and tested:
 - Client-to-client message routing
 - Structured error responses and event logging
 
-Not implemented yet: the Agent Gateway, A2A agent-to-agent communication,
-sessions, and authentication. See [Scope](#scope) for details.
+The client Connection Server does not yet integrate with the Agent Gateway,
+sessions, or authentication. A separate authenticated agent relay and provider
+adapters are available in `network_a2a/`; see below and [Scope](#scope).
+
+## Multi-device agent networking
+
+The authenticated relay and reconnecting device client in `network_a2a/`
+connect multiple laptops/desktops over LAN or the internet. They route requests
+between local agents and can forward requests to a local A2A server.
+
+See [setup and deployment instructions](NETWORK_SETUP.md) for credentials,
+client commands, HTTPS/WSS deployment, and current limits. This relay uses a
+custom transport; standard A2A discovery and streaming are not implemented.
+
+Provider adapters support Ollama, Bionic GPT, OpenAI, Claude, Gemini, Groq,
+DeepSeek, Mistral, OpenRouter, and custom OpenAI-compatible endpoints. See
+[provider setup and examples](PROVIDER_ADAPTERS.md).
+
+The client Connection Server and agent relay are separate applications with
+different WebSocket message formats. They are not wired together. Run them on
+different ports if both are needed; each guide uses port 8000 by default.
 
 ## Architecture
 
-Two layers, deliberately kept separate:
+The client Connection Server targets the following architecture. Its Agent
+Gateway connection is planned:
 
 ```
    CLIENT DOMAIN                      AGENT LAYER
@@ -37,8 +57,9 @@ Two layers, deliberately kept separate:
             Client B                      └──────────────┘
 ```
 
-The Connection Server is the only component in this repository. The agent
-layer is not built yet — see [Scope](#scope).
+The diagram describes the client Connection Server roadmap. The separate
+`network_a2a/` relay and provider adapters are implemented, but integration
+with the client Connection Server is not built yet — see [Scope](#scope).
 
 ### Layout
 
@@ -50,6 +71,10 @@ layer is not built yet — see [Scope](#scope).
 | `src/messages/envelope.py` | The client-facing message format |
 | `src/errors.py` | Error codes and the error frame format |
 | `scripts/demo_client.py` | Command-line client for manual testing |
+| `network_a2a/server.py` | Authenticated multi-device agent relay |
+| `network_a2a/client.py` | Reconnecting agent client and request correlation |
+| `network_a2a/adapters/` | Model provider handlers |
+| `network_a2a/__main__.py` | Agent client CLI and local A2A bridge |
 
 Routing decisions live only in `src/routing/router.py`. The WebSocket
 handler does not decide where a message goes.
@@ -192,9 +217,11 @@ with `INVALID_MESSAGE` and keeps reading.
 python -m pytest
 ```
 
-61 tests covering agent.md Tests 1–6 (server starts, health responds,
+Client Connection Server tests cover agent.md Tests 1–6 (server starts, health responds,
 client connects, two clients stay connected, A → B delivers, unknown
-destination errors) plus the envelope and routing contracts.
+destination errors), plus the envelope and routing contracts. Additional
+relay and adapter tests cover multi-device messaging, reconnection, provider
+request formats, and safe failures. Provider HTTP responses are mocked.
 
 Run a subset:
 
@@ -207,15 +234,20 @@ in favour of `httpx2`. Cosmetic, and left alone for now.
 
 ## Scope
 
-Not built, on purpose, until the client communication path is proven:
+The following remain unimplemented in the client Connection Server (`src/`):
 
-- Agent Gateway and A2A agent-to-agent messaging
+- Agent Gateway integration with the agent layer
 - Response correlation between a client request and a later agent reply
 - Session management
 - Authentication — client ids are self-declared and unverified
 - Persistence; the registry is in-memory and resets on restart
 
-Two behaviours worth knowing about:
+The separate `network_a2a/` relay already provides per-agent authentication,
+group isolation, request/response correlation, and reconnecting clients. It
+keeps connections in memory and requires a single worker and replica; it has
+no session management or durable offline queue.
+
+Two client Connection Server behaviours worth knowing about:
 
 - **Reconnecting with an existing client id** replaces the registry entry
   but does not close the previous socket, which is left orphaned.
