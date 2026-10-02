@@ -1,7 +1,19 @@
+agent.md
+
+# Python build and cache artifacts
 __pycache__/
-.vscode/
-.venv/
-credentials*.json
-.env
+*.py[cod]
+*.egg-info/
 .pytest_cache/
+.mypy_cache/
+
+# Local environments and editor settings
+.venv/
+venv/
+.vscode/
 .tmp/
+
+# Local configuration, credentials, and logs
+.env
+credentials*.json
+*.log
