@@ -22,7 +22,7 @@ from PySide6.QtCore import QTimer  # noqa: E402
 from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton  # noqa: E402
 
 from desktop_app import window as win  # noqa: E402
-from desktop_app.storage import Storage  # noqa: E402
+from desktop_app.storage import ABSENT, REMOVED, Storage  # noqa: E402
 from desktop_app.theme import DARK, LIGHT, MIKU, THEME_CHOICES  # noqa: E402
 
 
@@ -39,7 +39,7 @@ class MemoryVault:
         self.values[name] = value
 
     def delete(self, name):
-        return self.values.pop(name, None) is not None
+        return REMOVED if self.values.pop(name, None) is not None else ABSENT
 
 
 
@@ -382,3 +382,33 @@ def test_switching_themes_does_not_turn_an_error_toast_green(window) -> None:
 
     assert win.color(LIGHT, "error") in window.toast.styleSheet()
     assert win.color(LIGHT, "toast_fg") not in window.toast.styleSheet()
+
+
+def test_settings_shows_owed_credentials_until_the_cleanup_completes(window) -> None:
+    """State, not a toast, for a condition that outlives the message.
+
+    isHidden is checked rather than isVisible because the window is never
+    shown in a headless test, so every child reports as not visible.
+    """
+    window.navigate(win.SETTINGS_PAGE)
+
+    assert window.pending_cleanup.isHidden(), "nothing is owed after a clean start"
+
+    window.show_pending_cleanup(2)
+    assert not window.pending_cleanup.isHidden()
+    assert "2 saved credentials" in window.pending_cleanup.text()
+    assert "Unlock" in window.pending_cleanup.text()
+
+    window.show_pending_cleanup(1)
+    assert "1 saved credential " in window.pending_cleanup.text()
+
+    window.show_pending_cleanup(0)
+    assert window.pending_cleanup.isHidden(), "cleared once nothing is owed"
+
+
+def test_the_pending_line_receives_the_runtime_event(window) -> None:
+    """The runtime's pending_cleanup event is what drives the line."""
+    window.network_event("pending_cleanup", {"credentials": 3})
+
+    assert not window.pending_cleanup.isHidden()
+    assert "3 saved credentials" in window.pending_cleanup.text()

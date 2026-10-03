@@ -6,7 +6,7 @@ from pathlib import Path
 import httpx
 
 from desktop_app.runtime import DesktopRuntime, relay_http_url
-from desktop_app.storage import Storage
+from desktop_app.storage import ABSENT, REMOVED, UNAVAILABLE, Storage
 
 
 class MemoryVault:
@@ -20,7 +20,12 @@ class MemoryVault:
         self.values[name] = value
 
     def delete(self, name):
-        self.values.pop(name, None)
+        # Speaks the same vocabulary as the real Vault so a cleanup that
+        # reports an outstanding credential is exercised for real.
+        if name in self.values:
+            del self.values[name]
+            return REMOVED
+        return ABSENT
 
 
 class DesktopRuntimeTests(unittest.IsolatedAsyncioTestCase):
@@ -262,6 +267,122 @@ class WorkspaceDurabilityTests(unittest.IsolatedAsyncioTestCase):
             # called "local" shares the root one, the rest are namespaced.
             self.assertTrue(engine.storage.vault.get("relay:" + engine.active_id),
                             "the replacement token must be in the vault")
+
+    # --- an interrupted deletion ------------------------------------------
+
+    async def test_a_locked_credential_store_leaves_a_record_the_user_can_see(self):
+        """A token that outlives its workspace must not pass unnoticed.
+
+        The workspace really is deleted, so nothing on disk points at the
+        leftover credentials. The record is what lets a later launch finish
+        the job, and the count is what lets Settings say so.
+        """
+        second = await self.runtime.create_workspace("Writing")
+        await self.runtime.switch_workspace(second["id"])
+        self.runtime.app.state.relay.member_remover = None
+        original = self.runtime.engine.storage.vault.delete
+
+        def locked(name):
+            return UNAVAILABLE
+        self.runtime.engine.storage.vault.delete = locked
+        try:
+            await self.runtime.delete_workspace()
+        finally:
+            self.runtime.engine.storage.vault.delete = original
+
+        records = self.runtime.read_pending_deletions()
+        self.assertEqual([r["id"] for r in records], [second["id"]])
+        self.assertTrue(records[0]["credentials"], "the owed names must be recorded")
+        owed = [data for kind, data in self.events if kind == "pending_cleanup"]
+        self.assertTrue(owed and owed[-1]["credentials"] > 0)
+        self.assertTrue([1 for kind, data in self.events
+                         if kind == "notice" and "credential" in str(data).lower()],
+                        "the user must be told the cleanup did not finish")
+
+    async def test_a_recorded_deletion_is_finished_on_the_next_launch(self):
+        """The interrupted half is completed without any further action."""
+        second = await self.runtime.create_workspace("Writing")
+        await self.runtime.switch_workspace(second["id"])
+        self.runtime.app.state.relay.member_remover = None
+        vault = self.runtime.engine.storage.vault
+        owed_names = list(self.runtime._credential_names_for(self.runtime.engine.storage))
+        self.runtime.add_pending_deletion(
+            {"id": second["id"], "kind": "local"}, owed_names)
+
+        self.runtime.retry_pending_deletions()
+
+        for name in owed_names:
+            self.assertIsNone(vault.get(name), f"{name} should have been deleted")
+        self.assertEqual(self.runtime.read_pending_deletions(), [])
+
+    async def test_retrying_a_finished_deletion_is_harmless(self):
+        """Idempotent, because a crash after the purge leaves the record."""
+        second = await self.runtime.create_workspace("Writing")
+        await self.runtime.switch_workspace(second["id"])
+        self.runtime.app.state.relay.member_remover = None
+        self.runtime.add_pending_deletion(
+            {"id": second["id"], "kind": "local"},
+            list(self.runtime._credential_names_for(self.runtime.engine.storage)))
+
+        self.runtime.retry_pending_deletions()
+        self.runtime.add_pending_deletion(
+            {"id": second["id"], "kind": "local"}, ["remote-token"])
+        self.runtime.retry_pending_deletions()
+
+        self.assertEqual(self.runtime.read_pending_deletions(), [])
+
+    async def test_a_failed_catalog_write_keeps_the_engine_registered(self):
+        """close() only closes engines it still knows about.
+
+        Dropping the engine before the catalog was written would strand its
+        relay and its port for the rest of the process, with no error.
+        """
+        engine = self.runtime.engine
+        workspace_id = self.runtime.active_workspace_id
+
+        def refuse():
+            raise OSError("disk full")
+        self.runtime.save_catalog = refuse
+        with self.assertRaises(OSError):
+            await self.runtime.delete_workspace()
+
+        self.assertIn(workspace_id, self.runtime.engines,
+                      "the engine must stay registered so close() can reach it")
+        self.assertEqual(self.runtime.active_workspace_id, workspace_id)
+        self.assertIn(workspace_id,
+                      {e["id"] for e in self.runtime.catalog["workspaces"]})
+        self.assertEqual(self.runtime.read_pending_deletions(), [],
+                         "nothing was recorded, so nothing should be owed")
+
+    async def test_the_local_workspace_directory_is_never_removed(self):
+        """The local workspace shares the root, so its directory must stay.
+
+        Every other workspace lives under workspaces/<id>. Treating the
+        local one the same way would delete settings.json, the catalog and
+        every other workspace along with it.
+        """
+        self.assertIsNone(self.runtime._workspace_directory("local"))
+        second = await self.runtime.create_workspace("Writing")
+        self.assertTrue(self.runtime._workspace_directory(second["id"]))
+
+        self.runtime.app.state.relay.member_remover = None
+        await self.runtime.delete_workspace()
+
+        self.assertTrue(self.storage.path.exists(), "the root settings must survive")
+        self.assertTrue(self.runtime.catalog_path.exists())
+
+    def test_a_hand_edited_record_cannot_point_outside_the_workspaces_folder(self):
+        """The record's id is used to build a path that is then removed."""
+        for hostile in ("../../..", "workspace-../../etc", "local/../..",
+                        "C:/Windows", "", "workspace-" + "z" * 32):
+            with self.subTest(workspace_id=hostile):
+                self.runtime.pending_path.write_text(json.dumps(
+                    [{"id": hostile, "kind": "local", "credentials": ["remote-token"],
+                      "attempts": 0}]), encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    self.runtime._workspace_directory(hostile)
+                self.assertEqual(self.runtime.read_pending_deletions(), [],
+                                 "a malformed record must be ignored, not acted on")
 
 
 if __name__ == "__main__":

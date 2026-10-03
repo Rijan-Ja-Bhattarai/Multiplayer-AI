@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 from desktop_app.runtime import DesktopRuntime
-from desktop_app.storage import Storage
+from desktop_app.storage import UNAVAILABLE, Storage
 from tests.test_desktop_runtime import MemoryVault
 
 
@@ -100,6 +100,43 @@ class WorkspacePersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("guest", self.host.credentials)
         self.assertNotIn("guest", self.host.app.state.relay.conversations.rooms[invitation["conversation_id"]]["members"])
 
+    async def test_member_removal_says_so_when_a_token_cannot_be_deleted(self):
+        """A revoked member whose token lingers is worth reporting.
+
+        The member is out of the workspace either way, so the deletion
+        succeeds. What must not happen is silence: a secret this device
+        still holds for someone with no access is the part the owner
+        would want to know about.
+        """
+        invitation = await self.host.invite("guest", self.host.active_url, target=self.host.active_id)
+        await self.guest_join(invitation)
+        original = self.vault.delete
+
+        def locked(name):
+            return UNAVAILABLE
+        self.vault.delete = locked
+        try:
+            await self.host.remove_member("guest")
+        finally:
+            self.vault.delete = original
+
+        self.assertNotIn("guest", self.host.credentials, "access is revoked either way")
+        self.assertIn("relay:guest", self.vault.values, "the token could not be removed")
+        notices = [data for kind, data in self.events
+                   if kind == "notice" and "credential" in str(data).lower()]
+        self.assertTrue(notices, "the user must be told the token survived")
+
+    async def test_member_removal_is_quiet_when_the_token_is_gone(self):
+        """The happy path should not cry wolf."""
+        invitation = await self.host.invite("guest", self.host.active_url, target=self.host.active_id)
+        await self.guest_join(invitation)
+
+        await self.host.remove_member("guest")
+
+        self.assertNotIn("relay:guest", self.vault.values)
+        self.assertFalse([data for kind, data in self.events
+                          if kind == "notice" and "credential" in str(data).lower()])
+
     async def test_guests_cannot_rename_or_remove_members_and_can_leave(self):
         invitation = await self.host.invite("guest", self.host.active_url)
         await self.guest_join(invitation)
@@ -121,7 +158,10 @@ class WorkspacePersistenceTests(unittest.IsolatedAsyncioTestCase):
         store.save("ui", "state", {"chats": {"deleted": {"messages": [["user", "Delete this"]]}}})
         await self.host.delete_workspace()
         self.assertEqual(self.host.active_workspace_id, root_id)
-        self.assertEqual(store.load("ui"), {})
+        # The workspace's whole directory is removed, so its archive goes with
+        # it rather than being emptied in place. The store object captured
+        # above can no longer open its file, which is the point.
+        self.assertFalse((Path(self.directory.name) / "host" / "workspaces" / second["id"]).exists())
         self.assertIn("Keep this", json.dumps(self.host.engine.history_store.load("ui")))
         self.assertNotIn(second["id"], {entry["id"] for entry in self.host.catalog["workspaces"]})
         await self.host.delete_workspace()
@@ -139,7 +179,7 @@ class WorkspacePersistenceTests(unittest.IsolatedAsyncioTestCase):
         await self.guest.delete_workspace()
         self.assertEqual(self.guest.active_workspace_id, owned_id)
         self.assertNotIn(remote_id, {entry["id"] for entry in self.guest.catalog["workspaces"]})
-        self.assertEqual(store.load("ui"), {})
+        self.assertFalse((Path(self.directory.name) / "guest" / "workspaces" / remote_id).exists())
         self.assertIsNone(self.guest.storage.vault.get(remote_id + ":remote-token"))
         self.assertIn("guest", self.host.credentials)
 

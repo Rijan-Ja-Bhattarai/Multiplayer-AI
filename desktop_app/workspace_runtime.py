@@ -17,6 +17,8 @@ from network_a2a.client import AgentClient
 from network_a2a.server import Relay, create_app
 from network_a2a.persistence import HistoryStore
 
+from .storage import UNAVAILABLE
+
 
 def relay_http_url(url, allow_insecure=False):
     # Reuse the device client's transport validation and enforce the endpoint.
@@ -258,7 +260,7 @@ class WorkspaceRuntime:
             # leaving that identity present in memory but gone from the
             # vault and from settings, and so lost on the next launch.
             superseded = [i for i in removed if i not in fresh]
-            self.storage.forget_identities(superseded)
+            forgotten, undeleted = self.storage.forget_identities(superseded)
             await self._stop_agents()
             self.credentials = fresh
             if self.app is not None:
@@ -275,10 +277,19 @@ class WorkspaceRuntime:
                 self.emit("notice", "Could not reissue an identity for "
                                     f"{', '.join(str(s) for s in skipped)}. Open Providers "
                                     "to rename and reconnect those agents.")
+            if undeleted:
+                # The reset itself succeeded, but these superseded tokens are
+                # still in the credential store. Saying nothing would leave the
+                # user believing a clean removal.
+                self.emit("notice", f"{len(undeleted)} old "
+                                    f"{'token' if len(undeleted) == 1 else 'tokens'} "
+                                    "could not be removed from the credential store. "
+                                    "Unlock it and restart; the app will try again.")
             await self._use_local(forget_remote=True)
             return {"removed": removed, "device_id": device_id, "skipped": skipped,
                     "reissued": sorted(i for i in fresh if i != device_id),
-                    "joined": joined}
+                    "joined": joined, "undeleted": undeleted,
+                    "forgotten": forgotten}
 
     async def _restore_profiles(self):
         for profile in self.storage.settings.get("agents", []):
@@ -582,10 +593,17 @@ class WorkspaceRuntime:
             await self._remove_runner(member)
             self.storage.settings["agents"] = [profile for profile in self.storage.settings.get("agents", []) if profile["id"] != member]
             self.storage.save()
-            if hasattr(self.storage.vault, "delete"):
-                self.storage.vault.delete("relay:" + member)
-                self.storage.vault.delete("provider:" + member)
+            # The member is out of the workspace either way, but a token left
+            # in the OS credential store would still be a secret this device
+            # holds for someone who no longer has access, so say so rather
+            # than reporting a clean removal.
+            undeleted = [name for name in ("relay:" + member, "provider:" + member)
+                         if self.storage.vault.delete(name) == UNAVAILABLE]
             self.emit("activity", {"title": "Member removed", "detail": member})
+            if undeleted:
+                self.emit("notice", f"{member} was removed, but their saved credentials "
+                                    "could not be deleted. Unlock your credential store "
+                                    "and restart; the app will try again.")
             await self.refresh()
 
     async def close(self):

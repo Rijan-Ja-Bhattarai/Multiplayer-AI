@@ -20,14 +20,24 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from desktop_app.storage import Storage, Vault, WorkspaceVault, default_data_directory
+import keyring.errors
+
+from desktop_app.storage import (ABSENT, REMOVED, UNAVAILABLE, Storage, Vault,
+                                  WorkspaceVault, default_data_directory)
 
 
 class FakeBackend:
-    """Stands in for the keyring module, with selectable failures."""
+    """Stands in for the keyring module, with selectable failures.
+
+    Exposes ``errors`` the way the real keyring module does, and raises
+    ``PasswordDeleteError`` for an absent entry, so Vault.delete's
+    distinction between "not there" and "store refused" is exercised
+    against the same shapes the real backend produces.
+    """
 
     def __init__(self, read_error=None, write_error=None, delete_error=None):
         self.values = {}
+        self.errors = keyring.errors
         self.read_error = read_error
         self.write_error = write_error
         self.delete_error = delete_error
@@ -43,12 +53,10 @@ class FakeBackend:
         self.values[(service, name)] = value
 
     def delete_password(self, service, name):
-        # keyring raises PasswordDeleteError for an absent entry rather
-        # than returning quietly, and Vault.delete reports that as False.
         if self.delete_error:
             raise self.delete_error
         if self.values.pop((service, name), None) is None:
-            raise RuntimeError("PasswordDeleteError")
+            raise keyring.errors.PasswordDeleteError(service)
 
 
 def vault_with(backend):
@@ -89,25 +97,36 @@ class VaultTests(unittest.TestCase):
 
         self.assertIn("Could not save credentials", str(caught.exception))
 
-    def test_delete_reports_whether_it_removed_anything(self) -> None:
-        """Callers use this to tell a real removal from a no-op."""
+    def test_delete_distinguishes_removed_from_already_absent(self) -> None:
+        """Both mean the entry is gone; a caller retrying needs both."""
         backend = FakeBackend()
         vault = vault_with(backend)
         vault.set("relay:device-1", "token")
 
-        self.assertTrue(vault.delete("relay:device-1"))
-        self.assertFalse(vault.delete("relay:device-1"), "already absent")
+        self.assertEqual(vault.delete("relay:device-1"), REMOVED)
+        self.assertEqual(vault.delete("relay:device-1"), ABSENT)
 
-    def test_a_store_that_refuses_deletion_is_survivable(self) -> None:
+    def test_an_absent_entry_is_not_the_same_as_a_locked_store(self) -> None:
+        """The distinction a retry depends on.
+
+        A boolean collapsed both into False, so a caller could not tell
+        "there was nothing to remove" from "the store would not let me",
+        and a superseded credential could outlive the deletion that was
+        supposed to retire it.
+        """
+        self.assertEqual(vault_with(FakeBackend()).delete("relay:nothing"), ABSENT)
+        self.assertEqual(
+            vault_with(FakeBackend(delete_error=RuntimeError("locked"))).delete("relay:x"),
+            UNAVAILABLE)
+
+    def test_a_store_that_refuses_deletion_does_not_raise(self) -> None:
         """Cleanup must not raise, or a locked store breaks the caller.
 
-        forget_identities prunes settings regardless, so a token left
-        behind is preferable to an exception escaping a reset or a
-        workspace deletion.
+        The caller decides what to do about it; the vault only reports.
         """
         vault = vault_with(FakeBackend(delete_error=RuntimeError("locked")))
 
-        self.assertFalse(vault.delete("relay:device-1"))
+        self.assertEqual(vault.delete("relay:device-1"), UNAVAILABLE)
 
     def test_the_backend_is_never_leaked_into_an_error(self) -> None:
         """keyring's own text can carry paths or a service name."""

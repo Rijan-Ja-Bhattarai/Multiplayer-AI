@@ -11,6 +11,18 @@ def default_data_directory():
     return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "multiplayer-ai"
 
 
+# Outcome of a credential-store deletion. A caller retrying a cleanup
+# needs to tell "it was never there" apart from "the store would not let
+# me", and a bare boolean erases that difference.
+REMOVED = "removed"
+ABSENT = "absent"
+UNAVAILABLE = "unavailable"
+
+# The two outcomes that mean the entry is gone, and the caller has what it
+# wanted. Only UNAVAILABLE is worth retrying or reporting.
+GONE = (REMOVED, ABSENT)
+
+
 class Vault:
     def __init__(self):
         import keyring
@@ -29,18 +41,20 @@ class Vault:
             raise RuntimeError("Could not save credentials to the OS credential store.") from None
 
     def delete(self, name):
-        """Best-effort removal; absent entries and locked stores are fine.
+        """Report whether the entry is now gone, not merely that a call failed.
 
-        Used when discarding an identity or a workspace. The point is to
-        stop this device referring to it, and the caller removes its own
-        bookkeeping regardless, so a store that refuses deletion must not
-        abort the cleanup. Returns whether an entry was actually removed.
+        Every backend raises ``PasswordDeleteError`` when there is nothing
+        to delete, which is the result the caller wanted, so that counts as
+        success. Anything else means the store refused the operation, which
+        is the only case worth retrying or telling the user about.
         """
         try:
             self.backend.delete_password("MultiplayerAI", name)
-            return True
+            return REMOVED
+        except self.backend.errors.PasswordDeleteError:
+            return ABSENT
         except Exception:
-            return False
+            return UNAVAILABLE
 
 
 class WorkspaceVault:
@@ -61,8 +75,15 @@ class WorkspaceVault:
         self.vault.set(self.prefix + name, value)
 
     def delete(self, name):
-        if hasattr(self.vault, "delete"):
-            self.vault.delete(self.prefix + name)
+        """Namespaced delete, reporting the underlying outcome.
+
+        The inner result is passed through rather than dropped, so a caller
+        cleaning up a workspace can tell a finished cleanup from a locked
+        credential store.
+        """
+        if not hasattr(self.vault, "delete"):
+            return ABSENT
+        return self.vault.delete(self.prefix + name)
 
 
 class Storage:
@@ -123,23 +144,32 @@ class Storage:
     def forget_identities(self, agent_ids):
         """Delete these identities from the vault and the settings mapping.
 
-        Called only once a replacement credential has been stored, so a
-        store that refuses the deletion costs nothing: the ids are
-        already unused. Vault deletion is best effort, so the mapping is
-        pruned either way. The device's own id is normally not passed
-        in, because the vault entry for it now holds the new token.
+        Called only once a replacement credential has been stored, so the
+        superseded tokens are already unused and losing them costs nothing.
+        The settings mapping is pruned either way, but the credential names
+        that could not be deleted are returned so the caller can tell the
+        user instead of assuming the cleanup finished. The device's own id
+        is normally not passed in, because the vault entry for it now
+        holds the new token.
+
+        Returns:
+            ``(removed, undeleted)`` - the ids pruned from settings, and
+            those whose vault entry is still present.
         """
         identities = self.settings.get("identities")
         removed = []
+        undeleted = []
         for agent_id in agent_ids:
-            self.vault.delete("relay:" + agent_id)
+            if self.vault.delete("relay:" + agent_id) == UNAVAILABLE:
+                undeleted.append(agent_id)
+            else:
+                removed.append(agent_id)
             if isinstance(identities, dict):
                 identities.pop(agent_id, None)
-            removed.append(agent_id)
         self.dropped_identities = []
         if removed:
             self.save()
-        return removed
+        return removed, undeleted
 
     def save_credentials(self, credentials):
         for agent_id, config in credentials.items():

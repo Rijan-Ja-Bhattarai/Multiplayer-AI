@@ -505,6 +505,15 @@ class MainWindow(QMainWindow):
         column.addWidget(label("Turns off the welcome animation and page fades.", "muted", True))
         layout.addWidget(motion)
 
+        cleanup, column = frame("settings")
+        column.setContentsMargins(22, 18, 22, 20)
+        column.addWidget(label("Stored credentials", "heading"))
+        self.pending_cleanup = label("", "muted", True)
+        self.pending_cleanup.setWordWrap(True)
+        self.pending_cleanup.setVisible(False)
+        column.addWidget(self.pending_cleanup)
+        layout.addWidget(cleanup)
+
         storage, column = frame("settings")
         column.setContentsMargins(22, 18, 22, 20)
         column.addWidget(label("Data on this device", "heading"))
@@ -1040,6 +1049,23 @@ class MainWindow(QMainWindow):
         else:
             self.notice(message, error=True)
 
+    def show_pending_cleanup(self, count):
+        """State, rather than a passing notice, for credentials still owed.
+
+        The toast is gone in a few seconds, and this can be true for as
+        long as the credential store stays locked, so Settings keeps it
+        visible until the cleanup actually completes.
+        """
+        count = int(count or 0)
+        if not hasattr(self, "pending_cleanup"):
+            return
+        self.pending_cleanup.setVisible(count > 0)
+        if count:
+            self.pending_cleanup.setText(
+                f"{count} saved {'credential' if count == 1 else 'credentials'} from a "
+                "deleted workspace could not be removed. Unlock your credential store "
+                "and restart; the app will try again.")
+
     def network_event(self, event, data):
         if event == "ready":
             self.ready = True
@@ -1137,6 +1163,8 @@ class MainWindow(QMainWindow):
             if event == "fatal":
                 self.progress.hide()
                 self.connection_status.setText("●  Startup needs attention")
+        elif event == "pending_cleanup":
+            self.show_pending_cleanup(data["credentials"])
         elif event == "offline":
             self.connection_status.setText("●  Relay unavailable")
             for agent in self.agents:

@@ -15,7 +15,7 @@ import unittest
 from pathlib import Path
 
 from desktop_app.workspace_runtime import WorkspaceRuntime
-from desktop_app.storage import Storage
+from desktop_app.storage import ABSENT, REMOVED, UNAVAILABLE, Storage
 
 
 class MemoryVault:
@@ -49,9 +49,9 @@ class MemoryVault:
 
     def delete(self, name):
         if self.broken:
-            return False
+            return UNAVAILABLE
         self.operations.append(("delete", name))
-        return self.values.pop(name, None) is not None
+        return REMOVED if self.values.pop(name, None) is not None else ABSENT
 
 
 # The relay rejects tokens shorter than 32 characters, so a fixture that
@@ -178,25 +178,32 @@ class ResetIdentityTests(unittest.IsolatedAsyncioTestCase):
         vault = MemoryVault()
         storage = storage_with_identity(vault)
 
-        removed = storage.forget_identities(["device-abc12345"])
+        removed, undeleted = storage.forget_identities(["device-abc12345"])
 
         self.assertEqual(removed, ["device-abc12345"])
+        self.assertEqual(undeleted, [], "a healthy store owes nothing")
         self.assertEqual(storage.settings["identities"], {})
         self.assertNotIn("relay:device-abc12345", vault.values)
 
-    def test_forget_survives_a_store_that_refuses_deletion(self):
-        """Settings are cleared even if the token cannot be deleted."""
+    def test_a_refused_deletion_is_reported_rather_than_assumed(self):
+        """The settings are pruned either way, but the caller is told.
+
+        Reporting the token as deleted when the store would not remove it
+        is how a superseded credential outlives the reset that retired it.
+        """
         vault = MemoryVault()
         storage = storage_with_identity(vault)
 
         def refuse(name):
-            return False
+            return UNAVAILABLE
         vault.delete = refuse
 
-        removed = storage.forget_identities(["device-abc12345"])
+        removed, undeleted = storage.forget_identities(["device-abc12345"])
 
-        self.assertEqual(removed, ["device-abc12345"])
+        self.assertEqual(removed, [])
+        self.assertEqual(undeleted, ["device-abc12345"])
         self.assertEqual(storage.settings["identities"], {})
+        self.assertIn("relay:device-abc12345", vault.values)
 
     def test_forget_keeps_the_device_id(self):
         """The token identifies the device, so a stable id is kept."""
