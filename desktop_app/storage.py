@@ -337,8 +337,10 @@ class Storage:
             return False
         if record["type"] == "workspace":
             workspace = record.get("id")
-            return workspace == LOCAL_WORKSPACE or (
-                isinstance(workspace, str) and bool(WORKSPACE_ID.fullmatch(workspace)))
+            if not (workspace == LOCAL_WORKSPACE
+                    or (isinstance(workspace, str) and bool(WORKSPACE_ID.fullmatch(workspace)))):
+                return False
+            return isinstance(record.get("data_owed", False), bool)
         # None means the root vault, which is also what a missing key means.
         scope = record.get("workspace")
         return ((scope is None or (isinstance(scope, str)
@@ -365,7 +367,7 @@ class Storage:
         """Written before the change it describes, and after each attempt."""
         write_json_durably(self.ledger_path, json.dumps(records, indent=2))
 
-    def record_workspace_deletion(self, entry, credentials, root_credentials=()):
+    def record_workspace_deletion(self, entry, credentials, root_credentials=(), data_owed=False):
         """Record a workspace's removal before anything is destroyed.
 
         The names are copied in because the settings that name them live in
@@ -373,12 +375,17 @@ class Storage:
         apart from the workspace's own, since the pre-catalog layout kept
         the invitation token and provider key in the root settings and
         those are deleted through the root vault.
+
+        ``data_owed`` records that the workspace directory itself is still
+        there. Without it a record holding no names is ambiguous between a
+        stranded chat archive and a catalog entry that could not be flushed,
+        and those need different things said about them.
         """
         key = {"type": "workspace", "id": entry["id"]}
         records = [r for r in self.read_pending_cleanup() if not self._matches(r, key)]
         records.append({"type": "workspace", "id": entry["id"], "kind": entry["kind"],
                         "url": entry.get("url"), "credentials": list(credentials),
-                        "root_credentials": list(root_credentials)})
+                        "root_credentials": list(root_credentials), "data_owed": bool(data_owed)})
         self.write_pending_cleanup(records)
 
     def record_owed_credentials(self, credentials, source):

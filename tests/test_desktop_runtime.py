@@ -342,6 +342,82 @@ class WorkspaceDurabilityTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(self.vault.get(name), f"{name} should be gone")
         self.assertEqual(self.runtime.storage.read_pending_cleanup(), [])
 
+    async def test_a_workspace_folder_that_will_not_go_keeps_the_record(self):
+        """A chat archive left on disk must not pass for a finished deletion.
+
+        rmtree used to be called with ignore_errors, so a locked or read-only
+        folder reported success: the workspace left the catalog, the record
+        was discarded, and settings.json plus history.sqlite3 stayed behind
+        with nothing pointing at them.
+        """
+        second = await self.runtime.create_workspace("Writing")
+        await self.runtime.switch_workspace(second["id"])
+        self.runtime.app.state.relay.member_remover = None
+        folder = self.runtime._workspace_directory(second["id"])
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "history.sqlite3").write_text("a chat archive", encoding="utf-8")
+
+        with unittest.mock.patch("desktop_app.runtime.shutil.rmtree",
+                                 side_effect=OSError("folder is in use")):
+            await self.runtime.delete_workspace()
+
+        self.assertTrue((folder / "history.sqlite3").exists(), "the archive is still there")
+        records = self.runtime.storage.read_pending_cleanup()
+        self.assertEqual([r["id"] for r in records], [second["id"]],
+                         "nothing else is owed, so only the folder can be holding it")
+        self.assertTrue(records[0]["data_owed"], "the record must say what is left")
+        self.assertEqual(records[0]["credentials"], [])
+        self.assertTrue([1 for kind, data in self.events
+                         if kind == "notice" and "files" in str(data).lower()],
+                        "the user must be told their files survived")
+
+    async def test_a_stranded_folder_is_retried_until_it_goes(self):
+        """Retaining the record is only useful if a later launch converges."""
+        second = await self.runtime.create_workspace("Writing")
+        await self.runtime.switch_workspace(second["id"])
+        self.runtime.app.state.relay.member_remover = None
+        folder = self.runtime._workspace_directory(second["id"])
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "history.sqlite3").write_text("a chat archive", encoding="utf-8")
+        data = Path(self.directory.name)
+        held = unittest.mock.patch("desktop_app.runtime.shutil.rmtree",
+                                   side_effect=OSError("folder is in use"))
+
+        async def relaunch():
+            await self.runtime.close()
+            self.runtime = DesktopRuntime(
+                Storage(data, self.vault),
+                lambda kind, payload: self.events.append((kind, payload)))
+
+        with held:
+            await self.runtime.delete_workspace()
+        self.assertTrue(self.runtime.storage.read_pending_cleanup(),
+                        "the first failure leaves the record")
+
+        # Two more launches where the folder is still held. The mock has to
+        # wrap the start-up itself, because that is where the retry happens.
+        for attempt in range(2):
+            await relaunch()
+            with held:
+                await self.runtime.start()
+            self.assertTrue(self.runtime.storage.read_pending_cleanup(),
+                            f"failure {attempt + 2} must not clear the record")
+
+        await relaunch()
+        await self.runtime.start()
+
+        self.assertFalse(folder.exists(), "the archive is gone once the folder releases")
+        self.assertEqual(self.runtime.storage.read_pending_cleanup(), [])
+
+    async def test_the_local_workspace_is_never_held_back_by_its_folder(self):
+        """It shares the root, so it has no folder of its own to be stuck on."""
+        self.runtime.app.state.relay.member_remover = None
+
+        await self.runtime.delete_workspace()
+
+        self.assertEqual(self.runtime.storage.read_pending_cleanup(), [],
+                         "the local workspace must not retain itself forever")
+
     async def test_a_directory_that_will_not_flush_does_not_undo_the_deletion(self):
         """The whole path, from the failing flush rather than a stubbed save.
 
@@ -462,6 +538,47 @@ class WorkspaceDurabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(during, "the reset should have awaited at least once")
         self.assertEqual(during[0], ["relay:guest"],
                          "the ledger must already be written at the first await")
+
+    async def test_a_stranded_folder_is_reported_without_blaming_the_keyring(self):
+        """A folder that will not go owes no names, so nothing would report it.
+
+        The pending-cleanup counter only ever counted credential names. A
+        workspace held back solely by its directory counted zero, so no notice
+        and no Settings line, for as long as the failure lasted.
+        """
+        second = await self.runtime.create_workspace("Writing")
+        await self.runtime.switch_workspace(second["id"])
+        self.runtime.app.state.relay.member_remover = None
+        folder = self.runtime._workspace_directory(second["id"])
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "history.sqlite3").write_text("a chat archive", encoding="utf-8")
+        data = Path(self.directory.name)
+
+        with unittest.mock.patch("desktop_app.runtime.shutil.rmtree",
+                                 side_effect=OSError("folder is in use")):
+            await self.runtime.delete_workspace()
+            self.assertEqual(self.runtime.pending_cleanup_count(), 0,
+                             "no credentials are owed; only the folder is")
+            self.assertEqual(self.runtime.pending_data_cleanup_count(), 1)
+            published = [d for k, d in self.events if k == "pending_cleanup"][-1]
+            self.assertEqual(published, {"credentials": 0, "files": 1})
+
+            await self.runtime.close()
+            self.runtime = DesktopRuntime(
+                Storage(data, self.vault),
+                lambda kind, payload: self.events.append((kind, payload)))
+            with unittest.mock.patch("desktop_app.runtime.shutil.rmtree",
+                                     side_effect=OSError("folder is in use")):
+                await self.runtime.start()
+
+        # Only what the relaunched runtimes said: the delete above already
+        # raised its own notice about the same folder.
+        notices = " ".join(str(payload) for kind, payload in self.events
+                           if kind == "notice" and "files" in str(payload).lower()).lower()
+        self.assertNotIn("credential store", notices,
+                         "the keyring is not what is wrong here")
+        self.assertIn("next launch", notices,
+                      "a later launch is where the user learns it is still stuck")
 
     # --- an interrupted deletion ------------------------------------------
 

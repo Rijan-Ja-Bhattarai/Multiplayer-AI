@@ -2,6 +2,7 @@
 import asyncio
 import json
 import shutil
+from typing import NamedTuple
 from uuid import uuid4
 
 import httpx
@@ -11,6 +12,25 @@ from network_a2a.persistence import HistoryStore
 from .storage import (LOCAL_WORKSPACE, UNAVAILABLE, WORKSPACE_ID, Storage, WorkspaceVault,
                       write_json_durably)
 from .workspace_runtime import WorkspaceRuntime, relay_http_url
+
+
+class PurgeResult(NamedTuple):
+    """What one pass over a deleted workspace left behind.
+
+    The three outcomes are kept apart because they have different remedies:
+    an undeleted credential needs the keyring unlocked, and a directory that
+    would not go needs whatever is holding it closed. ``unfinished`` is the
+    single rule for whether the record has to be kept, so the immediate
+    deletion and the retry at start-up cannot come to disagree about it.
+    """
+
+    remaining: list
+    root_remaining: list
+    data_removed: bool
+
+    @property
+    def unfinished(self):
+        return bool(self.remaining or self.root_remaining or not self.data_removed)
 
 
 class DesktopRuntime:
@@ -376,11 +396,11 @@ class DesktopRuntime:
     def _purge_workspace_data(self, entry, engine=None, owed=()):
         """Delete one workspace's credentials and saved data.
 
-        Returns the names still owed in the workspace's own vault and, kept
-        separate, the ones owed in the root vault. They have to be separate
-        because the same name means a different entry under each, so a retry
-        that folded them together would look for ``remote-token`` behind the
-        workspace prefix and never touch the root entry.
+        Returns a :class:`PurgeResult`. The two lists of names are kept
+        separate because the same name means a different entry under each
+        vault, so a retry that folded them together would look for
+        ``remote-token`` behind the workspace prefix and never touch the root
+        entry.
 
         ``owed`` is an already-read record for this workspace, if there is
         one, so that a retry deletes exactly what is left rather than
@@ -401,18 +421,32 @@ class DesktopRuntime:
         remaining = [name for name in names
                      if storage.vault.delete(name) == UNAVAILABLE]
         directory = self._workspace_directory(entry["id"])
+        # Absent means removed. The local workspace shares the root and has
+        # no directory of its own, so it must never be held back on this
+        # account or its record would never clear.
+        data_removed = True
         if directory is None:
-            # The local workspace shares the root, so only its own keys and
-            # its chat archive are cleared; the directory must survive.
+            # Only the local workspace's own keys and its chat archive are
+            # cleared; the root directory itself must survive.
             for key in ("identities", "device_id", "agents", "remote", "remote_agent",
                         "share_lan", "relay_port", "workspace_name", "workspace_id"):
                 storage.settings.pop(key, None)
             storage.save()
             HistoryStore(storage.directory).clear()
         elif directory.exists():
-            # settings.json and history.sqlite3 both live here.
-            shutil.rmtree(directory, ignore_errors=True)
-        return remaining, self._purge_legacy_root_credentials(entry, owed)
+            # settings.json and history.sqlite3 both live here. Errors are
+            # reported rather than ignored: a folder that will not go is a
+            # chat archive left on disk with nothing pointing at it, and a
+            # partial removal raises too, so a half-deleted tree is retried
+            # rather than mistaken for a finished one.
+            try:
+                shutil.rmtree(directory)
+            except OSError as error:
+                data_removed = False
+                self.emit("notice", "Some of the deleted workspace's files could not "
+                                    f"be removed: {error}. Close anything still using "
+                                    "that workspace and the app will try again.")
+        return PurgeResult(remaining, self._purge_legacy_root_credentials(entry, owed), data_removed)
 
     def _purge_legacy_root_credentials(self, entry, owed=()):
         """Delete the credentials the pre-catalog layout kept in the root.
@@ -449,6 +483,18 @@ class DesktopRuntime:
                    for record in records
                    for key in ("credentials", "root_credentials"))
 
+    def pending_data_cleanup_count(self):
+        """How many deleted workspaces still have files on disk.
+
+        Counted apart from the credentials, because the two need different
+        things said about them: one needs the keyring unlocked, the other
+        needs whatever is holding the folder. A workspace whose directory
+        would not go owes no names at all, so without this it would be a
+        record nobody ever reported.
+        """
+        return sum(1 for record in self.storage.read_pending_cleanup()
+                   if record.get("type") == "workspace" and record.get("data_owed"))
+
     def publish_pending_cleanup(self):
         """Tell the window whether anything is still owed.
 
@@ -456,8 +502,9 @@ class DesktopRuntime:
         the condition can outlive the message that announced it.
         """
         owed = self.pending_cleanup_count()
-        self.emit("pending_cleanup", {"credentials": owed})
-        return owed
+        files = self.pending_data_cleanup_count()
+        self.emit("pending_cleanup", {"credentials": owed, "files": files})
+        return owed, files
 
     def _vault_for(self, scope):
         """The vault a credential record belongs to.
@@ -480,13 +527,20 @@ class DesktopRuntime:
                 self._retry_owed_credentials(record)
             else:
                 self._retry_workspace_deletion(record)
-        owed = self.publish_pending_cleanup()
+        owed, files = self.publish_pending_cleanup()
         if owed:
             # Counted separately from the notice so a store that stays locked
             # does not produce a growing counter and a notice on every launch.
             self.emit("notice", "Some saved credentials could not be removed. "
                                 "Unlock your credential store and restart; the "
                                 "app will try again.")
+        if files:
+            # Said on its own terms: this has nothing to do with the keyring,
+            # and the notice a directory failure already raised does not
+            # survive until the next launch.
+            self.emit("notice", "A deleted workspace's files could not be removed. "
+                                "Close anything still using that workspace's folder; "
+                                "the app will try again on the next launch.")
 
     def _retry_owed_credentials(self, record):
         """Retry names owed by an identity reset or a removed member.
@@ -521,15 +575,17 @@ class DesktopRuntime:
             if self.active_workspace_id == entry["id"]:
                 self.active_workspace_id = self.catalog["active"] = self.catalog["workspaces"][0]["id"]
             self.save_catalog()
-        remaining, owed_on_root = self._purge_workspace_data(entry, owed=[record])
+        result = self._purge_workspace_data(entry, owed=[record])
         key = {"type": "workspace", "id": entry["id"]}
-        if not remaining and not owed_on_root:
+        if not result.unfinished:
             self.storage.discard_pending_cleanup(key)
             return
         # Pruned to what actually survived, so the record stops naming
         # credentials that are already gone and a later pass cannot confuse a
         # root name with a workspace-scoped one.
-        self.storage.record_workspace_deletion(entry, remaining, owed_on_root)
+        self.storage.record_workspace_deletion(
+            entry, result.remaining, result.root_remaining,
+            data_owed=not result.data_removed)
 
     async def delete_workspace(self):
         async with self.mutation:
@@ -580,7 +636,7 @@ class DesktopRuntime:
             self.engines.pop(entry["id"], None)
             self.emit("workspace_removed", entry["id"])
             await engine.close()
-            remaining, owed_on_root = self._purge_workspace_data(entry, engine)
+            result = self._purge_workspace_data(entry, engine)
             if not flushed:
                 # The catalog on disk no longer lists this workspace and the
                 # memory copy agrees, so there is nothing to roll back and the
@@ -590,18 +646,25 @@ class DesktopRuntime:
                 # which would bring the workspace back with nothing behind it.
                 # Re-running the purge is idempotent, so the next launch
                 # settles it.
-                self.storage.record_workspace_deletion(entry, remaining, owed_on_root)
+                self.storage.record_workspace_deletion(
+                    entry, result.remaining, result.root_remaining,
+                    data_owed=not result.data_removed)
                 self.emit("notice", "This workspace was deleted, but its catalog entry "
                                     "could not be confirmed on disk. The app will check "
                                     "again on the next launch.")
-            elif remaining or owed_on_root:
+            elif result.unfinished:
                 # Pruned to what actually survived, so the record stops
                 # naming credentials that are already gone and keeps the root
-                # names apart from the workspace's own.
-                self.storage.record_workspace_deletion(entry, remaining, owed_on_root)
-                self.emit("notice", "This workspace was deleted, but some of its saved "
-                                    "credentials could not be removed. Unlock your "
-                                    "credential store and restart; the app will try again.")
+                # names apart from the workspace's own. A directory that would
+                # not go is retained too; _purge_workspace_data has already
+                # said so, and saying it again here would double the notice.
+                self.storage.record_workspace_deletion(
+                    entry, result.remaining, result.root_remaining,
+                    data_owed=not result.data_removed)
+                if result.remaining or result.root_remaining:
+                    self.emit("notice", "This workspace was deleted, but some of its saved "
+                                        "credentials could not be removed. Unlock your "
+                                        "credential store and restart; the app will try again.")
             else:
                 self.storage.discard_pending_cleanup(key)
             self.publish_pending_cleanup()
