@@ -238,6 +238,7 @@ def test_window_fits_the_screen_it_opens_on(qt_app, storage) -> None:
         assert instance.minimumHeight() <= available[1]
     finally:
         instance.network.shutdown()
+        instance.network.wait(10000)
 
 
 def test_window_size_is_remembered(qt_app, storage) -> None:
@@ -249,6 +250,7 @@ def test_window_size_is_remembered(qt_app, storage) -> None:
         assert storage.settings["window_size"] == [1150, 760]
     finally:
         instance.network.shutdown()
+        instance.network.wait(10000)
 
 
 def test_sidebar_hides_when_the_window_is_narrow(window) -> None:

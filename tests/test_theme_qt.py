@@ -65,6 +65,7 @@ def window(qt_app, storage, monkeypatch):
     instance = MainWindow(storage)
     yield instance
     instance.network.shutdown()
+    instance.network.wait(10000)
 
 
 # --- resolution -----------------------------------------------------------
@@ -81,6 +82,7 @@ def test_window_uses_the_stored_theme(qt_app, storage) -> None:
         assert instance.styleSheet() == stylesheet(LIGHT)
     finally:
         instance.network.shutdown()
+        instance.network.wait(10000)
 
 
 def test_window_applies_dark_by_default(qt_app, storage) -> None:
@@ -93,6 +95,7 @@ def test_window_applies_dark_by_default(qt_app, storage) -> None:
         assert instance.theme == DARK
     finally:
         instance.network.shutdown()
+        instance.network.wait(10000)
 
 
 # --- live switching -------------------------------------------------------
@@ -161,6 +164,7 @@ def test_the_orbit_paints_with_the_stored_theme_on_first_paint(
         assert instance.orbit._theme == name
     finally:
         instance.network.shutdown()
+        instance.network.wait(10000)
 
 
 def test_orbit_art_defaults_to_dark_for_a_caller_that_forgets() -> None:
