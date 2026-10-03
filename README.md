@@ -1,29 +1,40 @@
 # Multiplayer AI
 
-Multiplayer AI is a platform where authorized users by the session leader
-can invite people to work on the same session without sharing accounts or
-people from the same organization.
+Multiplayer AI lets a team run AI agents together. People join a named
+**workspace**, connect their own models, and hold **shared conversations**
+where everyone sees the same transcript and the same AI replies. Nobody
+shares an account, and a model configured by one member is available to the
+others without copying an API key around.
+
+The desktop app is the product surface. Underneath it sit two smaller
+layers, both usable on their own: an authenticated multi-device agent relay
+(`network_a2a/`) and a Connection Server (`src/`) that routes messages
+between connected clients and agents.
 
 ## Status: under development
 
-The first milestone is the **client communication layer**: a Connection
-Server that lets one connected client deliver a message to another client
-or to an agent.
+The **desktop app** is the working product today:
 
-Implemented and tested:
+- Named workspaces, each with its own chats, models, members and invitations
+- Shared conversations whose transcripts stay in step across devices
+- Per-device identities held in the OS credential store, with invitations
+  for adding devices and revoking membership
+- Provider agents for Ollama, Bionic GPT, OpenAI, Claude, Gemini, Groq,
+  DeepSeek, Mistral, OpenRouter, and custom OpenAI-compatible endpoints
+- Live resource meters, three themes, and a saved window size per screen
 
-- Persistent client connections over WebSocket
-- In-memory client registry
-- Client-to-client message routing
-- Client-to-agent routing through the Agent Gateway
-- Structured error responses and event logging
+The **Connection Server** is a thinner, lower-level component. It routes a
+message from one connected client to another client or to an agent, and it
+is what the desktop app's client layer speaks to. It is documented below
+under [Connection Server](#connection-server) and is useful for driving
+that layer directly or headlessly.
 
-Sessions and authentication are still outstanding for the client Connection
-Server. The authenticated agent relay and provider adapters live in
-`network_a2a/`; the Connection Server reaches them through the Agent Gateway
-in `src/agents/gateway.py`. See below and [Scope](#scope).
+Not yet built anywhere: asynchronous agent replies (a reply is awaited
+inline), a durable offline queue for shared chats, and multi-worker or
+multi-replica operation. The `src/` limitations are listed under
+[Scope](#scope).
 
-## Multi-device agent networking
+## The desktop app
 
 The native Multiplayer AI desktop app starts its local relay, creates a private
 device identity, and connects automatically. Configure model providers, invite
@@ -81,7 +92,23 @@ still run on separate ports.
 
 ## Architecture
 
-The client Connection Server follows this architecture:
+The desktop app is a workspace catalog over per-workspace engines. The
+catalog decides which workspace is in front; each workspace owns a relay,
+its own credential set and its own agents, so a workspace you are not
+looking at keeps serving its members.
+
+```
+   DESKTOP CATALOG                    PER-WORKSPACE ENGINE
+   DesktopRuntime                     WorkspaceRuntime
+   workspaces.json  ───────────────▶  one relay, one device identity,
+   active workspace                      one set of provider agents
+        ▲                                       │
+        │  owned workspaces keep running         │ A2A over 127.0.0.1
+        └───────────────────────────────────────┘
+```
+
+Underneath that, the Connection Server routes messages between connected
+clients and agents:
 
 ```
    CLIENT DOMAIN                      AGENT LAYER
@@ -101,6 +128,10 @@ The Connection Server reaches the agent layer through the Agent Gateway,
 which authenticates to the relay in `network_a2a/` and calls
 `POST /agents/{id}/invoke`. Agent-to-agent hops stay inside the relay, so
 they never pass through the client layer.
+
+The Connection Server and the relay are separate applications with different
+WebSocket message formats. The Agent Gateway translates between them, but they
+still run on separate ports.
 
 ### Layout
 
@@ -143,7 +174,29 @@ python -m pip install pytest-asyncio websockets
 
 ## Running
 
-Start the Connection Server:
+### Run the desktop app
+
+From the repository root, with the Conda environment active:
+
+```bash
+python -m desktop_app
+```
+
+It needs Qt and an OS credential store, which `environment.yml` does not
+install; see [Desktop dependencies](#desktop-dependencies). The app starts
+its own relay, creates this device's identity, and opens the local
+workspace with nothing to configure.
+
+The [desktop guide](DESKTOP_GUIDE.md) covers workspaces, connecting a
+model, inviting a device, joining a workspace, and what to do if a saved
+identity goes missing.
+
+### Run the Connection Server
+
+The Connection Server is a separate process. It is what the desktop app's
+client layer talks to, and it can also be run on its own.
+
+Start it:
 
 ```bash
 python -m uvicorn src.server.app:app --host localhost --port 8000
@@ -163,7 +216,15 @@ Expected response:
 
 The health endpoint does not depend on any agent being reachable.
 
-## Trying client-to-client messaging
+## Connection Server
+
+The rest of this document describes the Connection Server layer: how a
+message is framed between clients, and how to drive it from the command
+line. Reach for this when you are working on the routing layer itself or
+need a headless client. To work with models and other people, use the
+desktop app above.
+
+### Trying client-to-client messaging
 
 Open three terminals.
 
@@ -206,7 +267,7 @@ A consequence worth knowing: a sender cannot distinguish "delivered" from
 "the server died" by watching its own socket. Delivery receipts are not
 implemented.
 
-## Message format
+### Message format
 
 Client-to-client messages use a single envelope. Field names are camelCase.
 
@@ -255,7 +316,7 @@ The payload is forwarded to the agent unchanged. The provider adapters
 already accept `{"text": ...}`, so no translation happens in the client
 layer.
 
-## Errors
+### Errors
 
 Failures are returned to the *sender* as a JSON frame:
 
@@ -291,7 +352,7 @@ recover an id. Stack traces are never sent to clients.
 A malformed frame does **not** close the connection: the server answers
 with `INVALID_MESSAGE` and keeps reading.
 
-## Trying client-to-agent messaging
+### Trying client-to-agent messaging
 
 The Connection Server needs to know where the relay is. Both variables are
 optional: without them the server still runs and client-to-client messaging
