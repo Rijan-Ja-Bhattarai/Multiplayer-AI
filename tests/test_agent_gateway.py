@@ -358,3 +358,78 @@ async def test_rate_limit_mentions_retrying(gateway) -> None:
         await gateway.invoke("agent-A", {"text": "hi"})
 
     assert "retry" in str(caught.value).lower()
+
+
+# --- gateway timeout ------------------------------------------------------
+
+
+def test_a_valid_timeout_is_applied(monkeypatch) -> None:
+    """A2A_GATEWAY_TIMEOUT is honoured when it parses."""
+    monkeypatch.setenv("A2A_RELAY_URL", "https://relay.example")
+    monkeypatch.setenv("A2A_RELAY_TOKEN", "t" * 40)
+    monkeypatch.setenv("A2A_GATEWAY_TIMEOUT", "12.5")
+
+    assert AgentGateway.from_env().timeout == 12.5
+
+
+@pytest.mark.parametrize(
+    "raw", ["abc", "10s", "NaN", "nan", "inf", "-inf", "0", "-5", "1,5"]
+)
+def test_an_unusable_timeout_falls_back_instead_of_crashing(
+    monkeypatch, caplog, raw: str
+) -> None:
+    """A typo in the environment must not take the server down.
+
+    The gateway is built while the module is imported, so a ValueError
+    here would stop the Connection Server entirely rather than only the
+    agent half, and the operator would see a traceback instead of a
+    misconfigured variable. NaN and infinity parse happily, so they are
+    rejected by range rather than by the conversion alone.
+    """
+    monkeypatch.setenv("A2A_RELAY_URL", "https://relay.example")
+    monkeypatch.setenv("A2A_RELAY_TOKEN", "t" * 40)
+    monkeypatch.setenv("A2A_GATEWAY_TIMEOUT", raw)
+
+    with caplog.at_level("WARNING", logger="agent_gateway"):
+        gateway = AgentGateway.from_env()
+
+    assert gateway is not None
+    assert gateway.timeout == pytest.approx(65.0)
+    assert any("bad_timeout" in record.getMessage() for record in caplog.records)
+
+
+def test_an_empty_timeout_is_treated_as_unset(monkeypatch) -> None:
+    """An empty variable is a normal deployment, not a misconfiguration."""
+    monkeypatch.setenv("A2A_RELAY_URL", "https://relay.example")
+    monkeypatch.setenv("A2A_RELAY_TOKEN", "t" * 40)
+    monkeypatch.setenv("A2A_GATEWAY_TIMEOUT", "")
+
+    assert AgentGateway.from_env().timeout == pytest.approx(65.0)
+
+
+def test_no_timeout_uses_the_default(monkeypatch) -> None:
+    monkeypatch.setenv("A2A_RELAY_URL", "https://relay.example")
+    monkeypatch.setenv("A2A_RELAY_TOKEN", "t" * 40)
+    monkeypatch.delenv("A2A_GATEWAY_TIMEOUT", raising=False)
+
+    assert AgentGateway.from_env().timeout == pytest.approx(65.0)
+
+
+def test_a_relay_sending_unparseable_detail_is_handled(monkeypatch) -> None:
+    """A 503 body that is not JSON must not raise out of the error path.
+
+    _detail exists for exactly this, and it runs while an error is being
+    translated, so a second failure there would replace a clear message
+    with a traceback.
+    """
+    gateway = AgentGateway("https://relay.example", "t" * 40)
+
+    class Unparseable:
+        status_code = 503
+
+        def json(self):
+            raise ValueError("not json")
+
+    code = gateway._error_for("writer", Unparseable()).code
+
+    assert code == ErrorCode.AGENT_UNAVAILABLE

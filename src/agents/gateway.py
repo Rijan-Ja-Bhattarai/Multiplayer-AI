@@ -39,6 +39,7 @@ without changing the router.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
 from typing import Any, Dict, Optional
@@ -131,6 +132,12 @@ class AgentGateway:
         raw_timeout = os.getenv("A2A_GATEWAY_TIMEOUT")
         try:
             timeout = float(raw_timeout) if raw_timeout else DEFAULT_TIMEOUT
+            # float() accepts "nan" and "inf", and a non-positive value is
+            # not a usable deadline either, so the range is checked rather
+            # than just the conversion. Otherwise a typo here reaches httpx
+            # as a NaN timeout instead of falling back.
+            if not math.isfinite(timeout) or timeout <= 0:
+                raise ValueError("timeout must be a positive finite number")
         except ValueError:
             logger.warning(
                 "AGENT_GATEWAY bad_timeout value=%r using=%s", raw_timeout, DEFAULT_TIMEOUT
