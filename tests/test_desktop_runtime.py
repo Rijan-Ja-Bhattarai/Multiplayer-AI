@@ -1,12 +1,15 @@
+import asyncio
 import json
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 import httpx
 
 from desktop_app.runtime import DesktopRuntime, relay_http_url
 from desktop_app.storage import ABSENT, REMOVED, UNAVAILABLE, Storage
+import desktop_app.runtime as runtime_module
 
 
 class MemoryVault:
@@ -268,6 +271,38 @@ class WorkspaceDurabilityTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(engine.storage.vault.get("relay:" + engine.active_id),
                             "the replacement token must be in the vault")
 
+    async def test_a_cancelled_reset_still_leaves_the_record_behind(self):
+        """Cancelling the reset between forgetting and announcing used to lose both.
+
+        The record used to be written after ``await self._stop_agents()``, so
+        a cancellation there left a superseded token that no settings entry
+        named and nothing would ever retry.
+        """
+        engine = self.runtime.engine
+        engine.storage.settings["identities"]["guest"] = "workspace"
+        engine.storage.save()
+        engine.storage.vault.set("relay:guest", "the superseded token")
+        original = self.vault.delete
+
+        def locked(name):
+            return UNAVAILABLE
+        self.vault.delete = locked
+
+        async def stop_forever():
+            raise asyncio.CancelledError()
+        engine._stop_agents = stop_forever
+        try:
+            with self.assertRaises(asyncio.CancelledError):
+                await self.runtime.reset_identity()
+        finally:
+            self.vault.delete = original
+            del engine._stop_agents
+
+        records = self.runtime.storage.read_pending_cleanup()
+        self.assertEqual([(r["source"], r["credentials"]) for r in records],
+                         [("reset", ["relay:guest"])],
+                         "the record must not depend on reaching the notice")
+
     async def test_an_undeleted_reset_token_is_recorded_and_retried(self):
         """The reset's notice promises a retry, so it must record one.
 
@@ -306,6 +341,127 @@ class WorkspaceDurabilityTests(unittest.IsolatedAsyncioTestCase):
         for name in records[0]["credentials"]:
             self.assertIsNone(self.vault.get(name), f"{name} should be gone")
         self.assertEqual(self.runtime.storage.read_pending_cleanup(), [])
+
+    async def test_a_directory_that_will_not_flush_does_not_undo_the_deletion(self):
+        """The whole path, from the failing flush rather than a stubbed save.
+
+        The rename happens before the directory flush, so a flush failure
+        once raised out of a write that had already succeeded. delete_workspace
+        caught it, put the workspace back into memory and dropped the pending
+        record, while the file no longer listed it. Memory and disk then
+        disagreed, and the next unrelated save_catalog would have written the
+        workspace back with its directory and credentials already destroyed.
+        """
+        second = await self.runtime.create_workspace("Writing")
+        await self.runtime.switch_workspace(second["id"])
+        self.runtime.app.state.relay.member_remover = None
+        attempted = []
+        real = runtime_module.write_json_durably
+
+        def failing(path, text):
+            # Only the catalog's own flush is refused; every earlier write in
+            # this sequence has to succeed for the deletion to get that far.
+            if Path(path) != self.runtime.catalog_path:
+                return real(path, text)
+            attempted.append(path)
+            with unittest.mock.patch("desktop_app.storage._fsync_directory",
+                                     side_effect=OSError("no space left on device")):
+                return real(path, text)
+
+        with unittest.mock.patch.object(runtime_module, "write_json_durably", failing):
+            await self.runtime.delete_workspace()
+
+        self.assertTrue(attempted, "the catalog's flush should have been attempted")
+        self.assertNotIn(second["id"], {e["id"] for e in self.runtime.catalog["workspaces"]})
+        on_disk = json.loads(self.runtime.catalog_path.read_text(encoding="utf-8"))
+        self.assertNotIn(second["id"], {e["id"] for e in on_disk["workspaces"]},
+                         "memory and disk must agree once the rename has landed")
+        self.assertIn(self.runtime.active_workspace_id, self.runtime.engines,
+                      "the replacement must still be usable")
+        self.assertEqual([r["id"] for r in self.runtime.storage.read_pending_cleanup()],
+                         [second["id"]],
+                         "a power cut could still restore the old catalog, which "
+                         "would bring the workspace back empty")
+
+        self.runtime.retry_pending_cleanup()
+        self.assertEqual(self.runtime.storage.read_pending_cleanup(), [],
+                         "re-running the purge is idempotent and settles it")
+
+    async def test_an_unflushed_catalog_still_finishes_the_deletion(self):
+        """A rename that landed must not be rolled back.
+
+        The rename happens before the directory flush, so a flush failure
+        raises from a write that already succeeded. Rolling the workspace
+        back into memory there left the two disagreeing: the file no longer
+        listed it, and the next unrelated save_catalog would have written it
+        back with its directory and credentials already destroyed.
+        """
+        second = await self.runtime.create_workspace("Writing")
+        await self.runtime.switch_workspace(second["id"])
+        self.runtime.app.state.relay.member_remover = None
+        real = self.runtime.save_catalog
+        calls = []
+
+        def flaky():
+            calls.append(1)
+            if len(calls) == 1:
+                real()          # the rename lands
+                return False    # but the directory flush could not confirm it
+            return real()
+        self.runtime.save_catalog = flaky
+
+        await self.runtime.delete_workspace()
+
+        self.assertNotIn(second["id"], {e["id"] for e in self.runtime.catalog["workspaces"]})
+        on_disk = json.loads(self.runtime.catalog_path.read_text(encoding="utf-8"))
+        self.assertNotIn(second["id"], {e["id"] for e in on_disk["workspaces"]},
+                         "memory and disk must agree once the rename has landed")
+        self.assertIn(self.runtime.active_workspace_id, self.runtime.engines,
+                      "the replacement must still be usable")
+        records = self.runtime.storage.read_pending_cleanup()
+        self.assertEqual([r["id"] for r in records], [second["id"]],
+                         "the record is kept, because a power cut could restore "
+                         "the old catalog and bring the workspace back empty")
+        self.assertTrue([1 for kind, data in self.events
+                         if kind == "notice" and "next launch" in str(data).lower()],
+                        "the user must be told it will be checked again")
+
+        self.runtime.save_catalog = real
+        self.runtime.retry_pending_cleanup()
+        self.assertEqual(self.runtime.storage.read_pending_cleanup(), [],
+                         "re-running the purge is idempotent and settles it")
+
+    async def test_the_reset_records_the_owed_names_before_it_awaits(self):
+        """The record has to exist while the reset is still suspended.
+
+        Written after the await instead, a cancellation there would lose the
+        record and the notice together.
+        """
+        engine = self.runtime.engine
+        engine.storage.settings["identities"]["guest"] = "workspace"
+        engine.storage.save()
+        engine.storage.vault.set("relay:guest", "the superseded token")
+        original = self.vault.delete
+        self.vault.delete = lambda name: UNAVAILABLE
+        during = []
+        stop = engine._stop_agents
+
+        async def peek():
+            # Look, then really stop, so the re-attach later cannot collide
+            # with a connection this left open.
+            records = self.runtime.storage.read_pending_cleanup()
+            during.append(sorted(name for r in records for name in r["credentials"]))
+            await stop()
+        engine._stop_agents = peek
+        try:
+            await self.runtime.reset_identity()
+        finally:
+            self.vault.delete = original
+            del engine._stop_agents
+
+        self.assertTrue(during, "the reset should have awaited at least once")
+        self.assertEqual(during[0], ["relay:guest"],
+                         "the ledger must already be written at the first await")
 
     # --- an interrupted deletion ------------------------------------------
 

@@ -42,6 +42,18 @@ def write_json_durably(path, text):
     rename durable. All three are needed: without any one of them a power cut
     can leave the previous contents or no file at all, which for the cleanup
     ledger means credentials that nothing points at any more.
+
+    Returns whether the directory was flushed. A failure *before* the rename
+    raises, because nothing reached the file and the caller has to know. A
+    failure *after* it is reported instead of raised, because from that point
+    the new contents are already what every reader sees and they survive the
+    process crashing; only the machine losing power could lose them. Raising
+    there is not merely disproportionate, it is actively harmful to a caller
+    mid-deletion, which would roll back a change that has already happened.
+
+    Returns:
+        ``True`` when the directory was flushed, ``False`` when the contents
+        were replaced but that could not be confirmed.
     """
     temporary = path.with_suffix(path.suffix + ".tmp")
     with temporary.open("w", encoding="utf-8") as handle:
@@ -49,7 +61,11 @@ def write_json_durably(path, text):
         handle.flush()
         os.fsync(handle.fileno())
     temporary.replace(path)
-    _fsync_directory(path.parent)
+    try:
+        _fsync_directory(path.parent)
+    except OSError:
+        return False
+    return True
 
 
 # Outcome of a credential-store deletion. A caller retrying a cleanup
@@ -220,16 +236,27 @@ class Storage:
             self.save()
         return result
 
-    def forget_identities(self, agent_ids):
+    def forget_identities(self, agent_ids, source="reset"):
         """Delete these identities from the vault and the settings mapping.
 
         Called only once a replacement credential has been stored, so the
         superseded tokens are already unused and losing them costs nothing.
         The settings mapping is pruned either way, but the credential names
-        that could not be deleted are returned so the caller can tell the
-        user instead of assuming the cleanup finished. The device's own id
-        is normally not passed in, because the vault entry for it now
-        holds the new token.
+        that could not be deleted are both returned and recorded, so the
+        caller can tell the user instead of assuming the cleanup finished.
+        The device's own id is normally not passed in, because the vault entry
+        for it now holds the new token.
+
+        The record is written here, before returning, and not by the caller.
+        Everything the caller does next can be cancelled: the reset replaces
+        the identities and then awaits, so a write made after that await can
+        be lost along with the notice that would have explained it, leaving a
+        token that nothing on disk points at and nothing will ever retry.
+
+        Args:
+            agent_ids: the identities to forget.
+            source: what asked for the removal, used to key the record so one
+                removal does not displace another's.
 
         Returns:
             ``(removed, undeleted)`` - the ids pruned from settings, and
@@ -248,6 +275,7 @@ class Storage:
         self.dropped_identities = []
         if removed:
             self.save()
+        self.record_owed_credentials(["relay:" + agent_id for agent_id in undeleted], source)
         return removed, undeleted
 
     def save_credentials(self, credentials):

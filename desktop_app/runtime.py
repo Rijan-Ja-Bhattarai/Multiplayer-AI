@@ -81,7 +81,17 @@ class DesktopRuntime:
         return directory
 
     def save_catalog(self):
-        write_json_durably(self.catalog_path, json.dumps(self.catalog, indent=2))
+        """Write the catalog, reporting whether the replacement completed.
+
+        Returns ``False`` when the new contents are on disk but the parent
+        directory could not be flushed. That distinction matters to
+        ``delete_workspace``, which otherwise cannot tell a write that never
+        happened from one that happened and could not be confirmed.
+
+        Callers with nothing to undo may ignore the result; a flush failure
+        costs durability across a power cut, not correctness of the file.
+        """
+        return write_json_durably(self.catalog_path, json.dumps(self.catalog, indent=2))
 
     # --- deletions that have not finished ---------------------------------
     #
@@ -554,22 +564,37 @@ class DesktopRuntime:
                 # history were already gone by then, while the catalog still
                 # listed the workspace, so the next launch brought it back
                 # empty rather than removed.
-                self.save_catalog()
+                flushed = self.save_catalog()
             except Exception:
-                # Not recorded, so put the workspace back and keep the engine
-                # registered: close() only closes engines it still knows
-                # about, and dropping it here would strand its relay.
+                # Nothing reached the file, so the workspace is still listed
+                # on disk. Put it back in memory, keep the engine registered
+                # (close() only closes engines it still knows about, and
+                # dropping it here would strand its relay), and discard the
+                # record, because nothing has been destroyed yet.
                 self.catalog["workspaces"] = previous_entries
                 self.active_workspace_id = self.catalog["active"] = previous_active
                 self.storage.discard_pending_cleanup({"type": "workspace", "id": entry["id"]})
                 raise
+            key = {"type": "workspace", "id": entry["id"]}
             self.cache.pop(entry["id"], None)
             self.engines.pop(entry["id"], None)
             self.emit("workspace_removed", entry["id"])
             await engine.close()
             remaining, owed_on_root = self._purge_workspace_data(entry, engine)
-            key = {"type": "workspace", "id": entry["id"]}
-            if remaining or owed_on_root:
+            if not flushed:
+                # The catalog on disk no longer lists this workspace and the
+                # memory copy agrees, so there is nothing to roll back and the
+                # deletion is finished below either way. The record is kept
+                # regardless of what the purge owes: only the flush is in
+                # doubt, and a power cut could still restore the old catalog,
+                # which would bring the workspace back with nothing behind it.
+                # Re-running the purge is idempotent, so the next launch
+                # settles it.
+                self.storage.record_workspace_deletion(entry, remaining, owed_on_root)
+                self.emit("notice", "This workspace was deleted, but its catalog entry "
+                                    "could not be confirmed on disk. The app will check "
+                                    "again on the next launch.")
+            elif remaining or owed_on_root:
                 # Pruned to what actually survived, so the record stops
                 # naming credentials that are already gone and keeps the root
                 # names apart from the workspace's own.

@@ -344,6 +344,38 @@ class DurableWriteTests(unittest.TestCase):
             self.assertTrue([e for e in events if e[0] == "fsync"],
                             "the file itself is still flushed")
 
+    def test_an_unflushed_directory_is_reported_rather_than_raised(self) -> None:
+        """The rename has already happened, so raising would undo it.
+
+        A caller mid-deletion that treats this as a failed write rolls back a
+        change that is on disk, leaving memory and the file disagreeing.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory, "ledger.json")
+            written = []
+
+            with mock.patch.object(os, "name", "posix"), \
+                    mock.patch("desktop_app.storage._fsync_directory",
+                               side_effect=OSError("no space left on device")):
+                written.append(write_json_durably(target, "{}"))
+
+            self.assertEqual(written, [False], "False, not an exception")
+            self.assertEqual(target.read_text(encoding="utf-8"), "{}",
+                             "the contents are on disk either way")
+
+    def test_a_failure_before_the_rename_still_raises(self) -> None:
+        """Nothing reached the file, so the caller has to be told loudly."""
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory, "ledger.json")
+
+            def refuse(handle):
+                raise OSError("no space left on device")
+            with mock.patch.object(os, "fsync", refuse):
+                with self.assertRaises(OSError):
+                    write_json_durably(target, "{}")
+
+            self.assertFalse(target.exists())
+
     def test_removing_the_final_record_flushes_the_directory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             storage = Storage(directory, FakeBackend())

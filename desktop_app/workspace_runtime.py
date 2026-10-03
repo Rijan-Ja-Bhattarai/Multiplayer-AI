@@ -278,13 +278,9 @@ class WorkspaceRuntime:
                                     f"{', '.join(str(s) for s in skipped)}. Open Providers "
                                     "to rename and reconnect those agents.")
             if undeleted:
-                # The reset itself succeeded, but these superseded tokens are
-                # still in the credential store. Saying nothing would leave the
-                # user believing a clean removal, and saying "restart and it
-                # will try again" would be a lie unless the names are recorded
-                # for the startup retry to find.
-                self.storage.record_owed_credentials(
-                    ["relay:" + agent_id for agent_id in undeleted], "reset")
+                # forget_identities has already recorded the names, before the
+                # await above could be cancelled. All that is left is to say
+                # so: silence would leave the user believing a clean removal.
                 self.emit("notice", f"{len(undeleted)} old "
                                     f"{'token' if len(undeleted) == 1 else 'tokens'} "
                                     "could not be removed from the credential store. "

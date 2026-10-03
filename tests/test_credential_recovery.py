@@ -205,6 +205,45 @@ class ResetIdentityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(storage.settings["identities"], {})
         self.assertIn("relay:device-abc12345", vault.values)
 
+    def test_a_refused_deletion_is_recorded_before_the_caller_awaits(self):
+        """The ledger write belongs here, not after the reset's await.
+
+        The reset replaces the identities and then awaits, so a record made
+        after that await can be lost to a cancellation, taking with it the
+        only pointer to a superseded token that nothing else names.
+        """
+        vault = MemoryVault()
+        storage = storage_with_identity(vault)
+
+        def refuse(name):
+            return UNAVAILABLE
+        vault.delete = refuse
+
+        storage.forget_identities(["device-abc12345"])
+
+        records = storage.read_pending_cleanup()
+        self.assertEqual([(r["type"], r["source"], r["workspace"]) for r in records],
+                         [("credentials", "reset", None)])
+        self.assertEqual(records[0]["credentials"], ["relay:device-abc12345"])
+
+    def test_the_record_is_keyed_by_whatever_asked_for_the_removal(self):
+        vault = MemoryVault()
+        storage = storage_with_identity(vault)
+        vault.delete = lambda name: UNAVAILABLE
+
+        storage.forget_identities(["device-abc12345"], source="member")
+
+        self.assertEqual([r["source"] for r in storage.read_pending_cleanup()], ["member"])
+
+    def test_a_healthy_store_writes_no_ledger(self):
+        vault = MemoryVault()
+        storage = storage_with_identity(vault)
+
+        storage.forget_identities(["device-abc12345"])
+
+        self.assertFalse(storage.ledger_path.exists(),
+                         "nothing is owed, so nothing should be left on disk")
+
     def test_forget_keeps_the_device_id(self):
         """The token identifies the device, so a stable id is kept."""
         vault = MemoryVault()
