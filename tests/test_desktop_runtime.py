@@ -169,5 +169,101 @@ class DesktopRuntimeTests(unittest.IsolatedAsyncioTestCase):
             relay_http_url("wss://remote.example/connect?token=secret")
 
 
+class WorkspaceDurabilityTests(unittest.IsolatedAsyncioTestCase):
+    """Paths where a failure could undo or hide a destructive action.
+
+    Each of these wrote something the user asked for, then did a network
+    or disk operation that can fail before the change reached disk.
+    """
+
+    async def asyncSetUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.vault = MemoryVault()
+        self.events = []
+        self.storage = Storage(self.directory.name, self.vault)
+        self.runtime = DesktopRuntime(self.storage, lambda kind, data: self.events.append((kind, data)))
+        await self.runtime.start()
+
+    async def asyncTearDown(self):
+        await self.runtime.close()
+
+    async def test_stopping_an_agent_survives_a_failed_reconnect(self):
+        """Stopping an agent must be recorded even if the echo agent fails.
+
+        The remote branch re-attaches the connectivity agent before it
+        saved, and that attach waits on the network. When it raised, the
+        stop was lost and the next launch started the agent again.
+        """
+        self.runtime.engine.storage.settings["remote_agent"] = {"id": self.runtime.active_id, "autostart": True}
+        self.runtime.engine.remote = True
+        original = self.runtime.engine._attach
+
+        async def fail(*args, **kwargs):
+            raise TimeoutError("Agent did not connect.")
+
+        self.runtime.engine._attach = fail
+        try:
+            with self.assertRaises(TimeoutError):
+                await self.runtime.engine.stop_agent(self.runtime.active_id)
+        finally:
+            self.runtime.engine._attach = original
+            self.runtime.engine.remote = False
+
+        on_disk = json.loads(self.storage.path.read_text(encoding="utf-8"))
+        self.assertFalse(on_disk["remote_agent"]["autostart"])
+
+    async def test_deleting_a_workspace_is_recorded_before_anything_is_destroyed(self):
+        """A failure after the wipe must not resurrect the workspace.
+
+        ensure_engine() starts a relay and touches the credential store.
+        It previously ran after the credentials and history were gone but
+        before workspaces.json was written, so a failure there left the
+        workspace listed on disk with nothing behind it.
+        """
+        second = await self.runtime.create_workspace("Writing")
+        await self.runtime.switch_workspace(second["id"])
+        original = self.runtime.ensure_engine
+
+        async def fail(entry):
+            raise RuntimeError("Local relay could not start")
+
+        self.runtime.ensure_engine = fail
+        with self.assertRaisesRegex(RuntimeError, "relay could not start"):
+            await self.runtime.delete_workspace()
+
+        catalog = json.loads(self.runtime.catalog_path.read_text(encoding="utf-8"))
+        remaining = {entry["id"] for entry in catalog["workspaces"]}
+        self.assertNotIn(second["id"], remaining)
+        self.assertTrue(remaining, "a replacement workspace must remain")
+        self.runtime.ensure_engine = original
+
+    async def test_reset_identity_rotates_every_local_workspace(self):
+        """Each local workspace owns its own relay and credential set.
+
+        The catalog manager delegates the rotation per workspace, and this
+        loop had no coverage at all, which is how a method call chained
+        onto an un-awaited coroutine survived review.
+        """
+        second = await self.runtime.create_workspace("Writing")
+        await self.runtime.switch_workspace(second["id"])
+        engines = [self.runtime.engines[entry["id"]]
+                   for entry in self.runtime.catalog["workspaces"] if entry["kind"] == "local"]
+        before = {engine.active_id: engine.credentials[engine.active_id]["token"]
+                  for engine in engines}
+        self.assertEqual(len(engines), 2, "expected two local workspaces")
+
+        results = await self.runtime.reset_identity()
+
+        self.assertEqual(len(results), 2)
+        for engine in engines:
+            after = engine.credentials[engine.active_id]["token"]
+            self.assertNotEqual(after, before[engine.active_id],
+                                "each workspace should have received a new token")
+            # Read through the engine's own vault: only the workspace
+            # called "local" shares the root one, the rest are namespaced.
+            self.assertTrue(engine.storage.vault.get("relay:" + engine.active_id),
+                            "the replacement token must be in the vault")
+
+
 if __name__ == "__main__":
     unittest.main()

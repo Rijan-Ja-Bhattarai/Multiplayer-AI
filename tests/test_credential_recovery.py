@@ -59,6 +59,7 @@ class MemoryVault:
 # mints one would fail validation before reaching the code under test.
 SAVED_TOKEN = "saved-" + "t" * 40
 OTHER_TOKEN = "other-" + "o" * 40
+GUEST_TOKEN = "guest-" + "g" * 40
 
 
 def storage_with_identity(vault, token=SAVED_TOKEN, store_token=True):
@@ -354,6 +355,15 @@ class ResetIdentityTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotEqual(runtime.credentials["writer"]["token"], before)
             self.assertIn("writer", result["reissued"])
             self.assertEqual(result["skipped"], [])
+            # The token written moments earlier must still be in the vault and
+            # still be named in settings. Asserting only on runtime.credentials
+            # missed the case where forget_identities deleted it right after
+            # save_credentials stored it, leaving the agent alive in memory but
+            # dead on the next launch.
+            self.assertIn("relay:writer", vault.values)
+            self.assertEqual(vault.values["relay:writer"],
+                             runtime.credentials["writer"]["token"])
+            self.assertIn("writer", storage.settings["identities"])
         finally:
             await runtime.close()
 
@@ -402,19 +412,28 @@ class ResetIdentityTests(unittest.IsolatedAsyncioTestCase):
             await runtime.close()
 
     async def test_a_joined_identity_is_forgotten_on_reset(self):
-        """An invited workspace's token is discarded, not left orphaned."""
+        """A joined identity goes, and only that one is counted as joined."""
         vault = MemoryVault()
         storage = storage_with_identity(vault)
+        storage.settings["agents"] = [{"id": "writer", "provider": "ollama",
+                                       "model": "llama3"}]
+        storage.settings["identities"]["writer"] = "workspace"
         storage.settings["identities"]["device-guest"] = "team"
-        vault.set("relay:device-guest", OTHER_TOKEN)
+        vault.set("relay:writer", OTHER_TOKEN)
+        vault.set("relay:device-guest", GUEST_TOKEN)
 
         runtime = WorkspaceRuntime(storage, self.emit)
         await runtime.start()
         try:
-            await runtime.reset_identity()
+            result = await runtime.reset_identity()
 
             self.assertNotIn("relay:device-guest", vault.values)
             self.assertNotIn("device-guest", storage.settings["identities"])
+            # A reissued profile was replaced, not joined, so counting it
+            # here would tell the user a workspace appeared that did not.
+            self.assertEqual(result["joined"], 1)
+            self.assertIn("relay:writer", vault.values)
+            self.assertIn("writer", storage.settings["identities"])
         finally:
             await runtime.close()
 

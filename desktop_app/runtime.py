@@ -318,6 +318,23 @@ class DesktopRuntime:
                     response = None
                 if response is not None and response.status_code not in (200, 401, 404, 501):
                     raise ValueError("The host could not remove this membership. Ask the workspace owner to remove your device.")
+            self.catalog["workspaces"].remove(entry)
+            self.engines.pop(entry["id"], None)
+            self.cache.pop(entry["id"], None)
+            if not self.catalog["workspaces"]:
+                replacement = {"id": "workspace-" + uuid4().hex, "name": "My workspace", "kind": "local"}
+                self.catalog["workspaces"].append(replacement)
+            replacement = self.catalog["workspaces"][0]
+            self.active_workspace_id = replacement["id"]
+            self.catalog["active"] = replacement["id"]
+            # Recorded before anything is destroyed, and before the relay for
+            # the replacement is started. ensure_engine() binds a socket and
+            # touches the credential store, so it can fail; previously the
+            # credentials and the conversation history were already gone by
+            # then, while workspaces.json still listed the workspace, so the
+            # next launch brought it back empty rather than removed.
+            self.save_catalog()
+            self.emit("workspace_removed", entry["id"])
             await engine.close()
             for identity in engine.storage.settings.get("identities", {}):
                 if hasattr(engine.storage.vault, "delete"):
@@ -349,18 +366,7 @@ class DesktopRuntime:
                 if hasattr(self.storage.vault, "delete"):
                     self.storage.vault.delete("remote-token")
                 self.storage.save()
-            self.catalog["workspaces"].remove(entry)
-            self.engines.pop(entry["id"], None)
-            self.cache.pop(entry["id"], None)
-            self.emit("workspace_removed", entry["id"])
-            if not self.catalog["workspaces"]:
-                replacement = {"id": "workspace-" + uuid4().hex, "name": "My workspace", "kind": "local"}
-                self.catalog["workspaces"].append(replacement)
-            replacement = self.catalog["workspaces"][0]
             await self.ensure_engine(replacement)
-            self.active_workspace_id = replacement["id"]
-            self.catalog["active"] = replacement["id"]
-            self.save_catalog()
             await self.snapshot()
 
     async def close(self):

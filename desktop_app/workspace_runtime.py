@@ -252,13 +252,20 @@ class WorkspaceRuntime:
                 fresh[agent_id] = {"token": secrets.token_urlsafe(32), "group": "workspace"}
             Relay(fresh)
             self.storage.save_credentials(fresh)
-            # Never delete the entry just written, which lives under device_id.
-            self.storage.forget_identities([i for i in removed if i != device_id])
+            # Forget only what is genuinely superseded. Everything in fresh
+            # was just written, so filtering on device_id alone deleted a
+            # reissued provider profile's token moments after saving it,
+            # leaving that identity present in memory but gone from the
+            # vault and from settings, and so lost on the next launch.
+            superseded = [i for i in removed if i not in fresh]
+            self.storage.forget_identities(superseded)
             await self._stop_agents()
             self.credentials = fresh
             if self.app is not None:
                 self.app.state.relay.credentials = fresh
-            joined = len([i for i in removed if i != device_id])
+            # Counted from the same set, so a reissued provider profile is
+            # not reported to the user as a newly joined identity.
+            joined = len(superseded)
             self.emit("notice", f"Replaced {len(removed)} saved "
                                 f"{'identity' if len(removed) == 1 else 'identities'}. "
                                 "Rejoin any shared workspace with a new invitation.")
@@ -410,13 +417,19 @@ class WorkspaceRuntime:
             if self.remote:
                 if self.storage.settings.get("remote_agent"):
                     self.storage.settings["remote_agent"]["autostart"] = False
+                # Saved before re-attaching the echo agent. That attach waits
+                # on the network and raises on a closed socket or a timeout,
+                # and saving afterwards meant a failure left the stop
+                # unrecorded, so the next launch restored the agent the user
+                # had just stopped.
+                self.storage.save()
                 await self._attach(self.active_id, self.active_token, self._echo,
                                    self.storage.settings.get("remote", {}).get("allow_insecure", False))
             else:
                 for profile in self.storage.settings.get("agents", []):
                     if profile["id"] == agent_id:
                         profile["autostart"] = False
-            self.storage.save()
+                self.storage.save()
             await self.refresh()
 
     async def refresh(self):
