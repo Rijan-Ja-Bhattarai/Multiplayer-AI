@@ -280,7 +280,11 @@ class WorkspaceRuntime:
             if undeleted:
                 # The reset itself succeeded, but these superseded tokens are
                 # still in the credential store. Saying nothing would leave the
-                # user believing a clean removal.
+                # user believing a clean removal, and saying "restart and it
+                # will try again" would be a lie unless the names are recorded
+                # for the startup retry to find.
+                self.storage.record_owed_credentials(
+                    ["relay:" + agent_id for agent_id in undeleted], "reset")
                 self.emit("notice", f"{len(undeleted)} old "
                                     f"{'token' if len(undeleted) == 1 else 'tokens'} "
                                     "could not be removed from the credential store. "
@@ -596,11 +600,14 @@ class WorkspaceRuntime:
             # The member is out of the workspace either way, but a token left
             # in the OS credential store would still be a secret this device
             # holds for someone who no longer has access, so say so rather
-            # than reporting a clean removal.
+            # than reporting a clean removal, and record the names so a later
+            # launch can finish the job rather than only telling the user to
+            # try again.
             undeleted = [name for name in ("relay:" + member, "provider:" + member)
                          if self.storage.vault.delete(name) == UNAVAILABLE]
             self.emit("activity", {"title": "Member removed", "detail": member})
             if undeleted:
+                self.storage.record_owed_credentials(undeleted, "member")
                 self.emit("notice", f"{member} was removed, but their saved credentials "
                                     "could not be deleted. Unlock your credential store "
                                     "and restart; the app will try again.")

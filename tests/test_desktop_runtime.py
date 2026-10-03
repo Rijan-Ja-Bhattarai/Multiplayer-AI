@@ -268,6 +268,45 @@ class WorkspaceDurabilityTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(engine.storage.vault.get("relay:" + engine.active_id),
                             "the replacement token must be in the vault")
 
+    async def test_an_undeleted_reset_token_is_recorded_and_retried(self):
+        """The reset's notice promises a retry, so it must record one.
+
+        A superseded token that outlives the reset belongs to nobody and
+        nothing on disk names it, so without a record it would sit in the
+        credential store for good.
+        """
+        engine = self.runtime.engine
+        engine.storage.settings["identities"]["guest"] = "workspace"
+        engine.storage.save()
+        engine.storage.vault.set("relay:guest", "the superseded token")
+        original = self.vault.delete
+
+        def locked(name):
+            return UNAVAILABLE
+        self.vault.delete = locked
+        try:
+            results = await self.runtime.reset_identity()
+        finally:
+            self.vault.delete = original
+
+        owed = sorted({agent_id for result in results for agent_id in result["undeleted"]})
+        self.assertTrue(owed, "the reset should have been unable to delete a token")
+        records = self.runtime.storage.read_pending_cleanup()
+        self.assertEqual(sorted((r["type"], r["source"]) for r in records),
+                         [("credentials", "reset")],
+                         "one record per workspace, both scoped to the root vault")
+        self.assertEqual(records[0]["workspace"], None,
+                         "the local workspace shares the root vault")
+        self.assertEqual(sorted(records[0]["credentials"]),
+                         sorted("relay:" + agent_id for agent_id in owed))
+
+        self.vault.delete = original
+        self.runtime.retry_pending_cleanup()
+
+        for name in records[0]["credentials"]:
+            self.assertIsNone(self.vault.get(name), f"{name} should be gone")
+        self.assertEqual(self.runtime.storage.read_pending_cleanup(), [])
+
     # --- an interrupted deletion ------------------------------------------
 
     async def test_a_locked_credential_store_leaves_a_record_the_user_can_see(self):
@@ -290,7 +329,7 @@ class WorkspaceDurabilityTests(unittest.IsolatedAsyncioTestCase):
         finally:
             self.runtime.engine.storage.vault.delete = original
 
-        records = self.runtime.read_pending_deletions()
+        records = self.runtime.storage.read_pending_cleanup()
         self.assertEqual([r["id"] for r in records], [second["id"]])
         self.assertTrue(records[0]["credentials"], "the owed names must be recorded")
         owed = [data for kind, data in self.events if kind == "pending_cleanup"]
@@ -306,30 +345,30 @@ class WorkspaceDurabilityTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.app.state.relay.member_remover = None
         vault = self.runtime.engine.storage.vault
         owed_names = list(self.runtime._credential_names_for(self.runtime.engine.storage))
-        self.runtime.add_pending_deletion(
+        self.runtime.storage.record_workspace_deletion(
             {"id": second["id"], "kind": "local"}, owed_names)
 
-        self.runtime.retry_pending_deletions()
+        self.runtime.retry_pending_cleanup()
 
         for name in owed_names:
             self.assertIsNone(vault.get(name), f"{name} should have been deleted")
-        self.assertEqual(self.runtime.read_pending_deletions(), [])
+        self.assertEqual(self.runtime.storage.read_pending_cleanup(), [])
 
     async def test_retrying_a_finished_deletion_is_harmless(self):
         """Idempotent, because a crash after the purge leaves the record."""
         second = await self.runtime.create_workspace("Writing")
         await self.runtime.switch_workspace(second["id"])
         self.runtime.app.state.relay.member_remover = None
-        self.runtime.add_pending_deletion(
+        self.runtime.storage.record_workspace_deletion(
             {"id": second["id"], "kind": "local"},
             list(self.runtime._credential_names_for(self.runtime.engine.storage)))
 
-        self.runtime.retry_pending_deletions()
-        self.runtime.add_pending_deletion(
+        self.runtime.retry_pending_cleanup()
+        self.runtime.storage.record_workspace_deletion(
             {"id": second["id"], "kind": "local"}, ["remote-token"])
-        self.runtime.retry_pending_deletions()
+        self.runtime.retry_pending_cleanup()
 
-        self.assertEqual(self.runtime.read_pending_deletions(), [])
+        self.assertEqual(self.runtime.storage.read_pending_cleanup(), [])
 
     async def test_a_failed_catalog_write_keeps_the_engine_registered(self):
         """close() only closes engines it still knows about.
@@ -351,7 +390,7 @@ class WorkspaceDurabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runtime.active_workspace_id, workspace_id)
         self.assertIn(workspace_id,
                       {e["id"] for e in self.runtime.catalog["workspaces"]})
-        self.assertEqual(self.runtime.read_pending_deletions(), [],
+        self.assertEqual(self.runtime.storage.read_pending_cleanup(), [],
                          "nothing was recorded, so nothing should be owed")
 
     async def test_the_local_workspace_directory_is_never_removed(self):
@@ -373,16 +412,60 @@ class WorkspaceDurabilityTests(unittest.IsolatedAsyncioTestCase):
 
     def test_a_hand_edited_record_cannot_point_outside_the_workspaces_folder(self):
         """The record's id is used to build a path that is then removed."""
+        attempted = []
+        original = self.vault.delete
         for hostile in ("../../..", "workspace-../../etc", "local/../..",
                         "C:/Windows", "", "workspace-" + "z" * 32):
             with self.subTest(workspace_id=hostile):
-                self.runtime.pending_path.write_text(json.dumps(
-                    [{"id": hostile, "kind": "local", "credentials": ["remote-token"],
-                      "attempts": 0}]), encoding="utf-8")
                 with self.assertRaises(ValueError):
                     self.runtime._workspace_directory(hostile)
-                self.assertEqual(self.runtime.read_pending_deletions(), [],
-                                 "a malformed record must be ignored, not acted on")
+                self.vault.delete = lambda name: attempted.append(name) or ABSENT
+                self.runtime.storage.ledger_path.write_text(json.dumps(
+                    [{"type": "workspace", "id": hostile, "kind": "local",
+                      "credentials": ["remote-token"]}]), encoding="utf-8")
+
+                self.runtime.retry_pending_cleanup()
+
+                self.assertEqual(attempted, [],
+                                 "a malformed id must be dropped, not acted on")
+                self.assertEqual(self.runtime.storage.read_pending_cleanup(), [])
+        self.vault.delete = original
+
+    def test_a_hand_edited_record_cannot_reach_outside_the_credential_namespace(self):
+        """Names in the file become calls into the OS credential store.
+
+        The store is shared with every other application on the machine, so
+        a hand-edited ledger must not be able to name an entry this app
+        never minted. Note what this does not do: a name the app *could*
+        have minted, such as the device's own live token, still matches and
+        would be deleted. The file lives in the user's own data directory,
+        so it is not a remote attack surface, and ruling that out would need
+        the ledger to know which identity is still current, which is
+        precisely what a record of the past cannot know.
+        """
+        attempted = []
+        original = self.vault.delete
+
+        def record(name):
+            attempted.append(name)
+            return original(name)
+        self.vault.delete = record
+        self.runtime.storage.ledger_path.write_text(json.dumps(
+            [{"type": "credentials", "workspace": None, "source": "reset",
+              "credentials": ["SomeOtherApp:token", "../../relay:device", "relay:",
+                              "relay:" + "x" * 200, "provider:has space",
+                              "remote-token", "relay:guest"]}]), encoding="utf-8")
+
+        self.runtime.retry_pending_cleanup()
+
+        rejected = {"SomeOtherApp:token", "../../relay:device", "relay:",
+                    "relay:" + "x" * 200, "provider:has space"}
+        self.assertFalse(rejected & set(attempted),
+                         "a name the app never mints must never be passed on")
+        self.assertEqual(set(attempted) & {"remote-token", "relay:guest"},
+                         {"remote-token", "relay:guest"},
+                         "the names the app does mint are still cleaned up")
+        self.assertEqual(self.runtime.storage.read_pending_cleanup(), [])
 
 
 if __name__ == "__main__":
