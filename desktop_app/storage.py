@@ -1,6 +1,7 @@
 """Nonsecret preferences on disk; tokens and API keys in the OS credential store."""
 import json
 import os
+import threading
 from pathlib import Path
 
 
@@ -30,10 +31,10 @@ class Vault:
     def delete(self, name):
         """Best-effort removal; absent entries and locked stores are fine.
 
-        Used when discarding an identity. The point is to stop this
-        device referring to it, and the settings entry is removed
-        regardless, so a store that refuses deletion must not abort the
-        reset.
+        Used when discarding an identity or a workspace. The point is to
+        stop this device referring to it, and the caller removes its own
+        bookkeeping regardless, so a store that refuses deletion must not
+        abort the cleanup. Returns whether an entry was actually removed.
         """
         try:
             self.backend.delete_password("MultiplayerAI", name)
@@ -42,12 +43,35 @@ class Vault:
             return False
 
 
+class WorkspaceVault:
+    """A view of the vault that namespaces entries by workspace.
+
+    Lets several workspaces keep a ``provider`` entry under the same name
+    without overwriting each other, while sharing one OS credential store.
+    """
+
+    def __init__(self, vault, workspace_id):
+        self.vault = vault
+        self.prefix = workspace_id + ":"
+
+    def get(self, name):
+        return self.vault.get(self.prefix + name)
+
+    def set(self, name, value):
+        self.vault.set(self.prefix + name, value)
+
+    def delete(self, name):
+        if hasattr(self.vault, "delete"):
+            self.vault.delete(self.prefix + name)
+
+
 class Storage:
     def __init__(self, directory=None, vault=None):
         self.directory = Path(directory) if directory else default_data_directory()
         self.vault = vault if vault is not None else Vault()
         self.directory.mkdir(parents=True, exist_ok=True)
         self.path = self.directory / "settings.json"
+        self.lock = threading.RLock()
         self.settings = json.loads(self.path.read_text(encoding="utf-8")) if self.path.exists() else {}
         if not isinstance(self.settings, dict):
             raise ValueError("Desktop settings file must contain an object")
@@ -56,9 +80,10 @@ class Storage:
         self.dropped_identities = []
 
     def save(self):
-        temporary = self.directory / "settings.json.tmp"
-        temporary.write_text(json.dumps(self.settings, indent=2), encoding="utf-8")
-        temporary.replace(self.path)
+        with self.lock:
+            temporary = self.directory / "settings.json.tmp"
+            temporary.write_text(json.dumps(self.settings, indent=2), encoding="utf-8")
+            temporary.replace(self.path)
 
     def credentials(self):
         """Tokens for every saved identity.

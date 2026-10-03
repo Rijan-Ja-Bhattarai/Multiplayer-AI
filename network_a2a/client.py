@@ -12,13 +12,14 @@ from .adapters import ProviderError
 
 
 class AgentClient:
-    def __init__(self, url, token, handler=None, allow_insecure=False, timeout=75):
+    def __init__(self, url, token, handler=None, allow_insecure=False, timeout=75, frame_handler=None):
         parsed = urlsplit(url)
         if parsed.scheme not in ("ws", "wss") or not parsed.hostname or parsed.username or parsed.password:
             raise ValueError("Use a ws:// or wss:// relay URL without embedded credentials")
         if parsed.scheme == "ws" and parsed.hostname not in ("localhost", "127.0.0.1", "::1") and not allow_insecure:
             raise ValueError("Remote connections require wss://; use allow_insecure only on a trusted LAN")
         self.url, self.token, self.handler, self.timeout = url, token, handler, timeout
+        self.frame_handler = frame_handler
         self.socket = None
         self.ready = asyncio.Event()
         self.pending = {}
@@ -44,9 +45,10 @@ class AgentClient:
 
     async def _handle(self, frame):
         try:
-            if self.handler is None:
+            if self.handler is None and self.frame_handler is None:
                 raise ValueError("Agent has no request handler")
-            result = await asyncio.wait_for(self.handler(frame["payload"], frame["from"]), self.timeout)
+            request = self.frame_handler(frame) if self.frame_handler else self.handler(frame["payload"], frame["from"])
+            result = await asyncio.wait_for(request, self.timeout)
             response = {"type": "response", "id": frame["id"], "payload": result}
         except ProviderError as exc:
             response = {"type": "response", "id": frame["id"], "error": str(exc), "code": exc.code}

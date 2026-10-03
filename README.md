@@ -28,6 +28,9 @@ in `src/agents/gateway.py`. See below and [Scope](#scope).
 The native Multiplayer AI desktop app starts its local relay, creates a private
 device identity, and connects automatically. Configure model providers, invite
 devices, join shared relays, and chat with agents from its desktop workspace.
+Named workspaces have separate conversations, models, and memberships. Owners
+can rename them, invite or remove members, and delete them. Saved chat history
+and follow-up model context survive switching workspaces and restarting the app.
 See the [desktop guide](DESKTOP_GUIDE.md) to get started.
 
 The desktop app runs in a dark, a light, or a Miku theme. With nothing stored
@@ -61,6 +64,8 @@ error, because a replacement token could not be written either. See
 The authenticated relay and reconnecting device client in `network_a2a/`
 connect multiple laptops/desktops over LAN or the internet. They route requests
 between local agents and can forward requests to a local A2A server.
+Desktop conversation invitations share one AI chat, including its existing
+history and subsequent messages and replies, across invited devices.
 
 See [setup and deployment instructions](NETWORK_SETUP.md) for credentials,
 client commands, HTTPS/WSS deployment, and current limits. This relay uses a
@@ -109,6 +114,11 @@ they never pass through the client layer.
 | `src/errors.py` | Error codes and the error frame format |
 | `scripts/demo_client.py` | Command-line client for manual testing |
 | `network_a2a/server.py` | Authenticated multi-device agent relay |
+| `network_a2a/conversations.py` | Shared AI chat history and conversation membership |
+| `network_a2a/persistence.py` | SQLite chat archives and bounded model context |
+| `desktop_app/runtime.py` | Saved workspace catalog and switching |
+| `desktop_app/workspace_runtime.py` | Per-workspace relays, agents, and membership |
+| `desktop_app/window.py` | Native workspace rail and saved chat interface |
 | `network_a2a/client.py` | Reconnecting agent client and request correlation |
 | `network_a2a/adapters/` | Model provider handlers |
 | `network_a2a/__main__.py` | Agent client CLI and local A2A bridge |
@@ -401,9 +411,10 @@ returns the payload, so a push-based path can be added beside it, but it is
 not built.
 
 The separate `network_a2a/` relay already provides per-agent authentication,
-group isolation, request/response correlation, and reconnecting clients. It
-keeps connections in memory and requires a single worker and replica; it has
-no session management or durable offline queue.
+group isolation, request/response correlation, shared desktop conversations,
+and reconnecting clients. Connections and shared chats are kept in memory and
+require a single worker and replica. Shared chats last while the host relay
+stays open; there is no durable offline queue.
 
 Two client Connection Server behaviours worth knowing about:
 

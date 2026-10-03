@@ -41,10 +41,16 @@ class NetworkThread(QThread):
         request_id = uuid4().hex
         async def execute():
             try:
-                result = await getattr(self.runtime, method)(*args, **kwargs)
+                if method == "join":
+                    async with asyncio.timeout(30):
+                        result = await self.runtime.join(*args, **kwargs)
+                else:
+                    result = await getattr(self.runtime, method)(*args, **kwargs)
                 self.completed.emit(request_id, result)
+            except TimeoutError:
+                self.failed.emit(request_id, "The operation timed out. Check that the host is running and its relay address is reachable.")
             except Exception as exc:
-                self.failed.emit(request_id, str(exc))
+                self.failed.emit(request_id, str(exc) or "The operation failed. Check the host address and connection.")
         if not self.loop or not self.isRunning():
             raise RuntimeError("Networking is still starting")
         asyncio.run_coroutine_threadsafe(execute(), self.loop)

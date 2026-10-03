@@ -165,35 +165,62 @@ class JoinDialog(QDialog):
         layout.addWidget(action("Cancel", self.reject))
 
     def join(self):
+        self.error.setText("")
         try:
+            conversation_id = None
             if self.invitation.toPlainText().strip():
                 data = json.loads(self.invitation.toPlainText())
+                if not isinstance(data, dict):
+                    raise ValueError("Paste the invitation object beginning with { and ending with }")
                 if data.get("version") != 1:
                     raise ValueError("Unsupported invitation version")
                 self.url.setText(data["url"])
                 self.token.setText(data["token"])
                 self.insecure.setChecked(bool(data.get("allow_insecure")))
+                conversation_id = data.get("conversation_id")
+                if conversation_id is not None and (not isinstance(conversation_id, str)
+                        or not conversation_id.startswith("conversation-")
+                        or not conversation_id.removeprefix("conversation-").isalnum()):
+                    raise ValueError("Use the complete shared conversation invitation")
             if len(self.token.text().strip()) < 32:
                 raise ValueError("Enter the device token from your invitation")
             self.connect_button.setEnabled(False)
+            self.connect_button.setText("Connecting…")
+            self.error.setText("Contacting the relay. Keep the host app open; this can take up to 30 seconds.")
             def failure(message):
                 if self.isVisible():
                     self.connect_button.setEnabled(True)
-                    self.error.setText(message)
+                    self.connect_button.setText("Join workspace")
+                    self.error.setText(message or "The connection failed. Check the host address, network, and firewall.")
             def success(result):
                 self.token.clear()
                 self.invitation.clear()
                 self.accept()
-            self.window.command("join", self.url.text().strip(), self.token.text().strip(), self.insecure.isChecked(),
+                if conversation_id:
+                    self.window.select_agent(conversation_id)
+                    return
+                peer = next((agent for agent in self.window.agents if agent["online"] and agent["id"] != self.window.identity), None)
+                if peer:
+                    self.window.select_agent(peer["id"])
+                else:
+                    self.window.navigate(1)
+                    self.window.notice("Workspace joined. No other devices are online yet. Keep the host app open and connect an agent to begin.")
+            self.window.command("join", self.url.text().strip(), self.token.text().strip(), self.insecure.isChecked(), True, conversation_id,
                                 success=success, failure=failure)
-        except (ValueError, KeyError, TypeError):
-            self.error.setText("Use a valid invitation or a relay URL and its device token.")
+        except (ValueError, KeyError, TypeError) as exc:
+            self.connect_button.setEnabled(True)
+            self.connect_button.setText("Join workspace")
+            self.error.setText(str(exc) if isinstance(exc, ValueError) and not isinstance(exc, json.JSONDecodeError)
+                               else "Paste the complete invitation JSON, including its url, token, and version fields.")
 
 
 class InviteDialog(QDialog):
-    def __init__(self, window):
+    def __init__(self, window, conversation_id=None, target=None, messages=None):
         super().__init__(window)
         self.window = window
+        self.conversation_id = conversation_id
+        self.target = target
+        self.messages = messages
         self.setWindowTitle("Invite a device")
         self.setMinimumWidth(520)
         layout = QVBoxLayout(self)
@@ -202,6 +229,9 @@ class InviteDialog(QDialog):
         layout.addWidget(label("MAKE YOUR WORKSPACE MULTIPLAYER", "eyebrow"))
         layout.addWidget(label("Invite a device", "title"))
         layout.addWidget(label("Give each laptop or desktop its own identity. Share its invitation privately.", "muted", True))
+        if conversation_id or target:
+            self.setWindowTitle("Invite to conversation")
+            layout.addWidget(label("This invitation shares the conversation's messages and AI replies with the other device.", "muted", True))
         self.name = QLineEdit()
         self.name.setPlaceholderText("e.g. alex-laptop")
         self.lan = QCheckBox("Share this relay on my local network")
@@ -241,11 +271,15 @@ class InviteDialog(QDialog):
                 self.result.setPlainText(json.dumps(data, indent=2))
                 self.result.show()
                 self.copy_button.show()
+                if data.get("conversation_id"):
+                    self.conversation_id = data["conversation_id"]
+                    self.window.select_agent(self.conversation_id)
         def failure(message):
             if self.isVisible():
                 self.error.setText(message)
                 self.create_button.setEnabled(True)
-        self.window.command("invite", self.name.text().strip(), self.url.text().strip(), self.lan.isChecked(), success=success, failure=failure)
+        self.window.command("invite", self.name.text().strip(), self.url.text().strip(), self.lan.isChecked(),
+                            self.conversation_id, self.target, self.messages, success=success, failure=failure)
 
     def copy(self):
         from PySide6.QtWidgets import QApplication

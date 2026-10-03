@@ -10,12 +10,15 @@ from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt, QTimer
 from PySide6.QtGui import (QGuiApplication, QIcon, QKeySequence, QPixmap, QPainter, QColor,
                            QFont, QShortcut)
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QFrame, QGraphicsOpacityEffect, QGridLayout, QHBoxLayout,
-    QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QProgressBar, QScrollArea,
-    QStackedWidget, QVBoxLayout, QWidget)
+    QInputDialog, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QProgressBar,
+    QScrollArea, QStackedWidget, QVBoxLayout, QWidget)
+
+from network_a2a.persistence import HistoryStore, model_context
 
 from .bridge import NetworkThread
 from .dialogs import AgentDialog, InviteDialog, JoinDialog
 from .layout import minimum_size, sidebar_should_collapse, window_size
+from .markdown import MarkdownMessage
 from .resources import ResourceSampler
 from .theme import (DARK, LIGHT, THEME_CHOICES, color, provider_entry, provider_names,
                     resolve_theme, stylesheet, system_theme)
@@ -85,6 +88,13 @@ class MainWindow(QMainWindow):
         self.port = 0
         self.selected = None
         self.chats = {}
+        self.conversations = {}
+        self.workspace_id = None
+        self.workspace_list = []
+        self.workspace_meta = {}
+        self.history_store = None
+        self.live_requests = set()
+        self.workspace_buttons = {}
         self.callbacks = {}
         self.request_count = 0
         self.ready = False
@@ -111,6 +121,11 @@ class MainWindow(QMainWindow):
         self.network.failed.connect(self.command_failure)
         self.network.finished.connect(self.finish_close)
         self.build_ui()
+        self.history_timer = QTimer(self)
+        self.history_timer.setSingleShot(True)
+        self.history_timer.setInterval(350)
+        self.history_timer.timeout.connect(self.persist_history)
+        self.composer.textChanged.connect(lambda: self.history_timer.start())
         self.network.start()
 
     def build_ui(self):
@@ -131,13 +146,23 @@ class MainWindow(QMainWindow):
         local.setToolTip("Workspace overview")
         local.clicked.connect(lambda: self.navigate(0))
         rail_layout.addWidget(local)
+        workspace_scroll = QScrollArea()
+        workspace_scroll.setWidgetResizable(True)
+        workspace_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        workspace_content = QWidget()
+        self.workspace_rail = QVBoxLayout(workspace_content)
+        self.workspace_rail.setContentsMargins(0, 0, 0, 0)
+        self.workspace_rail.setSpacing(12)
+        self.workspace_rail.setAlignment(Qt.AlignmentFlag.AlignTop)
+        workspace_scroll.setWidget(workspace_content)
+        rail_layout.addWidget(workspace_scroll, 1)
         join = WorkspaceButton("+")
         self.join_button = join
+        self.add_workspace_button = join
         join.setStyleSheet("color:" + color(self.theme, "success"))
-        join.setToolTip("Join a workspace")
-        join.clicked.connect(self.join_workspace)
+        join.setToolTip("Create or join a workspace")
+        join.clicked.connect(self.add_workspace)
         rail_layout.addWidget(join)
-        rail_layout.addStretch()
         help_button = WorkspaceButton("?")
         help_button.clicked.connect(lambda: self.notice("The app starts your local relay automatically. Connect a model in Providers, or join a team with an invitation."))
         help_button.setToolTip("Quick help")
@@ -148,9 +173,12 @@ class MainWindow(QMainWindow):
         self.sidebar = sidebar
         side.setContentsMargins(14, 22, 14, 0)
         side.setSpacing(8)
-        self.workspace_label = label("My workspace", "heading")
+        self.workspace_label = label("My workspace", "heading", True)
         side.addWidget(self.workspace_label)
         side.addWidget(label("Your intelligence, connected.", "muted"))
+        self.workspace_settings_button = action("Workspace settings", self.manage_workspace, name="ghost")
+        self.workspace_settings_button.setEnabled(False)
+        side.addWidget(self.workspace_settings_button)
         side.addSpacing(25)
         side.addWidget(label("WORKSPACE", "eyebrow"))
         self.nav_buttons = []
@@ -160,7 +188,7 @@ class MainWindow(QMainWindow):
             self.nav_buttons.append(button)
             side.addWidget(button)
         side.addSpacing(23)
-        side.addWidget(label("CONNECTED AGENTS", "eyebrow"))
+        side.addWidget(label("CHATS AND AGENTS", "eyebrow"))
         self.sidebar_agents = QListWidget()
         self.sidebar_agents.setMaximumHeight(245)
         self.sidebar_agents.itemClicked.connect(lambda item: self.select_agent(item.data(Qt.ItemDataRole.UserRole)))
@@ -339,6 +367,8 @@ class MainWindow(QMainWindow):
         column.addWidget(self.chat_title)
         self.chat_subtitle = label("Start a conversation with a connected device.", "muted")
         column.addWidget(self.chat_subtitle)
+        self.share_conversation_button = action("Invite to conversation", self.invite_conversation)
+        column.addWidget(self.share_conversation_button, alignment=Qt.AlignmentFlag.AlignLeft)
         self.messages_scroll = QScrollArea()
         self.messages_scroll.setWidgetResizable(True)
         self.messages_widget = QWidget()
@@ -767,6 +797,14 @@ class MainWindow(QMainWindow):
                                index % 3 if grid is self.overview_cards else index % 2)
         for listing in (self.sidebar_agents, self.chat_agents):
             listing.clear()
+            for room in self.conversations.values():
+                unread = self.chats.get(room["id"], {}).get("unread", 0)
+                item = QListWidgetItem("▤  " + room["title"] + (f"  ({unread} new)" if unread else ""))
+                item.setData(Qt.ItemDataRole.UserRole, room["id"])
+                item.setToolTip("Shared conversation · " + ", ".join(room["members"]))
+                listing.addItem(item)
+                if room["id"] == self.selected:
+                    listing.setCurrentItem(item)
             for agent in self.agents:
                 unread = self.chats.get(agent["id"], {}).get("unread", 0)
                 item = QListWidgetItem(("●  " if agent["online"] else "○  ") + agent["id"] + (f"  ({unread} new)" if unread else ""))
@@ -775,18 +813,33 @@ class MainWindow(QMainWindow):
                 listing.addItem(item)
                 if agent["id"] == self.selected:
                     listing.setCurrentItem(item)
+            current_ids = {agent["id"] for agent in self.agents} | set(self.conversations)
+            for target, chat in self.chats.items():
+                if target in current_ids or not chat.get("messages"):
+                    continue
+                item = QListWidgetItem("○  " + target + "  (saved)")
+                item.setData(Qt.ItemDataRole.UserRole, target)
+                item.setToolTip("Saved conversation")
+                listing.addItem(item)
+                if target == self.selected:
+                    listing.setCurrentItem(item)
         self.stat_values[0].setText(str(len(self.agents)))
         self.stat_values[1].setText(str(sum(agent["online"] for agent in self.agents)))
         self.stat_values[2].setText(str(self.request_count))
         self.update_chat_controls()
 
     def update_chat_controls(self):
-        agent = next((item for item in self.agents if item["id"] == self.selected), None)
+        room = self.conversations.get(self.selected)
+        target = room["target"] if room else self.selected
+        agent = next((item for item in self.agents if item["id"] == target), None)
         chat = self.chats.get(self.selected, {})
-        self.send_button.setEnabled(bool(agent and agent["online"] and not chat.get("pending")))
-        self.send_button.setText("Working…" if chat.get("pending") else "Send request  ↑")
-        self.chat_title.setText(self.selected or "Choose an agent")
-        self.chat_subtitle.setText("Your agent is working…" if chat.get("pending") else "Online · Ready to collaborate" if agent and agent["online"] else "Start this agent on its device to continue" if agent else "Choose a connected agent to begin")
+        pending = chat.get("pending") or chat.get("local_pending")
+        self.send_button.setEnabled(bool(agent and agent["online"] and not pending))
+        self.send_button.setText("Working…" if pending else "Send request  ↑")
+        self.chat_title.setText(room["title"] if room else self.selected or "Choose an agent")
+        subtitle = "Your agent is working…" if pending else "Online · Ready to collaborate" if agent and agent["online"] else "Start this agent on its device to continue" if agent else "Choose a connected agent to begin"
+        self.chat_subtitle.setText((f"Shared with {len(room['members'])} devices · " if room else "") + subtitle)
+        self.share_conversation_button.setEnabled(bool(self.ready and not self.remote and agent and agent["online"] and not pending))
 
     def select_agent(self, agent_id):
         self.selected = agent_id
@@ -797,6 +850,59 @@ class MainWindow(QMainWindow):
         self.render_messages()
         self.composer.setFocus()
 
+    @staticmethod
+    def saved_chat(chat):
+        return {key: value for key, value in chat.items() if key != "message_ids"}
+
+    def persist_history(self):
+        if self.history_store:
+            self.history_store.save("ui", "state", {"chats": {key: self.saved_chat(chat) for key, chat in self.chats.items()},
+                "conversations": self.conversations, "selected": self.selected, "workspace_info": self.workspace_meta,
+                "draft": self.composer.toPlainText()})
+
+    def persist_reply(self, workspace_id, store, target, chat):
+        if not any(entry["id"] == workspace_id for entry in self.workspace_list):
+            return
+        if workspace_id == self.workspace_id:
+            self.chats[target] = chat
+            self.persist_history()
+            if self.selected == target:
+                self.render_messages()
+        else:
+            state = store.load("ui").get("state", {})
+            state.setdefault("chats", {})[target] = self.saved_chat(chat)
+            store.save("ui", "state", state)
+
+    def restore_history(self, directory):
+        self.history_store = HistoryStore(directory)
+        state = self.history_store.load("ui").get("state", {})
+        self.chats = state.get("chats", {})
+        self.conversations = state.get("conversations", {})
+        self.workspace_meta = state.get("workspace_info", {})
+        self.selected = state.get("selected")
+        self.composer.setPlainText(state.get("draft", ""))
+        for target, chat in self.chats.items():
+            chat["messages"] = [tuple(message) for message in chat.get("messages", [])]
+            if (self.workspace_id, target) not in self.live_requests:
+                if chat.get("pending") and target not in self.conversations:
+                    chat["messages"].append(("error", "The app closed during this request. It was not replayed."))
+                chat["pending"] = False
+                chat["local_pending"] = False
+            if target in self.conversations:
+                chat["message_ids"] = {message["id"] for message in self.conversations[target]["messages"]}
+
+    def render_workspaces(self):
+        clear_layout(self.workspace_rail)
+        self.workspace_buttons = {}
+        for entry in self.workspace_list:
+            button = WorkspaceButton(entry["name"][:2].upper())
+            button.setToolTip(entry["name"])
+            button.setCheckable(True)
+            button.setChecked(entry["id"] == self.workspace_id)
+            button.clicked.connect(lambda checked=False, identity=entry["id"]: self.command("switch_workspace", identity))
+            self.workspace_rail.addWidget(button)
+            self.workspace_buttons[entry["id"]] = button
+
     def render_messages(self):
         clear_layout(self.messages)
         chat = self.chats.get(self.selected, {})
@@ -806,17 +912,24 @@ class MainWindow(QMainWindow):
         for role, text in chat.get("messages", []):
             bubble, column = frame("card")
             column.setContentsMargins(17, 13, 17, 13)
-            title = label("You" if role == "user" else "Request unsuccessful" if role == "error" else "Agent on this device" if role == "local_agent" else self.selected)
+            names = {"user": "You", "error": "Request unsuccessful", "local_agent": "Agent on this device"}
+            room = self.conversations.get(self.selected)
+            speaker = role.removeprefix("member:") if role.startswith("member:") else names.get(role, room["target"] if room else self.selected)
+            title = label(speaker)
             title.setStyleSheet("font-weight:650; color:"
                                 + color(self.theme, "error" if role == "error" else "agent_title") + ";")
             column.addWidget(title)
-            body = label(text, wrap=True)
-            body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            if role in ("assistant", "local_agent"):
+                body = MarkdownMessage(text)
+            else:
+                body = label(text, wrap=True)
+                body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             column.addWidget(body)
             self.messages.addWidget(bubble)
-        if chat.get("pending"):
+        if chat.get("pending") or chat.get("local_pending"):
             self.messages.addWidget(label("● ● ●   Waiting for your agent…", "muted"))
         self.update_chat_controls()
+        self.persist_history()
         QTimer.singleShot(0, lambda: self.messages_scroll.verticalScrollBar().setValue(self.messages_scroll.verticalScrollBar().maximum()))
 
     def send_message(self):
@@ -825,12 +938,37 @@ class MainWindow(QMainWindow):
         text = self.composer.toPlainText().strip()
         if not text:
             return
-        if len(text.encode()) > 180000:
+        if len(json.dumps(text).encode()) > 180000:
             self.notice("This message is too large. Send a shorter request.")
             return
         target = self.selected
         chat = self.chats[target]
-        payload = {"messages": [*chat["history"], {"role": "user", "content": text}]} if chat["history"] else {"text": text}
+        workspace_id, store = self.workspace_id, self.history_store
+        self.live_requests.add((workspace_id, target))
+        if target in self.conversations:
+            chat["local_pending"] = True
+            self.composer.clear()
+            self.request_count += 1
+            self.stat_values[2].setText(str(self.request_count))
+            self.render_messages()
+            def finished(result):
+                self.live_requests.discard((workspace_id, target))
+                if workspace_id == self.workspace_id and target in self.chats:
+                    self.chats[target]["local_pending"] = False
+                    self.persist_history()
+                    if target == self.selected:
+                        self.render_messages()
+                elif any(entry["id"] == workspace_id for entry in self.workspace_list):
+                    state = store.load("ui").get("state", {})
+                    if target in state.get("chats", {}):
+                        state["chats"][target]["local_pending"] = False
+                        store.save("ui", "state", state)
+            def failed(message):
+                finished(None)
+                self.notice(message)
+            self.command("send_conversation", target, text, success=finished, failure=failed)
+            return
+        payload = {"messages": model_context([*chat["history"], {"role": "user", "content": text}])} if chat["history"] else {"text": text}
         chat["pending"] = True
         chat["messages"].append(("user", text))
         self.composer.clear()
@@ -838,25 +976,22 @@ class MainWindow(QMainWindow):
         self.stat_values[2].setText(str(self.request_count))
         self.render_messages()
         def success(result):
-            if self.chats.get(target) is not chat:
-                return
+            self.live_requests.discard((workspace_id, target))
             response = result.get("text") if isinstance(result, dict) else result
             if not isinstance(response, str):
                 response = json.dumps(result, indent=2)
             chat["messages"].append(("assistant", response))
             if isinstance(result, dict) and result.get("provider"):
-                chat["history"] = [*chat["history"], {"role": "user", "content": text}, {"role": "assistant", "content": response}][-98:]
+                chat["history"] = [*chat["history"], {"role": "user", "content": text}, {"role": "assistant", "content": response}]
             chat["pending"] = False
-            self.add_activity(f"{target} replied", "Request completed")
-            if target == self.selected:
-                self.render_messages()
+            if workspace_id == self.workspace_id:
+                self.add_activity(f"{target} replied", "Request completed")
+            self.persist_reply(workspace_id, store, target, chat)
         def failure(message):
-            if self.chats.get(target) is not chat:
-                return
+            self.live_requests.discard((workspace_id, target))
             chat["pending"] = False
             chat["messages"].append(("error", message + "\nThe app did not replay this request."))
-            if target == self.selected:
-                self.render_messages()
+            self.persist_reply(workspace_id, store, target, chat)
         self.command("send", target, payload, success=success, failure=failure)
 
     def add_activity(self, title, detail):
@@ -898,23 +1033,74 @@ class MainWindow(QMainWindow):
             self.progress.hide()
             self.add_button.setEnabled(True)
             self.invite_button.setEnabled(not self.remote)
+            self.workspace_settings_button.setEnabled(True)
             self.add_activity("Your desktop is connected", "Local relay and device identity started automatically")
             if self.storage.settings.get("reduce_motion"):
                 self.orbit.animation.stop()
         elif event == "workspace":
+            changed = self.workspace_id != data["id"]
+            if changed:
+                self.persist_history()
+                self.workspace_id = data["id"]
+                self.restore_history(data["history_directory"])
+                self.agents = []
             self.remote = data["remote"]
             self.identity = data["self"]
+            self.port = data["port"]
             self.workspace_label.setText(data["name"])
             self.identity_label.setText(data["self"])
             self.invite_button.setEnabled(self.ready and not self.remote)
-            self.chats.clear()
-            self.selected = None
-            self.request_count = 0
+            if changed:
+                self.request_count = 0
+            self.render_agents()
             self.render_messages()
+        elif event == "workspaces":
+            self.workspace_list = data["workspaces"]
+            self.render_workspaces()
+        elif event == "workspace_removed":
+            self.workspace_list = [entry for entry in self.workspace_list if entry["id"] != data]
+            if self.workspace_id == data:
+                self.history_store = None
+                self.chats.clear()
+                self.conversations.clear()
+                self.selected = None
+        elif event == "workspace_info":
+            changed = self.workspace_meta != data
+            self.workspace_meta = data
+            self.workspace_label.setText(data["name"])
+            if changed:
+                self.persist_history()
         elif event == "agents":
             self.agents = data["agents"]
             self.connection_status.setText("●  Relay connected" if data["connected"] else "●  Reconnecting…")
             self.render_agents()
+        elif event == "conversations":
+            changed = set(self.conversations) != {room["id"] for room in data}
+            self.conversations = {room["id"]: room for room in data}
+            selected_changed = False
+            for room in data:
+                chat = self.chats.setdefault(room["id"], {"messages": [], "history": [], "pending": False})
+                if chat.get("revision") == room["revision"]:
+                    continue
+                changed = True
+                selected_changed = selected_changed or self.selected == room["id"]
+                previous_ids = chat.get("message_ids", set())
+                new_ids = {message["id"] for message in room["messages"]}
+                if self.selected != room["id"]:
+                    chat["unread"] = chat.get("unread", 0) + len(new_ids - previous_ids)
+                chat["message_ids"] = new_ids
+                chat["revision"] = room["revision"]
+                chat["messages"] = [("user" if message["role"] == "user" and message["from"] == self.identity
+                    else "member:" + message["from"] if message["role"] == "user" else message["role"], message["content"])
+                    for message in room["messages"]]
+                chat["pending"] = room["pending"]
+            self.render_agents()
+            if selected_changed:
+                self.render_messages()
+            elif changed:
+                self.persist_history()
+        elif event == "conversation_joined":
+            self.select_agent(data)
         elif event in ("incoming", "incoming_reply"):
             source = data["from"]
             chat = self.chats.setdefault(source, {"messages": [], "history": [], "pending": False})
@@ -927,6 +1113,7 @@ class MainWindow(QMainWindow):
             else:
                 chat["messages"].append(("error" if data.get("error") else "local_agent", data["to"] + ":\n" + data["text"]))
             self.render_agents()
+            self.persist_history()
             if self.selected == source:
                 self.render_messages()
         elif event == "activity":
@@ -938,6 +1125,11 @@ class MainWindow(QMainWindow):
                 self.connection_status.setText("●  Startup needs attention")
         elif event == "offline":
             self.connection_status.setText("●  Relay unavailable")
+            for agent in self.agents:
+                agent["online"] = False
+            for member in self.workspace_meta.get("members", []):
+                member["online"] = False
+            self.render_agents()
 
     def add_agent(self, provider="ollama"):
         if not self.ready:
@@ -956,9 +1148,36 @@ class MainWindow(QMainWindow):
         else:
             self.notice("Your network is still starting.")
 
+    def add_workspace(self):
+        menu = QMenu(self)
+        menu.addAction("Create a workspace", self.create_workspace)
+        menu.addAction("Join a workspace", self.join_workspace)
+        menu.exec(self.add_workspace_button.mapToGlobal(self.add_workspace_button.rect().bottomRight()))
+
+    def create_workspace(self):
+        name, accepted = QInputDialog.getText(self, "Create a workspace", "Workspace name")
+        if accepted:
+            self.command("create_workspace", name)
+
+    def manage_workspace(self):
+        from .workspace_dialog import WorkspaceDialog
+        if self.ready:
+            WorkspaceDialog(self).exec()
+
     def invite_device(self):
         if self.ready and not self.remote:
             InviteDialog(self).exec()
+
+    def invite_conversation(self):
+        if not self.ready or self.remote or not self.selected:
+            return
+        if self.selected in self.conversations:
+            InviteDialog(self, conversation_id=self.selected).exec()
+        else:
+            chat = self.chats.get(self.selected, {})
+            history = [{"role": role, "content": text} for role, text in chat.get("messages", [])
+                       if role in ("user", "assistant")]
+            InviteDialog(self, target=self.selected, messages=history).exec()
 
     def closeEvent(self, event):
         if self.closing and not self.network.isRunning():
@@ -966,6 +1185,7 @@ class MainWindow(QMainWindow):
             return
         event.ignore()
         if not self.closing:
+            self.persist_history()
             self.closing = True
             # Remembered before the shutdown begins, because that path
             # ends in a second close that must not overwrite it.
