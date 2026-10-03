@@ -27,7 +27,7 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from desktop_app.dialogs import _style_error  # noqa: E402
 from desktop_app.storage import Storage  # noqa: E402
-from desktop_app.theme import DARK, LIGHT, stylesheet  # noqa: E402
+from desktop_app.theme import DARK, LIGHT, MIKU, stylesheet  # noqa: E402
 from desktop_app.widgets import OrbitArt, label  # noqa: E402
 
 
@@ -65,6 +65,7 @@ def window(qt_app, storage, monkeypatch):
     instance = MainWindow(storage)
     yield instance
     instance.network.shutdown()
+    instance.network.wait(10000)
 
 
 # --- resolution -----------------------------------------------------------
@@ -81,6 +82,7 @@ def test_window_uses_the_stored_theme(qt_app, storage) -> None:
         assert instance.styleSheet() == stylesheet(LIGHT)
     finally:
         instance.network.shutdown()
+        instance.network.wait(10000)
 
 
 def test_window_applies_dark_by_default(qt_app, storage) -> None:
@@ -93,6 +95,7 @@ def test_window_applies_dark_by_default(qt_app, storage) -> None:
         assert instance.theme == DARK
     finally:
         instance.network.shutdown()
+        instance.network.wait(10000)
 
 
 # --- live switching -------------------------------------------------------
@@ -140,6 +143,38 @@ def test_orbit_art_accepts_a_theme() -> None:
 
     art.set_theme(DARK)
     assert art._theme == DARK
+
+
+@pytest.mark.parametrize("name", [LIGHT, MIKU, DARK])
+def test_the_orbit_paints_with_the_stored_theme_on_first_paint(
+    qt_app, storage, name: str
+) -> None:
+    """The palette must reach the orbit at construction, not on first switch.
+
+    OrbitArt is hand-painted, so the application stylesheet does not
+    reach it, and apply_theme() is never called during startup. Without
+    the theme passed in, a light or Miku install painted the welcome
+    panel with dark colours until the user changed the theme by hand.
+    """
+    storage.settings["theme"] = name
+    from desktop_app.window import MainWindow
+
+    instance = MainWindow(storage)
+    try:
+        assert instance.orbit._theme == name
+    finally:
+        instance.network.shutdown()
+        instance.network.wait(10000)
+
+
+def test_orbit_art_defaults_to_dark_for_a_caller_that_forgets() -> None:
+    """The fallback stays, so a future hand-painted widget cannot crash.
+
+    Dark is the palette every token has a value for, so a missing
+    argument degrades to a readable widget instead of an AttributeError
+    during startup.
+    """
+    assert OrbitArt()._theme == DARK
 
 
 def test_dialog_error_label_follows_the_window_theme(qt_app) -> None:

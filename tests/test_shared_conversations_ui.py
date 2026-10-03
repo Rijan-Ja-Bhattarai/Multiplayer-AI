@@ -45,6 +45,12 @@ class SharedConversationUITests(unittest.TestCase):
         self.host.show()
         self.guest.show()
         self.wait(lambda: self.host.ready and self.guest.ready)
+        # Startup emits "ready" and then the poller emits "agents" right
+        # away, so this window's first agent list arrives as a queued Qt
+        # signal. Everything below runs in the same QApplication, which is
+        # shared with every other UI test file, so that signal can land
+        # after this test starts poking at state unless it is drained here.
+        self.wait(lambda: self.host.chat_agents.count() > 0)
 
     def tearDown(self):
         self.host.close()
@@ -112,6 +118,12 @@ class SharedConversationUITests(unittest.TestCase):
         chat = self.host.chats[self.host.identity]
         chat["messages"] = [("user", text), ("assistant", text), ("local_agent", text)]
         self.host.render_messages()
+        # render_messages() rebuilds the bubble layout from scratch, and
+        # render_agents() is reachable from a queued poller signal, so the
+        # reply widgets are settled on rather than read the instant they are
+        # created. Every other test in this file waits for the UI; this one
+        # used to assert a single synchronous snapshot.
+        self.wait(lambda: len(self.host.messages_widget.findChildren(MarkdownMessage)) == 2)
         replies = self.host.messages_widget.findChildren(MarkdownMessage)
         self.assertEqual(len(replies), 2)
         for reply in replies:
@@ -119,5 +131,6 @@ class SharedConversationUITests(unittest.TestCase):
             self.assertNotIn("**", reply.toPlainText())
             self.assertIn("bold text", reply.toPlainText())
         self.assertEqual(chat["messages"], [("user", text), ("assistant", text), ("local_agent", text)])
+        self.wait(lambda: self.host.messages.count() > 0)
         user_bubble = self.host.messages.itemAt(0).widget()
         self.assertEqual(user_bubble.layout().itemAt(1).widget().text(), text)

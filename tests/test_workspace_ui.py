@@ -19,6 +19,8 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
+from network_a2a.persistence import HistoryStore
+
 from desktop_app.dialogs import AgentDialog, InviteDialog, JoinDialog
 from desktop_app.storage import Storage
 from desktop_app.window import MainWindow
@@ -136,7 +138,11 @@ class WorkspaceUITests(unittest.TestCase):
         self.switch(self.host, original)
         self.assertEqual(self.host.chats[target]["messages"], original_messages)
         self.switch(self.host, second)
-        deleted_store = self.host.history_store
+        deleted_directory = Path(self.directory.name) / "host" / "workspaces" / second
+        deleted_directory.mkdir(parents=True, exist_ok=True)
+        (deleted_directory / "settings.json").write_text("{}", encoding="utf-8")
+        deleted_archive = deleted_directory / "history.sqlite3"
+        HistoryStore(deleted_directory).save("ui", "state", {"chats": {"gone": {}}})
         dialog = WorkspaceDialog(self.host)
         dialog.show()
         with patch("desktop_app.workspace_dialog.QMessageBox.question", return_value=QMessageBox.StandardButton.Yes):
@@ -144,7 +150,9 @@ class WorkspaceUITests(unittest.TestCase):
         self.wait(lambda: self.host.workspace_id == original and not dialog.isVisible())
         self.assertNotIn(second, self.host.workspace_buttons)
         self.assertEqual(self.host.chats[target]["messages"], original_messages)
-        self.assertEqual(deleted_store.load("ui"), {})
+        # The workspace's directory is removed outright, so its settings and
+        # chat archive go with it rather than being emptied in place.
+        self.assertFalse(deleted_directory.exists())
 
     def test_shared_chat_is_readable_offline_and_members_can_be_managed_after_restart(self):
         self.configure_model(self.echo_model)
