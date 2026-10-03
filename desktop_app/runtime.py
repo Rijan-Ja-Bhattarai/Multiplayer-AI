@@ -240,7 +240,8 @@ class DesktopRuntime:
             for entry in self.catalog["workspaces"]:
                 if entry["kind"] != "local":
                     continue
-                results.append(await self.ensure_engine(entry).reset_identity())
+                engine = await self.ensure_engine(entry)
+                results.append(await engine.reset_identity())
         await self.snapshot()
         return results
 
