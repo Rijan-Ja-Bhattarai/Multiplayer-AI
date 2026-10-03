@@ -38,13 +38,22 @@ without changing the router.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from typing import Any, Dict, Optional
+from urllib.parse import urlsplit
 
 import httpx
 
 from src.errors import ErrorCode, RoutingError
+
+logger = logging.getLogger("agent_gateway")
+
+# Hosts where plaintext http cannot leave the machine. The relay token is
+# sent as a bearer credential on every invoke, so an http:// URL pointing
+# anywhere else would hand it to the network in the clear.
+LOOPBACK_HOSTS = ("localhost", "127.0.0.1", "::1")
 
 # The relay rejects agent ids outside this pattern, so reject them here
 # too and report a client error rather than provoking a 403 that would
@@ -100,14 +109,53 @@ class AgentGateway:
         Server as an agent whenever both ran from one shell. The relay
         itself is configured through ``A2A_CREDENTIALS_FILE``.
 
+        The URL is checked before the gateway is built. ``invoke`` sends
+        this token as a bearer credential on every call, so an http://
+        URL aimed anywhere but loopback would transmit it in plaintext.
+        https:// is always allowed; http:// is only allowed on loopback,
+        with no override, because there is no legitimate reason for a
+        relay holding a shared token to be reached in the clear.
+
         Returns:
-            A configured gateway, or None when the relay is not set up.
+            A configured gateway, or None when the relay is not usable.
+            None rather than an exception, so an operator who points this
+            at the wrong scheme still gets a working client-to-client
+            server and a warning in the log explaining the agent half.
         """
         relay_url = os.environ.get("A2A_RELAY_URL")
         token = os.environ.get("A2A_RELAY_TOKEN")
         if not relay_url or not token:
             return None
+        if not cls._usable_url(relay_url):
+            return None
         return cls(relay_url, token, float(os.getenv("A2A_GATEWAY_TIMEOUT", DEFAULT_TIMEOUT)))
+
+    @staticmethod
+    def _usable_url(relay_url: str) -> bool:
+        """Whether this relay URL may carry the gateway token."""
+        parsed = urlsplit(relay_url)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            logger.warning(
+                "AGENT_GATEWAY status=disabled reason=bad_relay_url url=%r "
+                "hint=use an https:// relay URL, or http:// on localhost",
+                relay_url,
+            )
+            return False
+        if parsed.username or parsed.password:
+            logger.warning(
+                "AGENT_GATEWAY status=disabled reason=credentials_in_url url=%r "
+                "hint=put the token in A2A_RELAY_TOKEN, not in the URL",
+                relay_url,
+            )
+            return False
+        if parsed.scheme == "http" and parsed.hostname not in LOOPBACK_HOSTS:
+            logger.warning(
+                "AGENT_GATEWAY status=disabled reason=plaintext_relay url=%r "
+                "hint=the relay token would cross the network in the clear; use https://",
+                relay_url,
+            )
+            return False
+        return True
 
     def _http(self) -> httpx.AsyncClient:
         """Lazily create one client and reuse it.

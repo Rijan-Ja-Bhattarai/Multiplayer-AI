@@ -56,6 +56,100 @@ def test_from_env_builds_when_configured(monkeypatch) -> None:
     assert gateway.relay_url == "http://localhost:9100"
 
 
+# --- relay URL transport safety -----------------------------------------
+#
+# invoke() sends this token as a bearer credential on every call, so a
+# plaintext http:// URL to anything but loopback would hand it to the
+# network in the clear.
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://relay.example.com",
+        "http://10.0.0.5:9100",
+        "http://192.168.1.20:9100",
+        "HTTP://relay.example.com",
+    ],
+)
+def test_from_env_refuses_plaintext_remote_urls(monkeypatch, url: str) -> None:
+    """A remote http:// relay URL is refused, not quietly accepted."""
+    monkeypatch.setenv("A2A_RELAY_URL", url)
+    monkeypatch.setenv("A2A_RELAY_TOKEN", "t" * 40)
+
+    assert AgentGateway.from_env() is None
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://localhost:9100",
+        "http://127.0.0.1:9100",
+        "http://[::1]:9100",
+    ],
+)
+def test_from_env_allows_plaintext_loopback(monkeypatch, url: str) -> None:
+    """Plaintext cannot leave the machine, so it stays allowed."""
+    monkeypatch.setenv("A2A_RELAY_URL", url)
+    monkeypatch.setenv("A2A_RELAY_TOKEN", "t" * 40)
+
+    assert AgentGateway.from_env() is not None
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://relay.example.com",
+        "https://relay.example.com:8443/base",
+        "wss://relay.example.com",
+        "ws://relay.example.com",
+        "ftp://relay.example.com",
+        "relay.example.com:9100",
+        "",
+    ],
+)
+def test_from_env_allows_https_and_refuses_other_schemes(
+    monkeypatch, url: str
+) -> None:
+    """Only http and https can carry the token; the rest are refused."""
+    monkeypatch.setenv("A2A_RELAY_URL", url)
+    monkeypatch.setenv("A2A_RELAY_TOKEN", "t" * 40)
+
+    built = AgentGateway.from_env()
+
+    assert (built is not None) == url.startswith("https://")
+
+
+def test_from_env_refuses_credentials_embedded_in_the_url(monkeypatch) -> None:
+    """The token belongs in A2A_RELAY_TOKEN, not in the URL.
+
+    An embedded password would also be visible in a log line or a process
+    listing, so it is refused even over https.
+    """
+    monkeypatch.setenv("A2A_RELAY_URL", "https://user:secret@relay.example.com")
+    monkeypatch.setenv("A2A_RELAY_TOKEN", "t" * 40)
+
+    assert AgentGateway.from_env() is None
+
+
+def test_a_refused_url_is_explained_in_the_log(monkeypatch, caplog) -> None:
+    """The generic disabled hint cannot explain a refused URL.
+
+    app.py logs reason=missing_config whenever the gateway is absent, so
+    without a specific warning the operator would look for a variable
+    that is already set correctly.
+    """
+    monkeypatch.setenv("A2A_RELAY_URL", "http://relay.example.com")
+    monkeypatch.setenv("A2A_RELAY_TOKEN", "t" * 40)
+
+    with caplog.at_level("WARNING", logger="agent_gateway"):
+        assert AgentGateway.from_env() is None
+
+    messages = " ".join(record.getMessage() for record in caplog.records)
+    assert "reason=plaintext_relay" in messages
+    assert "https" in messages
+
+
 def test_from_env_needs_both_variables(monkeypatch) -> None:
     """Half a configuration is treated as no configuration."""
     monkeypatch.setenv("A2A_RELAY_URL", "http://localhost:9100")

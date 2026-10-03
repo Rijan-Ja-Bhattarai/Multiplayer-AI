@@ -65,3 +65,18 @@ def test_http_routes_are_not_needed_for_messaging() -> None:
         if isinstance(route, Route) and "POST" in (route.methods or set())
     ]
     assert post_routes == []
+
+
+def test_disabled_gateway_hint_names_the_variables_from_env_actually_reads() -> None:
+    """The hint must point at the variables AgentGateway.from_env reads.
+
+    It used to say A2A_TOKEN, which means a process's own agent identity
+    rather than this server's relay token, so following the hint left the
+    agent half still disabled. Asserted on the constant because the log
+    line is emitted once at import time.
+    """
+    hint = server_app.GATEWAY_DISABLED_HINT
+
+    assert "A2A_RELAY_URL" in hint
+    assert "A2A_RELAY_TOKEN" in hint
+    assert "A2A_TOKEN" not in hint.replace("A2A_RELAY_TOKEN", "")

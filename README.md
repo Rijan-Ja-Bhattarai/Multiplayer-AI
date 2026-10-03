@@ -308,19 +308,19 @@ token, so use a separate terminal for each so the variables do not leak
 between processes:
 
 **Terminal 1 — the relay**
-```bash
+```powershell
 $env:A2A_CREDENTIALS_FILE = "$PWD\credentials.json"
 python -m uvicorn network_a2a.server:app_from_env --factory --port 9100 --workers 1
 ```
 
 **Terminal 2 — the agent**
-```bash
+```powershell
 $env:A2A_TOKEN = "<agent-A's token>"
 python -m network_a2a --server ws://localhost:9100/connect --provider openai --model gpt-4o
 ```
 
 **Terminal 3 — the Connection Server**
-```bash
+```powershell
 $env:A2A_RELAY_URL = "http://localhost:9100"
 $env:A2A_RELAY_TOKEN = "<the connection server's own token>"
 python -m uvicorn src.server.app:app --host localhost --port 8000

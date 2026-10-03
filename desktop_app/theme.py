@@ -182,6 +182,7 @@ CONTRAST_PAIRS = (
     ("error", "surface", BODY_TEXT, "error text on a card"),
     ("agent_title", "surface", BODY_TEXT, "message author on a card"),
     ("toast_fg", "toast_bg", BODY_TEXT, "toast text"),
+    ("error", "toast_bg", BODY_TEXT, "error toast text"),
     ("on_accent", "accent", BODY_TEXT, "label on a resting accent fill"),
     # Hover and pressed are transient states, so they are held to the
     # non-text bar. Raising them to 4.5 would fail the dark theme's

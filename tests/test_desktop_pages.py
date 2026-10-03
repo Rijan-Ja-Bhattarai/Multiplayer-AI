@@ -8,6 +8,7 @@ leave a device token in the developer's OS credential store.
 
 from __future__ import annotations
 
+import json
 import os
 
 import pytest
@@ -36,6 +37,10 @@ class MemoryVault:
 
     def set(self, name, value):
         self.values[name] = value
+
+    def delete(self, name):
+        return self.values.pop(name, None) is not None
+
 
 
 @pytest.fixture(scope="session")
@@ -326,3 +331,51 @@ def test_the_destructive_dialog_defaults_to_cancel(window) -> None:
 
     box = seen["box"]
     assert box.defaultButton() is box.button(QMessageBox.StandardButton.Cancel)
+
+
+def test_follow_system_persists_immediately(window) -> None:
+    """Removing the stored theme must reach the file, not just memory.
+
+    Only the explicit-choice branch saved, so picking "Follow system"
+    left the old theme in settings.json until some unrelated write
+    happened to flush it, and the choice came back on the next launch.
+    """
+    miku_index = [c[1] for c in THEME_CHOICES].index(MIKU)
+    window.theme_picker.setCurrentIndex(miku_index)
+    assert json.loads(window.storage.path.read_text(encoding="utf-8"))["theme"] == MIKU
+
+    window.theme_picker.setCurrentIndex(0)
+
+    on_disk = json.loads(window.storage.path.read_text(encoding="utf-8"))
+    assert "theme" not in on_disk
+
+
+def test_a_failed_command_is_reported_in_the_error_colour(window) -> None:
+    """A failure must not be painted in the success colours."""
+    window.command_failure("no-such-request", "Could not save credentials.")
+
+    assert window.toast_error is True
+    assert win.color(window.theme, "error") in window.toast.styleSheet()
+    assert win.color(window.theme, "toast_fg") not in window.toast.styleSheet()
+
+
+def test_a_notice_is_reported_in_the_success_colour(window) -> None:
+    """The default stays success-coloured."""
+    window.notice("Replaced 2 saved identities.")
+
+    assert window.toast_error is False
+    assert win.color(window.theme, "toast_fg") in window.toast.styleSheet()
+
+
+def test_switching_themes_does_not_turn_an_error_toast_green(window) -> None:
+    """apply_theme restyles the toast, so it must keep the error state.
+
+    Otherwise a failure would silently change colour mid-display while
+    the user is still reading it.
+    """
+    window.notice("Could not save credentials.", error=True)
+
+    window.apply_theme(LIGHT)
+
+    assert win.color(LIGHT, "error") in window.toast.styleSheet()
+    assert win.color(LIGHT, "toast_fg") not in window.toast.styleSheet()

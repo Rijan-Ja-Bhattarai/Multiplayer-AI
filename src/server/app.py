@@ -57,10 +57,16 @@ connection_manager = ConnectionManager()
 # its own.
 agent_gateway = AgentGateway.from_env()
 
+# Named as a constant so the hint is assertable. The variable must be
+# A2A_RELAY_TOKEN, which is the one AgentGateway.from_env reads; naming
+# A2A_TOKEN here sent operators to the variable that means the opposite
+# thing, namely a process's own agent identity.
+GATEWAY_DISABLED_HINT = "set A2A_RELAY_URL and A2A_RELAY_TOKEN"
+
 if agent_gateway is None:
     logger.info(
         "AGENT_GATEWAY status=disabled reason=missing_config "
-        "hint=set A2A_RELAY_URL and A2A_TOKEN"
+        "hint=" + GATEWAY_DISABLED_HINT
     )
 
 

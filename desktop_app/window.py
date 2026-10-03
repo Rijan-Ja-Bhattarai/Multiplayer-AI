@@ -96,6 +96,7 @@ class MainWindow(QMainWindow):
         self.live_requests = set()
         self.workspace_buttons = {}
         self.callbacks = {}
+        self.toast_error = False
         self.request_count = 0
         self.ready = False
         self.closing = False
@@ -651,6 +652,10 @@ class MainWindow(QMainWindow):
         name = THEME_CHOICES[index][1]
         if name is None:
             self.storage.settings.pop("theme", None)
+            # Saved here too, not just in the branch below: removing the
+            # preference must persist immediately, or the theme reappears
+            # on next launch because nothing else wrote the file yet.
+            self.storage.save()
             self.apply_theme(resolve_theme({}))
         else:
             self.storage.settings["theme"] = name
@@ -689,10 +694,18 @@ class MainWindow(QMainWindow):
         self.storage.settings["window_size"] = [self.width(), self.height()]
         self.storage.save()
 
-    def style_toast(self):
-        """Repaint the toast in the current theme's success colours."""
+    def style_toast(self, error=None):
+        """Repaint the toast in the current theme's colours.
+
+        ``error`` selects the error foreground so a failure is not
+        reported in the success colour. Left as None it keeps the current
+        state, because apply_theme() restyles on a theme switch and an
+        error toast still on screen must not turn green.
+        """
+        if error is not None:
+            self.toast_error = error
         self.toast.setStyleSheet("background:" + color(self.theme, "toast_bg")
-                                 + "; color:" + color(self.theme, "toast_fg")
+                                 + "; color:" + color(self.theme, "error" if self.toast_error else "toast_fg")
                                  + "; padding:12px 24px;")
 
     def apply_theme(self, name):
@@ -1000,7 +1013,8 @@ class MainWindow(QMainWindow):
         while self.activity_list.count() > 8:
             self.activity_list.takeItem(self.activity_list.count() - 1)
 
-    def notice(self, message):
+    def notice(self, message, error=False):
+        self.style_toast(error)
         self.toast.setText(message)
         self.toast.show()
         QTimer.singleShot(7500, self.toast.hide)
@@ -1024,7 +1038,7 @@ class MainWindow(QMainWindow):
         if failure:
             failure(message)
         else:
-            self.notice(message)
+            self.notice(message, error=True)
 
     def network_event(self, event, data):
         if event == "ready":
