@@ -1049,22 +1049,35 @@ class MainWindow(QMainWindow):
         else:
             self.notice(message, error=True)
 
-    def show_pending_cleanup(self, count):
-        """State, rather than a passing notice, for credentials still owed.
+    def show_pending_cleanup(self, count, files=0):
+        """State, rather than a passing notice, for a cleanup still owed.
 
         The toast is gone in a few seconds, and this can be true for as
-        long as the credential store stays locked, so Settings keeps it
-        visible until the cleanup actually completes.
+        long as the credential store stays locked or something keeps hold of
+        a deleted workspace's folder, so Settings keeps it visible until the
+        cleanup actually completes.
+
+        The two are reported separately because they need opposite things:
+        an undeleted credential needs the keyring unlocked, a stranded file
+        needs whatever is holding the folder closed.
         """
-        count = int(count or 0)
+        count, files = int(count or 0), int(files or 0)
         if not hasattr(self, "pending_cleanup"):
             return
-        self.pending_cleanup.setVisible(count > 0)
+        self.pending_cleanup.setVisible(count > 0 or files > 0)
+        sentences = []
         if count:
-            self.pending_cleanup.setText(
+            sentences.append(
                 f"{count} saved {'credential' if count == 1 else 'credentials'} from a "
                 "deleted workspace could not be removed. Unlock your credential store "
                 "and restart; the app will try again.")
+        if files:
+            sentences.append(
+                f"{files} deleted {'workspace' if files == 1 else 'workspaces'}"
+                f"{' has' if files == 1 else ' have'} files that could not be removed. "
+                "Close anything still using that folder; the app will try again.")
+        if sentences:
+            self.pending_cleanup.setText(" ".join(sentences))
 
     def network_event(self, event, data):
         if event == "ready":
@@ -1164,7 +1177,7 @@ class MainWindow(QMainWindow):
                 self.progress.hide()
                 self.connection_status.setText("●  Startup needs attention")
         elif event == "pending_cleanup":
-            self.show_pending_cleanup(data["credentials"])
+            self.show_pending_cleanup(data["credentials"], data.get("files", 0))
         elif event == "offline":
             self.connection_status.setText("●  Relay unavailable")
             for agent in self.agents:

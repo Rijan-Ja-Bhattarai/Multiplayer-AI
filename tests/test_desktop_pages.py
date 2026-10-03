@@ -406,9 +406,38 @@ def test_settings_shows_owed_credentials_until_the_cleanup_completes(window) -> 
     assert window.pending_cleanup.isHidden(), "cleared once nothing is owed"
 
 
+def test_settings_reports_stranded_files_separately_from_credentials(window) -> None:
+    """A folder that will not go is a different problem from a locked keyring.
+
+    Folding it into the credential count would either blame the keyring or
+    leave the line hidden, and this can last as long as whatever is holding
+    the folder does.
+    """
+    window.navigate(win.SETTINGS_PAGE)
+
+    window.show_pending_cleanup(0, 1)
+    assert not window.pending_cleanup.isHidden()
+    assert "1 deleted workspace has files" in window.pending_cleanup.text()
+    assert "credential" not in window.pending_cleanup.text()
+
+    window.show_pending_cleanup(2, 1)
+    assert "2 saved credentials" in window.pending_cleanup.text()
+    assert "1 deleted workspace has files" in window.pending_cleanup.text()
+
+    window.show_pending_cleanup(0, 2)
+    assert "2 deleted workspaces have files" in window.pending_cleanup.text()
+
+    window.show_pending_cleanup(0, 0)
+    assert window.pending_cleanup.isHidden(), "cleared once nothing is owed"
+
+
 def test_the_pending_line_receives_the_runtime_event(window) -> None:
     """The runtime's pending_cleanup event is what drives the line."""
-    window.network_event("pending_cleanup", {"credentials": 3})
+    window.network_event("pending_cleanup", {"credentials": 3, "files": 0})
 
     assert not window.pending_cleanup.isHidden()
     assert "3 saved credentials" in window.pending_cleanup.text()
+
+    window.network_event("pending_cleanup", {"credentials": 0, "files": 1})
+
+    assert "1 deleted workspace has files" in window.pending_cleanup.text()
