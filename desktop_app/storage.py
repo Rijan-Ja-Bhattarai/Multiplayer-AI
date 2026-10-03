@@ -120,23 +120,25 @@ class Storage:
             self.save()
         return result
 
-    def reset_identities(self):
-        """Forget every local identity, in the settings and the vault.
+    def forget_identities(self, agent_ids):
+        """Delete these identities from the vault and the settings mapping.
 
-        Backs the Settings action. The group mapping is removed and each
-        token deleted, so nothing is left that would silently bring an
-        old identity back. The device id is kept, because the token is
-        what identifies the device to a relay, and a fresh token for the
-        same id is enough.
+        Called only once a replacement credential has been stored, so a
+        store that refuses the deletion costs nothing: the ids are
+        already unused. Vault deletion is best effort, so the mapping is
+        pruned either way. The device's own id is normally not passed
+        in, because the vault entry for it now holds the new token.
         """
         identities = self.settings.get("identities")
-        removed = list(identities) if isinstance(identities, dict) else []
-        for agent_id in removed:
+        removed = []
+        for agent_id in agent_ids:
             self.vault.delete("relay:" + agent_id)
-        if isinstance(identities, dict):
-            identities.clear()
+            if isinstance(identities, dict):
+                identities.pop(agent_id, None)
+            removed.append(agent_id)
         self.dropped_identities = []
-        self.save()
+        if removed:
+            self.save()
         return removed
 
     def save_credentials(self, credentials):

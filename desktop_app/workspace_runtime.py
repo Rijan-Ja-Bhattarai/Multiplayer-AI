@@ -54,6 +54,9 @@ class WorkspaceRuntime:
     async def start(self):
         self.http = httpx.AsyncClient(timeout=65, follow_redirects=False)
         self.credentials = self.storage.credentials() or {}
+        # Recorded by Storage.credentials() before it dropped anything, so
+        # it has to be read before a new token is minted below.
+        recovered = list(getattr(self.storage, "dropped_identities", []))
         device_id = self.storage.settings.get("device_id")
         if not device_id:
             device_id = "device-" + uuid4().hex[:8]
@@ -63,6 +66,14 @@ class WorkspaceRuntime:
         Relay(self.credentials)
         self.storage.save_credentials(self.credentials)
         self.storage.save()
+        if recovered:
+            # The device carries on with a new token, but any workspace
+            # joined under the old one no longer recognises it, so this is
+            # worth saying rather than leaving the user to wonder why
+            # their shared workspace stopped connecting.
+            self.emit("notice", "This device's saved identity was missing from the "
+                                "credential store, so a new one was created. Workspaces "
+                                "joined with the old identity need a new invitation.")
         self.app = create_app(self.credentials, conversation_store=self.history_store, workspace={
             "id": self.storage.settings.get("workspace_id", "local"),
             "name": self.storage.settings.get("workspace_name", "My workspace"),
@@ -182,18 +193,85 @@ class WorkspaceRuntime:
 
     async def use_local(self, forget_remote=True):
         async with self.mutation:
+            await self._use_local(forget_remote)
+
+    async def _use_local(self, forget_remote=True):
+        """Switch to the local workspace, assuming ``mutation`` is held.
+
+        Split out because asyncio.Lock is not reentrant: reset_identity
+        already holds it when it needs to return to the local workspace,
+        and calling use_local from there would deadlock.
+        """
+        await self._stop_agents()
+        self.remote = False
+        self.active_url = f"ws://127.0.0.1:{self.port}/connect"
+        self.active_id = self.storage.settings["device_id"]
+        self.active_token = self.credentials[self.active_id]["token"]
+        if forget_remote:
+            self.storage.settings.pop("remote", None)
+        self.storage.save()
+        await self._attach(self.active_id, self.active_token, self._echo)
+        await self._restore_profiles()
+        self.emit("workspace", {"name": self.storage.settings.get("workspace_name", "My workspace"), "url": self.active_url, "self": self.active_id, "remote": False})
+        await self.refresh()
+
+    async def reset_identity(self):
+        """Replace every identity in this workspace with a fresh token.
+
+        Reachable from Settings. Useful when a credential is suspected to
+        be exposed, or when the credential store has been partly lost and
+        the leftovers are not wanted.
+
+        The replacement is written before anything is deleted, so a store
+        that refuses the write leaves the existing identity, the in-memory
+        credentials and the relay exactly as they were. Only agents held
+        back until the new token is durable, so a failure also leaves the
+        running agents alone.
+
+        Provider profiles get new tokens too, because _restore_profiles
+        only relaunches an agent whose id is present in the credential
+        set; dropping them would silently stop every model agent.
+        """
+        async with self.mutation:
+            removed = list(self.storage.settings.get("identities", {}) or {})
+            device_id = self.storage.settings.get("device_id")
+            if not device_id:
+                device_id = "device-" + uuid4().hex[:8]
+                self.storage.settings["device_id"] = device_id
+            fresh = {device_id: {"token": secrets.token_urlsafe(32), "group": "workspace"}}
+            skipped = []
+            for profile in self.storage.settings.get("agents", []):
+                agent_id = profile.get("id")
+                # A profile may name the device identity, which already has
+                # a token above; a second entry would overwrite it.
+                if agent_id == device_id or agent_id in fresh:
+                    continue
+                if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", agent_id or ""):
+                    skipped.append(agent_id)
+                    continue
+                fresh[agent_id] = {"token": secrets.token_urlsafe(32), "group": "workspace"}
+            Relay(fresh)
+            self.storage.save_credentials(fresh)
+            # Never delete the entry just written, which lives under device_id.
+            self.storage.forget_identities([i for i in removed if i != device_id])
             await self._stop_agents()
-            self.remote = False
-            self.active_url = f"ws://127.0.0.1:{self.port}/connect"
-            self.active_id = self.storage.settings["device_id"]
-            self.active_token = self.credentials[self.active_id]["token"]
-            if forget_remote:
-                self.storage.settings.pop("remote", None)
-            self.storage.save()
-            await self._attach(self.active_id, self.active_token, self._echo)
-            await self._restore_profiles()
-            self.emit("workspace", {"name": self.storage.settings.get("workspace_name", "My workspace"), "url": self.active_url, "self": self.active_id, "remote": False})
-            await self.refresh()
+            self.credentials = fresh
+            if self.app is not None:
+                self.app.state.relay.credentials = fresh
+            joined = len([i for i in removed if i != device_id])
+            self.emit("notice", f"Replaced {len(removed)} saved "
+                                f"{'identity' if len(removed) == 1 else 'identities'}. "
+                                "Rejoin any shared workspace with a new invitation.")
+            if skipped:
+                # Skipping is better than refusing the reset outright, but the
+                # user should know which agents did not get a new token.
+                self.emit("notice", "Could not reissue an identity for "
+                                    f"{', '.join(str(s) for s in skipped)}. Open Providers "
+                                    "to rename and reconnect those agents.")
+            await self._use_local(forget_remote=True)
+            return {"removed": removed, "device_id": device_id, "skipped": skipped,
+                    "reissued": sorted(i for i in fresh if i != device_id),
+                    "joined": joined}
 
     async def _restore_profiles(self):
         for profile in self.storage.settings.get("agents", []):
