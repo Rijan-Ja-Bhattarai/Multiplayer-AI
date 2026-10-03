@@ -96,6 +96,8 @@ The same directory contains `workspaces.json` and the default workspace's
 `history.sqlite3`. Additional workspaces keep separate settings and history
 under `workspaces/<workspace-id>/`. Chat history is saved on disk; tokens and
 provider keys remain in the OS credential store with workspace-specific keys.
+If the app closes unexpectedly, `desktop-crash.log` in the preferences directory
+records Python exceptions, Qt messages, and native crash details for diagnosis.
 
 ## Invite another device
 

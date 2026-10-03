@@ -8,6 +8,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 
 from .storage import Storage
 from .window import MainWindow, app_icon
+from .diagnostics import CrashDiagnostics
 
 
 def main():
@@ -19,12 +20,14 @@ def main():
     app.setApplicationName("Multiplayer AI")
     app.setOrganizationName("MultiplayerAI")
     app.setWindowIcon(app_icon())
+    diagnostics = None
     try:
         storage = Storage(args.data_dir)
         lock = QLockFile(str(storage.directory / "desktop.lock"))
         if not lock.tryLock(0):
             QMessageBox.information(None, "Multiplayer AI", "This workspace is already open on this device.")
             return 0
+        diagnostics = CrashDiagnostics(storage.directory)
         window = MainWindow(storage)
         if args.check_startup:
             app.setQuitOnLastWindowClosed(False)
@@ -40,8 +43,13 @@ def main():
         lock.unlock()
         return result
     except Exception as exc:
+        if diagnostics:
+            diagnostics.python_exception(type(exc), exc, exc.__traceback__)
         QMessageBox.critical(None, "Multiplayer AI could not start", str(exc))
         return 1
+    finally:
+        if diagnostics:
+            diagnostics.close()
 
 
 if __name__ == "__main__":

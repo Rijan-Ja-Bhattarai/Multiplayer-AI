@@ -1,7 +1,7 @@
 import json
 from datetime import datetime
 
-from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt, QTimer
+from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt, QTimer, Slot
 from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QFont
 from PySide6.QtWidgets import (QCheckBox, QFrame, QGraphicsOpacityEffect, QGridLayout, QHBoxLayout,
     QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QProgressBar, QScrollArea,
@@ -495,16 +495,25 @@ class MainWindow(QMainWindow):
                 chat["message_ids"] = {message["id"] for message in self.conversations[target]["messages"]}
 
     def render_workspaces(self):
-        clear_layout(self.workspace_rail)
-        self.workspace_buttons = {}
+        identities = {entry["id"] for entry in self.workspace_list}
+        for identity in list(self.workspace_buttons):
+            if identity not in identities:
+                button = self.workspace_buttons.pop(identity)
+                button.animation.stop()
+                self.workspace_rail.removeWidget(button)
+                button.hide()
+                button.deleteLater()
         for entry in self.workspace_list:
-            button = WorkspaceButton(entry["name"][:2].upper())
+            button = self.workspace_buttons.get(entry["id"])
+            if button is None:
+                button = WorkspaceButton(entry["name"][:2].upper())
+                button.setCheckable(True)
+                button.clicked.connect(lambda checked=False, identity=entry["id"]: self.command("switch_workspace", identity))
+                self.workspace_rail.addWidget(button)
+                self.workspace_buttons[entry["id"]] = button
+            button.setText(entry["name"][:2].upper())
             button.setToolTip(entry["name"])
-            button.setCheckable(True)
             button.setChecked(entry["id"] == self.workspace_id)
-            button.clicked.connect(lambda checked=False, identity=entry["id"]: self.command("switch_workspace", identity))
-            self.workspace_rail.addWidget(button)
-            self.workspace_buttons[entry["id"]] = button
 
     def render_messages(self):
         clear_layout(self.messages)
@@ -616,11 +625,13 @@ class MainWindow(QMainWindow):
         request_id = self.network.submit(method, *args)
         self.callbacks[request_id] = (success, failure)
 
+    @Slot(str, object)
     def command_success(self, request_id, result):
         success, _ = self.callbacks.pop(request_id, (None, None))
         if success:
             success(result)
 
+    @Slot(str, str)
     def command_failure(self, request_id, message):
         _, failure = self.callbacks.pop(request_id, (None, None))
         if failure:
@@ -628,6 +639,7 @@ class MainWindow(QMainWindow):
         else:
             self.notice(message)
 
+    @Slot(str, object)
     def network_event(self, event, data):
         if event == "ready":
             self.ready = True
@@ -752,9 +764,15 @@ class MainWindow(QMainWindow):
 
     def add_workspace(self):
         menu = QMenu(self)
-        menu.addAction("Create a workspace", self.create_workspace)
-        menu.addAction("Join a workspace", self.join_workspace)
-        menu.exec(self.add_workspace_button.mapToGlobal(self.add_workspace_button.rect().bottomRight()))
+        create = menu.addAction("Create a workspace")
+        join = menu.addAction("Join a workspace")
+        selected = menu.exec(self.add_workspace_button.mapToGlobal(self.add_workspace_button.rect().bottomRight()))
+        menu.deleteLater()
+        # Open modal dialogs after the menu's event loop has returned.
+        if selected == create:
+            self.create_workspace()
+        elif selected == join:
+            self.join_workspace()
 
     def create_workspace(self):
         name, accepted = QInputDialog.getText(self, "Create a workspace", "Workspace name")
@@ -794,6 +812,7 @@ class MainWindow(QMainWindow):
             self.toast.show()
             self.network.shutdown()
 
+    @Slot()
     def finish_close(self):
         if self.closing:
             self.close()

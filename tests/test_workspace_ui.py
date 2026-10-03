@@ -13,9 +13,9 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6.QtWidgets")
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication, QDialogButtonBox, QInputDialog, QMenu, QMessageBox
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
@@ -145,6 +145,64 @@ class WorkspaceUITests(unittest.TestCase):
         self.assertNotIn(second, self.host.workspace_buttons)
         self.assertEqual(self.host.chats[target]["messages"], original_messages)
         self.assertEqual(deleted_store.load("ui"), {})
+
+    def test_create_from_real_menu_and_dialog_preserves_existing_animated_rail_button(self):
+        original = self.host.workspace_id
+        button = self.host.workspace_buttons[original]
+        button.animation.setDuration(10000)
+        button.animation.setStartValue(23.0)
+        button.animation.setEndValue(15.0)
+        button.animation.start()
+        stages = []
+        deadline = time.monotonic() + 15
+
+        def drive_dialogs():
+            popup = self.app.activePopupWidget()
+            dialog = self.app.activeModalWidget()
+            if time.monotonic() > deadline:
+                if isinstance(dialog, QInputDialog):
+                    dialog.reject()
+                if isinstance(popup, QMenu):
+                    popup.close()
+                driver.stop()
+            elif isinstance(popup, QMenu) and not stages:
+                stages.append("menu")
+                QTest.mouseClick(popup, Qt.MouseButton.LeftButton, pos=popup.actionGeometry(popup.actions()[0]).center())
+            elif isinstance(dialog, QInputDialog) and stages == ["menu"]:
+                stages.append("dialog")
+                dialog.setTextValue("Created through the menu")
+                buttons = dialog.findChild(QDialogButtonBox)
+                QTest.mouseClick(buttons.button(QDialogButtonBox.StandardButton.Ok), Qt.MouseButton.LeftButton)
+
+        driver = QTimer(self.host)
+        driver.setInterval(10)
+        driver.timeout.connect(drive_dialogs)
+        watchdog = QTimer(self.host)
+        watchdog.setSingleShot(True)
+        def dismiss_dialogs():
+            dialog = self.app.activeModalWidget()
+            popup = self.app.activePopupWidget()
+            if isinstance(dialog, QInputDialog):
+                dialog.reject()
+            if isinstance(popup, QMenu):
+                popup.close()
+        watchdog.timeout.connect(dismiss_dialogs)
+        watchdog.start(15000)
+        driver.start()
+        try:
+            QTest.mouseClick(self.host.add_workspace_button, Qt.MouseButton.LeftButton)
+        finally:
+            driver.stop()
+            watchdog.stop()
+        self.assertEqual(stages, ["menu", "dialog"])
+        self.wait(lambda: self.host.workspace_id != original)
+        self.assertTrue(self.host.isVisible())
+        self.assertTrue(self.host.network.isRunning())
+        self.assertEqual(self.host.workspace_label.text(), "Created through the menu")
+        self.assertIs(self.host.workspace_buttons[original], button)
+        self.assertEqual(self.host.workspace_rail.count(), 2)
+        self.switch(self.host, original)
+        self.assertIs(self.host.workspace_buttons[original], button)
 
     def test_shared_chat_is_readable_offline_and_members_can_be_managed_after_restart(self):
         self.configure_model(self.echo_model)
