@@ -1,6 +1,7 @@
 """Nonsecret preferences on disk; tokens and API keys in the OS credential store."""
 import json
 import os
+import threading
 from pathlib import Path
 
 
@@ -27,6 +28,28 @@ class Vault:
         except Exception:
             raise RuntimeError("Could not save credentials to the OS credential store.") from None
 
+    def delete(self, name):
+        try:
+            self.backend.delete_password("MultiplayerAI", name)
+        except self.backend.errors.PasswordDeleteError:
+            pass
+
+
+class WorkspaceVault:
+    def __init__(self, vault, workspace_id):
+        self.vault = vault
+        self.prefix = workspace_id + ":"
+
+    def get(self, name):
+        return self.vault.get(self.prefix + name)
+
+    def set(self, name, value):
+        self.vault.set(self.prefix + name, value)
+
+    def delete(self, name):
+        if hasattr(self.vault, "delete"):
+            self.vault.delete(self.prefix + name)
+
 
 class Storage:
     def __init__(self, directory=None, vault=None):
@@ -34,14 +57,16 @@ class Storage:
         self.vault = vault if vault is not None else Vault()
         self.directory.mkdir(parents=True, exist_ok=True)
         self.path = self.directory / "settings.json"
+        self.lock = threading.RLock()
         self.settings = json.loads(self.path.read_text(encoding="utf-8")) if self.path.exists() else {}
         if not isinstance(self.settings, dict):
             raise ValueError("Desktop settings file must contain an object")
 
     def save(self):
-        temporary = self.directory / "settings.json.tmp"
-        temporary.write_text(json.dumps(self.settings, indent=2), encoding="utf-8")
-        temporary.replace(self.path)
+        with self.lock:
+            temporary = self.directory / "settings.json.tmp"
+            temporary.write_text(json.dumps(self.settings, indent=2), encoding="utf-8")
+            temporary.replace(self.path)
 
     def credentials(self):
         result = {}

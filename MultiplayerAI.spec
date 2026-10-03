@@ -6,7 +6,7 @@ import sys
 # Conda keeps Python's dependent DLLs outside the interpreter's DLLs folder.
 library = Path(sys.prefix) / 'Library' / 'bin'
 conda_binaries = [(str(path), '.') for path in library.glob('*.dll')
-                  if path.name.lower().startswith(('libbz2', 'libmpdec', 'libcrypto', 'libssl', 'ffi', 'zlib'))]
+                  if path.name.lower().startswith(('libbz2', 'libmpdec', 'libcrypto', 'libssl', 'ffi', 'zlib', 'sqlite3'))]
 
 analysis = Analysis(
     ['desktop_launcher.py'], pathex=['.'], binaries=conda_binaries, datas=[],

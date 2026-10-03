@@ -14,6 +14,8 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocketDisconnect
 
+from .conversations import Conversations
+
 
 MAX_BYTES = 262144
 
@@ -29,7 +31,7 @@ class Peer:
 
 
 class Relay:
-    def __init__(self, credentials, timeout=60, max_pending=256):
+    def __init__(self, credentials, timeout=60, max_pending=256, conversation_store=None, workspace=None):
         if not credentials or not 1 <= timeout <= 300 or max_pending < 1:
             raise ValueError("Credentials required; timeout must be 1..300 and max_pending positive")
         self.credentials = credentials
@@ -48,6 +50,9 @@ class Relay:
         self.peers = {}
         self.pending = {}
         self.buckets = {}
+        self.conversations = Conversations(self, conversation_store)
+        self.workspace = workspace or {}
+        self.member_remover = None
 
     def authenticate(self, header):
         token = header.removeprefix("Bearer ") if header.startswith("Bearer ") else ""
@@ -58,7 +63,7 @@ class Relay:
         return None
 
     def allowed(self, source, target):
-        return target in self.credentials and self.credentials[source]["group"] == self.credentials[target]["group"]
+        return source in self.credentials and target in self.credentials and self.credentials[source]["group"] == self.credentials[target]["group"]
 
     def admit(self, source):
         now = time.monotonic()
@@ -67,7 +72,7 @@ class Relay:
         self.buckets[source] = (tokens - 1 if tokens >= 1 else tokens, now)
         return tokens >= 1
 
-    async def invoke(self, source, target, payload):
+    async def invoke(self, source, target, payload, conversation_id=None):
         if not self.allowed(source, target):
             raise PermissionError("Target is unavailable or outside your group")
         peer = self.peers.get(target)
@@ -79,7 +84,10 @@ class Relay:
         future = asyncio.get_running_loop().create_future()
         self.pending[request_id] = (target, peer, future)
         try:
-            await peer.send({"type": "request", "id": request_id, "from": source, "payload": payload})
+            frame = {"type": "request", "id": request_id, "from": source, "payload": payload}
+            if conversation_id:
+                frame["conversation_id"] = conversation_id
+            await peer.send(frame)
             return await asyncio.wait_for(future, self.timeout)
         except (TimeoutError, ConnectionError):
             raise
@@ -174,6 +182,28 @@ class Relay:
         return JSONResponse({"self": source, "agents": [{"id": agent, "online": agent in self.peers}
             for agent in self.credentials if self.allowed(source, agent)]}, headers={"Cache-Control": "no-store"})
 
+    async def workspace_info(self, request):
+        source = self.authenticate(request.headers.get("authorization", ""))
+        if not source:
+            return JSONResponse({"error": "Unauthorized"}, 401)
+        owner = self.workspace.get("owner")
+        models = self.workspace.get("models", [])
+        return JSONResponse({"id": self.workspace.get("id"), "name": self.workspace.get("name", "Shared workspace"),
+            "owner": owner, "self": source, "members": [{"id": member, "online": member in self.peers,
+                "role": "Owner" if member == owner else "Model" if member in models else "Member"}
+                for member in self.credentials if self.allowed(source, member)]}, headers={"Cache-Control": "no-store"})
+
+    async def leave_workspace(self, request):
+        source = self.authenticate(request.headers.get("authorization", ""))
+        if not source:
+            return JSONResponse({"error": "Unauthorized"}, 401)
+        if source == self.workspace.get("owner"):
+            return JSONResponse({"error": "The owner must delete the workspace from their desktop"}, 403)
+        if not self.member_remover:
+            return JSONResponse({"error": "This relay's operator manages membership"}, 501)
+        await self.member_remover(source)
+        return JSONResponse({"status": "left"})
+
     async def http_invoke(self, request):
         source = self.authenticate(request.headers.get("authorization", ""))
         if not source:
@@ -200,10 +230,14 @@ class Relay:
             return JSONResponse({"error": "Request timed out"}, 504)
 
 
-def create_app(credentials, timeout=60, max_pending=256):
-    relay = Relay(credentials, timeout, max_pending)
+def create_app(credentials, timeout=60, max_pending=256, conversation_store=None, workspace=None):
+    relay = Relay(credentials, timeout, max_pending, conversation_store, workspace)
     app = Starlette(routes=[Route("/health", relay.health), Route("/agents", relay.agents),
+        Route("/workspace", relay.workspace_info), Route("/workspace/leave", relay.leave_workspace, methods=["POST"]),
         Route("/agents/{agent}/invoke", relay.http_invoke, methods=["POST"]),
+        Route("/conversations", relay.conversations.listing),
+        Route("/conversations/{conversation_id}", relay.conversations.detail),
+        Route("/conversations/{conversation_id}/messages", relay.conversations.send, methods=["POST"]),
         WebSocketRoute("/connect", relay.websocket)])
     app.state.relay = relay
     return app
