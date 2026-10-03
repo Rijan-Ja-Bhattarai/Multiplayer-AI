@@ -305,7 +305,7 @@ class MainWindow(QMainWindow):
         call = action("Connect your first model  →", self.add_agent, True)
         copy.addWidget(call, alignment=Qt.AlignmentFlag.AlignLeft)
         row.addLayout(copy, 1)
-        self.orbit = OrbitArt()
+        self.orbit = OrbitArt(theme=self.theme)
         row.addWidget(self.orbit, 1)
         layout.addWidget(hero)
         stats = QHBoxLayout()
