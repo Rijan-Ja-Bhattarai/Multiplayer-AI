@@ -227,6 +227,24 @@ class DesktopRuntime:
             self.storage.save()
         await self.switch_workspace(local["id"])
 
+    async def reset_identity(self):
+        """Replace this device's identity in every local workspace.
+
+        Each local workspace owns its own relay and credential set, so
+        the reset is delegated to every engine rather than only the
+        visible one. Otherwise a workspace the user was not looking at
+        would keep advertising the superseded token.
+        """
+        results = []
+        async with self.mutation:
+            for entry in self.catalog["workspaces"]:
+                if entry["kind"] != "local":
+                    continue
+                engine = await self.ensure_engine(entry)
+                results.append(await engine.reset_identity())
+        await self.snapshot()
+        return results
+
     async def join(self, url, token, allow_insecure=False, save=True, conversation_id=None):
         relay_http_url(url, allow_insecure)
         async with self.mutation:

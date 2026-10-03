@@ -118,14 +118,19 @@ def test_sender_receives_nothing_before_the_next_error(
 
 
 def test_agent_destination_returns_agent_not_found(client: TestClient) -> None:
-    """An agent destination fails loudly until the gateway exists."""
+    """Without a configured relay, an agent destination fails loudly.
+
+    The error names the environment variables to set, so the cause is
+    actionable rather than just reported.
+    """
     with client.websocket_connect("/ws/client-A") as ws_a:
         ws_a.send_json(envelope(destination="agent-A", destination_type="agent"))
 
         error = ws_a.receive_json()
 
     assert error["code"] == "AGENT_NOT_FOUND"
-    assert "Agent Gateway" in error["message"]
+    assert "A2A_RELAY_URL" in error["message"]
+    assert "A2A_RELAY_TOKEN" in error["message"]
 
 
 def test_unknown_destination_type_is_invalid(client: TestClient) -> None:

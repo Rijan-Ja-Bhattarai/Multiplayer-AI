@@ -97,6 +97,29 @@ The same directory contains `workspaces.json` and the default workspace's
 under `workspaces/<workspace-id>/`. Chat history is saved on disk; tokens and
 provider keys remain in the OS credential store with workspace-specific keys.
 
+## Recover a lost device identity
+
+The token for an identity lives in the OS credential store, while the list of
+identities lives in `settings.json`. If the token is removed but the entry stays
+behind — a cleared keyring, a store that was locked or reset, or settings
+restored from a backup on another machine — the app replaces that identity
+instead of refusing to start. It starts normally, tells you that the identity
+changed, and keeps every other preference, including your theme.
+
+Because the old token is gone, workspaces that were joined with that identity
+stop recognising the device and need a fresh invitation. Other identities on the
+same device are unaffected.
+
+To discard an identity deliberately, for instance after suspecting the token was
+exposed, use **Settings → Reset local identity**. This replaces every identity on
+the device with a new token, stops and restarts connected agents, and leaves
+joined workspaces requiring new invitations. The action asks for confirmation
+first.
+
+An *unavailable* credential store is still reported as an error rather than being
+treated as empty, because a replacement token could not be saved either. Unlock
+the store and relaunch.
+
 ## Invite another device
 
 In your local workspace, click **Invite a device**. Give the other device a new
