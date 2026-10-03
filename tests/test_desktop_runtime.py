@@ -410,6 +410,35 @@ class WorkspaceDurabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.storage.path.exists(), "the root settings must survive")
         self.assertTrue(self.runtime.catalog_path.exists())
 
+    async def test_a_ledger_of_hostile_scopes_does_not_stop_the_app_starting(self):
+        """A record whose scope is the wrong type used to abort start-up.
+
+        re.fullmatch raises TypeError on anything that is not a string, and
+        the retry let that escape, so a corrupt file turned into a fatal
+        error rather than the dropped-and-ignored record it should have been.
+        """
+        hostile = [{"type": "credentials", "workspace": scope, "source": "reset",
+                    "credentials": ["relay:guest"]}
+                   for scope in (5, ["x"], {"a": 1}, True, 1.5, "workspace-../../etc")]
+        hostile += [{"type": "workspace", "id": bad, "kind": "local",
+                     "credentials": ["remote-token"]}
+                    for bad in (5, ["x"], {"a": 1}, True, "workspace-../../etc")]
+        self.vault.set("relay:guest", "a token that must survive a dropped record")
+        self.runtime.storage.write_pending_cleanup(hostile)
+
+        # Asserted before the retry runs: afterwards the records would be gone
+        # either way, because a retry that did reach them would also discard
+        # them, and the reader's own check would look like it had worked.
+        self.assertEqual(self.runtime.storage.read_pending_cleanup(), [],
+                         "the reader must drop a scope it cannot match")
+
+        await self.runtime.close()
+        self.runtime = DesktopRuntime(Storage(Path(self.directory.name) / "run", self.vault))
+        await self.runtime.start()
+
+        self.assertIn("relay:guest", self.vault.values,
+                      "a dropped record must not delete anything on the way past")
+
     def test_a_hand_edited_record_cannot_point_outside_the_workspaces_folder(self):
         """The record's id is used to build a path that is then removed."""
         attempted = []

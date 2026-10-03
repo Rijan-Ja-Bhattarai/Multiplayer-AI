@@ -12,6 +12,46 @@ def default_data_directory():
     return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "multiplayer-ai"
 
 
+def _fsync_directory(directory):
+    """Persist a directory entry, so a completed rename survives a power cut.
+
+    The rename is only durable once the directory entry naming the new file
+    is on disk too. Windows will not open a directory for this, and does not
+    need it, so there it is a no-op.
+
+    Errors are not suppressed. The data is already written by the time this
+    runs, so a failure means the filesystem cannot promise durability, and
+    saying so is better than quietly continuing to claim it.
+    """
+    if os.name == "nt":
+        return
+    handle = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(handle)
+    finally:
+        os.close(handle)
+
+
+def write_json_durably(path, text):
+    """Write a document so a reader sees either the old one or the new one.
+
+    A plain write truncates first, so a crash mid-write leaves a file that
+    parses as nothing at all. Writing a temporary file and renaming over the
+    target makes the swap atomic; flushing the temporary file to disk first
+    makes its contents durable, and the directory flush afterwards makes the
+    rename durable. All three are needed: without any one of them a power cut
+    can leave the previous contents or no file at all, which for the cleanup
+    ledger means credentials that nothing points at any more.
+    """
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
+        handle.write(text)
+        handle.flush()
+        os.fsync(handle.fileno())
+    temporary.replace(path)
+    _fsync_directory(path.parent)
+
+
 # Outcome of a credential-store deletion. A caller retrying a cleanup
 # needs to tell "it was never there" apart from "the store would not let
 # me", and a bare boolean erases that difference.
@@ -33,6 +73,15 @@ CREDENTIAL_NAME = re.compile(r"(?:remote-token|(?:relay|provider):[A-Za-z0-9_-]{
 # Bounds a hand-edited or corrupt ledger from turning one launch into an
 # unbounded number of credential-store round trips.
 MAX_OWED_NAMES = 512
+
+# The id a saved workspace may carry. Kept here so the catalog, the cleanup
+# ledger and the directory check cannot drift apart, since the value is
+# validated in all three and used to build a path in one.
+WORKSPACE_ID = re.compile(r"workspace-[0-9a-f]{32}")
+
+# The local workspace shares the root directory and settings, so it has no
+# id of its own and no directory to remove.
+LOCAL_WORKSPACE = "local"
 
 
 class Vault:
@@ -134,9 +183,7 @@ class Storage:
 
     def save(self):
         with self.lock:
-            temporary = self.directory / "settings.json.tmp"
-            temporary.write_text(json.dumps(self.settings, indent=2), encoding="utf-8")
-            temporary.replace(self.path)
+            write_json_durably(self.path, json.dumps(self.settings, indent=2))
 
     def credentials(self):
         """Tokens for every saved identity.
@@ -248,8 +295,34 @@ class Storage:
             return record.get("id") == key["id"]
         return record.get("workspace") == key["workspace"] and record.get("source") == key["source"]
 
+    @staticmethod
+    def _readable(record):
+        """Whether a stored record is well formed enough to act on.
+
+        Every field that reaches a pattern, a path or a credential-store call
+        is type-checked first. ``re.fullmatch`` raises TypeError on anything
+        that is not a string, and a TypeError escaping here would abort
+        start-up, which is the opposite of how every other malformed field in
+        this file is handled: dropped.
+        """
+        if not isinstance(record, dict) or record.get("type") not in ("workspace", "credentials"):
+            return False
+        if record["type"] == "workspace":
+            workspace = record.get("id")
+            return workspace == LOCAL_WORKSPACE or (
+                isinstance(workspace, str) and bool(WORKSPACE_ID.fullmatch(workspace)))
+        # None means the root vault, which is also what a missing key means.
+        scope = record.get("workspace")
+        return ((scope is None or (isinstance(scope, str)
+                                   and bool(WORKSPACE_ID.fullmatch(scope))))
+                and isinstance(record.get("source"), str))
+
     def read_pending_cleanup(self):
-        """Outstanding cleanup, ignoring anything malformed."""
+        """Outstanding cleanup, ignoring anything malformed.
+
+        A record is a best-effort cleanup instruction, so a corrupt or
+        hand-edited file is dropped rather than allowed to block startup.
+        """
         if not self.ledger_path.exists():
             return []
         try:
@@ -258,14 +331,11 @@ class Storage:
             return []
         if not isinstance(records, list):
             return []
-        return [record for record in records
-                if isinstance(record, dict) and record.get("type") in ("workspace", "credentials")]
+        return [record for record in records if self._readable(record)]
 
     def write_pending_cleanup(self, records):
         """Written before the change it describes, and after each attempt."""
-        temporary = self.ledger_path.with_suffix(".json.tmp")
-        temporary.write_text(json.dumps(records, indent=2), encoding="utf-8")
-        temporary.replace(self.ledger_path)
+        write_json_durably(self.ledger_path, json.dumps(records, indent=2))
 
     def record_workspace_deletion(self, entry, credentials, root_credentials=()):
         """Record a workspace's removal before anything is destroyed.
@@ -286,17 +356,46 @@ class Storage:
     def record_owed_credentials(self, credentials, source):
         """Record names that could not be deleted, keyed by workspace and source.
 
-        One record per source per workspace, so repeated failures do not
-        accumulate duplicates for the same removal.
+        Merged into whatever is already outstanding for the same key rather
+        than replacing it. Two removals that fail on different members share
+        a key, so a second failure that displaced the first member's names
+        would leave them out of the ledger for good, with nothing else
+        pointing at them. Unrelated records are left untouched.
+
+        This is the opposite of the two narrowing methods below, and
+        deliberately so: those report what is still owed after an attempt,
+        where merging would put back the names the attempt just deleted.
         """
         scope = self.vault_scope
         names = list(dict.fromkeys(credentials))
         if not names:
             return
         key = {"type": "credentials", "workspace": scope, "source": source}
-        records = [r for r in self.read_pending_cleanup() if not self._matches(r, key)]
-        records.append({"type": "credentials", "workspace": scope, "source": source,
-                        "credentials": names})
+        records = self.read_pending_cleanup()
+        if not any(self._matches(r, key) for r in records):
+            records.append({"type": "credentials", "workspace": scope, "source": source,
+                            "credentials": names})
+        else:
+            # Re-read through _owed, so a name that could not have been minted
+            # here is not carried forward by the merge. Every matching record
+            # contributes, because a hand-edited file can hold the same key
+            # twice and dropping the second must not drop what it owed.
+            owed = []
+            for record in records:
+                if self._matches(record, key):
+                    owed.extend(self._owed(record, "credentials"))
+            union = list(dict.fromkeys(owed + names))[:MAX_OWED_NAMES]
+            kept = False
+            updated = []
+            for record in records:
+                if not self._matches(record, key):
+                    updated.append(record)
+                elif not kept:
+                    # The union lands in the first and the duplicates go, so
+                    # a name is never owed twice.
+                    kept = True
+                    updated.append(dict(record, credentials=union))
+            records = updated
         self.write_pending_cleanup(records)
 
     def replace_owed_credentials(self, scope, source, credentials):
@@ -317,4 +416,8 @@ class Storage:
         if remaining:
             self.write_pending_cleanup(remaining)
         elif self.ledger_path.exists():
+            # The directory flush matters here too: without it the unlink can
+            # be lost, leaving a ledger that claims work which is finished and
+            # so is retried for ever.
             self.ledger_path.unlink()
+            _fsync_directory(self.ledger_path.parent)

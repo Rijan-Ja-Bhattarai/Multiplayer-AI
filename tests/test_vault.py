@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -23,7 +24,8 @@ from unittest import mock
 import keyring.errors
 
 from desktop_app.storage import (ABSENT, REMOVED, UNAVAILABLE, Storage, Vault,
-                                  WorkspaceVault, default_data_directory)
+                                  WorkspaceVault, default_data_directory,
+                                  write_json_durably)
 
 
 class FakeBackend:
@@ -259,6 +261,225 @@ class SettingsFileTests(unittest.TestCase):
                              {"theme": "miku"})
             self.assertFalse(Path(directory, "settings.json.tmp").exists(),
                              "the temporary file must be renamed, not left behind")
+
+
+class DurableWriteTests(unittest.TestCase):
+    """Renaming into place is only half of surviving a power cut.
+
+    The other half is that the bytes and the directory entry reach the disk.
+    Without it a rename can be lost, leaving the previous contents or no file
+    at all, which for the cleanup ledger means credentials that nothing on
+    disk points at any more.
+    """
+
+    def calls(self):
+        """Record the fsyncs and directory opens a write performs.
+
+        A directory is never really opened: Windows will not allow it, so the
+        POSIX branch is exercised by patching os.name instead.
+        """
+        events = []
+        real_fsync, real_open = os.fsync, os.open
+        directories = set()
+
+        def fsync(handle):
+            mode = os.fstat(handle).st_mode
+            events.append(("fsync", mode))
+            if handle not in directories:
+                # A directory descriptor stands in for os.devnull, which
+                # cannot really be flushed; the file itself is.
+                real_fsync(handle)
+
+        def open_it(path, *args, **kwargs):  # noqa: A002 - mirrors os.open
+            events.append(("open", str(path)))
+            if Path(path).is_dir():
+                # A real descriptor, so os.fstat and os.fsync still accept it.
+                handle = real_open(os.devnull, os.O_RDONLY)
+                directories.add(handle)
+                return handle
+            return real_open(path, *args, **kwargs)
+
+        return events, fsync, open_it
+
+    def with_stubs(self, action, posix):
+        events, fsync, open_it = self.calls()
+        with mock.patch.object(os, "fsync", fsync), mock.patch.object(os, "open", open_it), \
+                mock.patch.object(os, "name", "posix" if posix else "nt"):
+            action()
+        return events
+
+    def test_the_temporary_file_is_flushed_to_disk_before_the_rename(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory, "ledger.json")
+
+            events = self.with_stubs(lambda: write_json_durably(target, "{}"), posix=True)
+
+            regular = [mode for kind, mode in events
+                       if kind == "fsync" and mode & stat.S_IFREG]
+            self.assertTrue(regular, "the temporary file's bytes must be fsynced")
+            self.assertEqual(Path(directory, "ledger.json").read_text(encoding="utf-8"), "{}")
+
+    def test_the_parent_directory_is_flushed_after_the_rename(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory, "ledger.json")
+
+            events = self.with_stubs(lambda: write_json_durably(target, "{}"), posix=True)
+
+            flushed = [index for index, (kind, mode) in enumerate(events)
+                       if kind == "fsync" and mode & stat.S_IFREG]
+            renamed = events.index(("open", str(Path(directory))))
+            self.assertTrue(flushed and max(flushed) < renamed,
+                            "the contents must reach the disk before the rename does")
+            self.assertEqual(events[-1][0], "fsync",
+                             "the directory entry itself is flushed last")
+
+    def test_the_directory_flush_is_skipped_on_windows(self) -> None:
+        """Windows will not open a directory for this, and does not need to."""
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory, "ledger.json")
+
+            events = self.with_stubs(lambda: write_json_durably(target, "{}"), posix=False)
+
+            self.assertEqual([e for e in events if e[0] == "open"], [])
+            self.assertTrue([e for e in events if e[0] == "fsync"],
+                            "the file itself is still flushed")
+
+    def test_removing_the_final_record_flushes_the_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(directory, FakeBackend())
+            storage.record_owed_credentials(["relay:guest"], "member")
+            self.assertTrue(storage.ledger_path.exists())
+
+            events = self.with_stubs(
+                lambda: storage.discard_pending_cleanup(
+                    {"type": "credentials", "workspace": None, "source": "member"}),
+                posix=True)
+
+            self.assertFalse(storage.ledger_path.exists())
+            self.assertIn(("open", str(Path(directory))), events)
+
+
+class PendingCleanupRecordTests(unittest.TestCase):
+    """The ledger is read before anything else, so it has to be survivable."""
+
+    def write(self, storage, records):
+        storage.ledger_path.write_text(json.dumps(records), encoding="utf-8")
+
+    def test_a_scope_that_is_not_a_string_is_dropped(self) -> None:
+        """re.fullmatch raises TypeError on one, and that aborts start-up.
+
+        Every other malformed field here is dropped rather than acted on, so
+        a scope of the wrong type must be too.
+        """
+        for scope in (5, ["x"], {"a": 1}, True, 1.5):
+            with self.subTest(scope=scope):
+                with tempfile.TemporaryDirectory() as directory:
+                    storage = Storage(directory, FakeBackend())
+                    self.write(storage, [{"type": "credentials", "workspace": scope,
+                                          "source": "reset", "credentials": ["relay:guest"]}])
+
+                    self.assertEqual(storage.read_pending_cleanup(), [])
+
+    def test_a_workspace_id_that_is_not_a_string_is_dropped(self) -> None:
+        for bad in (5, ["x"], {"a": 1}, True):
+            with self.subTest(id=bad):
+                with tempfile.TemporaryDirectory() as directory:
+                    storage = Storage(directory, FakeBackend())
+                    self.write(storage, [{"type": "workspace", "id": bad, "kind": "local",
+                                          "credentials": ["remote-token"]}])
+
+                    self.assertEqual(storage.read_pending_cleanup(), [])
+
+    def test_a_string_scope_still_has_to_match_the_id_pattern(self) -> None:
+        for scope in ("workspace-../../etc", "C:/Windows", "workspace-" + "z" * 32, ""):
+            with self.subTest(scope=scope):
+                with tempfile.TemporaryDirectory() as directory:
+                    storage = Storage(directory, FakeBackend())
+                    self.write(storage, [{"type": "credentials", "workspace": scope,
+                                          "source": "reset", "credentials": ["relay:guest"]}])
+
+                    self.assertEqual(storage.read_pending_cleanup(), [])
+
+    def test_the_local_workspace_is_a_valid_scope_and_id(self) -> None:
+        """It shares the root, so it has no id of its own but is legitimate."""
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(directory, FakeBackend())
+            self.write(storage, [
+                {"type": "workspace", "id": "local", "kind": "local",
+                 "credentials": ["remote-token"]},
+                {"type": "credentials", "workspace": None, "source": "reset",
+                 "credentials": ["relay:guest"]},
+                {"type": "credentials", "workspace": "workspace-" + "a" * 32,
+                 "source": "member", "credentials": ["relay:writer"]}])
+
+            self.assertEqual(len(storage.read_pending_cleanup()), 3)
+
+    def test_a_second_failure_merges_instead_of_displacing_the_first(self) -> None:
+        """Two removals share a key, so replacing would strand the first."""
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(directory, FakeBackend())
+
+            storage.record_owed_credentials(["relay:guest1", "provider:guest1"], "member")
+            storage.record_owed_credentials(["relay:guest2", "provider:guest2"], "member")
+
+            records = storage.read_pending_cleanup()
+            self.assertEqual(len(records), 1)
+            self.assertEqual(sorted(records[0]["credentials"]),
+                             ["provider:guest1", "provider:guest2",
+                              "relay:guest1", "relay:guest2"])
+
+    def test_merging_leaves_other_workspaces_and_sources_alone(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(directory, FakeBackend())
+
+            storage.record_owed_credentials(["relay:writer"], "reset")
+            storage.record_owed_credentials(["relay:guest1"], "member")
+            storage.record_owed_credentials(["relay:guest2"], "member")
+
+            records = {r["source"]: sorted(r["credentials"]) for r in storage.read_pending_cleanup()}
+            self.assertEqual(records, {"reset": ["relay:writer"],
+                                       "member": ["relay:guest1", "relay:guest2"]})
+
+    def test_merging_does_not_repeat_a_name(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(directory, FakeBackend())
+
+            storage.record_owed_credentials(["relay:guest"], "member")
+            storage.record_owed_credentials(["relay:guest"], "member")
+
+            self.assertEqual(storage.read_pending_cleanup()[0]["credentials"], ["relay:guest"])
+
+    def test_a_duplicate_record_from_a_hand_edited_file_is_collapsed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(directory, FakeBackend())
+            self.write(storage, [
+                {"type": "credentials", "workspace": None, "source": "member",
+                 "credentials": ["relay:guest1"]},
+                {"type": "credentials", "workspace": None, "source": "member",
+                 "credentials": ["relay:guest2"]}])
+
+            storage.record_owed_credentials(["relay:guest3"], "member")
+
+            records = storage.read_pending_cleanup()
+            self.assertEqual(len(records), 1)
+            self.assertEqual(sorted(records[0]["credentials"]),
+                             ["relay:guest1", "relay:guest2", "relay:guest3"])
+
+    def test_narrowing_still_wins_over_merging(self) -> None:
+        """The retry reports what is left; merging there would restore the rest.
+
+        If narrowing merged, every pass would put back the names it had just
+        deleted and a record could never be finished.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(directory, FakeBackend())
+            storage.record_owed_credentials(["relay:guest1", "relay:guest2"], "member")
+
+            storage.replace_owed_credentials(None, "member", ["relay:guest2"])
+
+            self.assertEqual(storage.read_pending_cleanup()[0]["credentials"], ["relay:guest2"])
+            storage.replace_owed_credentials(None, "member", [])
+            self.assertEqual(storage.read_pending_cleanup(), [])
 
 
 if __name__ == "__main__":

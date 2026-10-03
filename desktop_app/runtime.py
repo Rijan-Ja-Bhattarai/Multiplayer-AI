@@ -1,7 +1,6 @@
 """Own saved local and joined workspaces and dispatch commands to the selected one."""
 import asyncio
 import json
-import re
 import shutil
 from uuid import uuid4
 
@@ -9,7 +8,8 @@ import httpx
 
 from network_a2a.persistence import HistoryStore
 
-from .storage import UNAVAILABLE, Storage, WorkspaceVault
+from .storage import (LOCAL_WORKSPACE, UNAVAILABLE, WORKSPACE_ID, Storage, WorkspaceVault,
+                      write_json_durably)
 from .workspace_runtime import WorkspaceRuntime, relay_http_url
 
 
@@ -21,7 +21,7 @@ class DesktopRuntime:
         self.catalog = json.loads(self.catalog_path.read_text(encoding="utf-8")) if self.catalog_path.exists() else {
             "active": "local", "workspaces": [{"id": "local", "name": "My workspace", "kind": "local"}]}
         for entry in self.catalog["workspaces"]:
-            if entry["id"] != "local" and not re.fullmatch(r"workspace-[0-9a-f]{32}", entry["id"]):
+            if entry["id"] != LOCAL_WORKSPACE and not WORKSPACE_ID.fullmatch(entry["id"]):
                 raise ValueError("Invalid saved workspace identity")
             if entry["kind"] not in ("local", "remote"):
                 raise ValueError("Invalid saved workspace type")
@@ -70,9 +70,9 @@ class DesktopRuntime:
         held to, and the containment test is a second layer against a
         symlink or a future loosening of the pattern.
         """
-        if workspace_id == "local":
+        if workspace_id == LOCAL_WORKSPACE:
             return None
-        if not re.fullmatch(r"workspace-[0-9a-f]{32}", workspace_id):
+        if not isinstance(workspace_id, str) or not WORKSPACE_ID.fullmatch(workspace_id):
             raise ValueError("Invalid saved workspace identity")
         root = (self.storage.directory / "workspaces").resolve()
         directory = (root / workspace_id).resolve()
@@ -81,9 +81,7 @@ class DesktopRuntime:
         return directory
 
     def save_catalog(self):
-        temporary = self.catalog_path.with_suffix(".json.tmp")
-        temporary.write_text(json.dumps(self.catalog, indent=2), encoding="utf-8")
-        temporary.replace(self.catalog_path)
+        write_json_durably(self.catalog_path, json.dumps(self.catalog, indent=2))
 
     # --- deletions that have not finished ---------------------------------
     #
@@ -484,25 +482,24 @@ class DesktopRuntime:
         """Retry names owed by an identity reset or a removed member.
 
         The workspace itself is untouched: only the credentials named in the
-        record are gone, so nothing here may reach the catalog.
+        record are gone, so nothing here may reach the catalog. The scope is
+        known to be None or a valid id, because Storage drops any record
+        where it is not.
         """
         scope = record.get("workspace")
-        if scope is not None and not re.fullmatch(r"workspace-[0-9a-f]{32}", scope):
-            self.storage.discard_pending_cleanup(
-                {"type": "credentials", "workspace": scope, "source": record.get("source")})
-            return
         vault = self._vault_for(scope)
         remaining = [name for name in self.storage._owed(record, "credentials")
                      if vault.delete(name) == UNAVAILABLE]
         self.storage.replace_owed_credentials(scope, record.get("source"), remaining)
 
     def _retry_workspace_deletion(self, record):
+        # The id is known to be "local" or a valid workspace id, because
+        # Storage drops any record where it is not, so the only thing
+        # _workspace_directory can still object to is a directory that
+        # resolves outside the data directory. That is worth failing on
+        # rather than retrying against.
+        self._workspace_directory(record["id"])
         entry = {"id": record["id"], "kind": record.get("kind", "local"), "url": record.get("url")}
-        try:
-            self._workspace_directory(entry["id"])
-        except ValueError:
-            self.storage.discard_pending_cleanup({"type": "workspace", "id": record["id"]})
-            return
         if any(existing["id"] == entry["id"] for existing in self.catalog["workspaces"]):
             # Interrupted before the catalog was written, so the removal
             # itself never completed.
