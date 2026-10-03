@@ -2,11 +2,14 @@
 import asyncio
 import json
 import re
+import shutil
 from uuid import uuid4
 
 import httpx
 
-from .storage import Storage, WorkspaceVault
+from network_a2a.persistence import HistoryStore
+
+from .storage import UNAVAILABLE, Storage, WorkspaceVault
 from .workspace_runtime import WorkspaceRuntime, relay_http_url
 
 
@@ -15,6 +18,7 @@ class DesktopRuntime:
         self.storage = storage
         self.emit = emit
         self.catalog_path = storage.directory / "workspaces.json"
+        self.pending_path = storage.directory / "pending-deletions.json"
         self.catalog = json.loads(self.catalog_path.read_text(encoding="utf-8")) if self.catalog_path.exists() else {
             "active": "local", "workspaces": [{"id": "local", "name": "My workspace", "kind": "local"}]}
         for entry in self.catalog["workspaces"]:
@@ -50,14 +54,100 @@ class DesktopRuntime:
         return next(item for item in self.catalog["workspaces"] if item["id"] == (workspace_id or self.active_workspace_id))
 
     def scoped_storage(self, entry):
-        if entry["id"] == "local":
+        directory = self._workspace_directory(entry["id"])
+        if directory is None:
             return self.storage
-        return Storage(self.storage.directory / "workspaces" / entry["id"], WorkspaceVault(self.storage.vault, entry["id"]))
+        return Storage(directory, WorkspaceVault(self.storage.vault, entry["id"]))
+
+    def _workspace_directory(self, workspace_id):
+        """The directory a workspace owns, or None for the local root.
+
+        The local workspace shares the root settings, so it has no
+        directory of its own and must never be treated as one.
+
+        The id is validated because this path is handed to shutil.rmtree
+        during a workspace deletion. It matches the check the catalog is
+        held to, and the containment test is a second layer against a
+        symlink or a future loosening of the pattern.
+        """
+        if workspace_id == "local":
+            return None
+        if not re.fullmatch(r"workspace-[0-9a-f]{32}", workspace_id):
+            raise ValueError("Invalid saved workspace identity")
+        root = (self.storage.directory / "workspaces").resolve()
+        directory = (root / workspace_id).resolve()
+        if root not in directory.parents:
+            raise ValueError("Invalid saved workspace identity")
+        return directory
 
     def save_catalog(self):
         temporary = self.catalog_path.with_suffix(".json.tmp")
         temporary.write_text(json.dumps(self.catalog, indent=2), encoding="utf-8")
         temporary.replace(self.catalog_path)
+
+    # --- deletions that have not finished ---------------------------------
+    #
+    # A workspace deletion destroys a relay, credentials and saved chats.
+    # If it is interrupted part way through, the workspace is already out of
+    # the catalog, so nothing on disk points at what is left and the tokens
+    # would sit in the OS credential store indefinitely. Each record holds
+    # the exact credential names still owed, so a later attempt does not have
+    # to re-derive them from a directory that may already be gone.
+
+    def read_pending_deletions(self):
+        """Pending deletions, ignoring anything malformed.
+
+        A record is a best-effort cleanup instruction, so a corrupt or
+        hand-edited file is dropped rather than allowed to block startup.
+        Nothing here is trusted enough to delete a path without also going
+        through _workspace_directory.
+        """
+        if not self.pending_path.exists():
+            return []
+        try:
+            records = json.loads(self.pending_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        if not isinstance(records, list):
+            return []
+        valid = []
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            try:
+                self._workspace_directory(record["id"])
+            except (KeyError, ValueError, TypeError):
+                continue
+            valid.append({
+                "id": record["id"],
+                "kind": record.get("kind", "local"),
+                "url": record.get("url"),
+                "credentials": [name for name in record.get("credentials", []) if isinstance(name, str)],
+                "attempts": record.get("attempts", 0) if isinstance(record.get("attempts", 0), int) else 0,
+            })
+        return valid
+
+    def write_pending_deletions(self, records):
+        """Written before the catalog is changed, and after each pass."""
+        temporary = self.pending_path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(records, indent=2), encoding="utf-8")
+        temporary.replace(self.pending_path)
+
+    def add_pending_deletion(self, entry, credentials):
+        records = [r for r in self.read_pending_deletions() if r["id"] != entry["id"]]
+        records.append({"id": entry["id"], "kind": entry["kind"], "url": entry.get("url"),
+                        "credentials": list(credentials), "attempts": 0})
+        self.write_pending_deletions(records)
+
+    def discard_pending_deletion(self, workspace_id):
+        records = self.read_pending_deletions()
+        remaining = [r for r in records if r["id"] != workspace_id]
+        if len(remaining) == len(records):
+            return
+        if remaining:
+            self.write_pending_deletions(remaining)
+        elif self.pending_path.exists():
+            self.pending_path.unlink()
 
     def publish_catalog(self):
         self.emit("workspaces", {"workspaces": [dict(entry) for entry in self.catalog["workspaces"]],
@@ -148,6 +238,10 @@ class DesktopRuntime:
             self.emit("offline", "Workspace is offline. Your saved history is still available.")
 
     async def start(self):
+        # Before anything connects: a deletion interrupted on a previous run
+        # may still owe credential deletions, and those are worth finishing
+        # before the app starts a relay or reads a token.
+        self.retry_pending_deletions()
         # Migrate the single saved remote connection without changing old tokens.
         saved = self.storage.settings.get("remote")
         if not self.catalog_path.exists() and saved and self.storage.vault.get("remote-token"):
@@ -305,6 +399,122 @@ class DesktopRuntime:
             raise ValueError("Only the workspace owner can remove members")
         await self.engine.remove_member(member)
 
+    def _credential_names_for(self, storage):
+        """Every credential name a workspace owns, before anything is deleted.
+
+        Collected first because the settings that name them live in the
+        directory the deletion is about to remove.
+        """
+        names = ["remote-token"]
+        for identity in storage.settings.get("identities", {}):
+            names.append("relay:" + identity)
+            names.append("provider:" + identity)
+        profile_ids = {profile["id"] for profile in storage.settings.get("agents", [])}
+        if storage.settings.get("remote_agent"):
+            profile_ids.add(storage.settings["remote_agent"]["id"])
+        for identity in profile_ids:
+            names.append("provider:" + identity)
+        return list(dict.fromkeys(names))
+
+    def _purge_workspace_data(self, entry, engine=None):
+        """Delete one workspace's credentials and saved data.
+
+        Returns the credential names that are still owed, which is empty
+        when the workspace is fully gone. Credentials live in the OS store
+        and the directory holds both the settings and the chat archive, so
+        each is removed explicitly rather than relying on the directory.
+
+        Usable without a live engine, which is what lets an interrupted
+        deletion be finished on a later launch.
+        """
+        storage = engine.storage if engine is not None else self.scoped_storage(entry)
+        owed = [record for record in self.read_pending_deletions() if record["id"] == entry["id"]]
+        names = owed[0]["credentials"] if owed else self._credential_names_for(storage)
+        # Only the explicit UNAVAILABLE marker counts as a failure, so a vault
+        # that does not speak in these terms is treated as having done the
+        # work rather than as stranding a secret.
+        remaining = [name for name in names
+                     if storage.vault.delete(name) == UNAVAILABLE]
+        directory = self._workspace_directory(entry["id"])
+        if directory is None:
+            # The local workspace shares the root, so only its own keys and
+            # its chat archive are cleared; the directory must survive.
+            for key in ("identities", "device_id", "agents", "remote", "remote_agent",
+                        "share_lan", "relay_port", "workspace_name", "workspace_id"):
+                storage.settings.pop(key, None)
+            storage.save()
+            HistoryStore(storage.directory).clear()
+        elif directory.exists():
+            # settings.json and history.sqlite3 both live here.
+            shutil.rmtree(directory, ignore_errors=True)
+        if entry["kind"] == "remote" and self.storage.settings.get("remote", {}).get("url") == entry.get("url"):
+            # The pre-catalog layout kept the invitation token and the
+            # provider key in the root settings rather than the workspace's,
+            # so those entries are addressed on the root vault here.
+            legacy = self.storage.settings.get("remote_agent")
+            owed_on_root = ["remote-token"]
+            if (legacy and legacy.get("relay") == entry.get("url")
+                    and not any(p["id"] == legacy["id"] for p in self.storage.settings.get("agents", []))):
+                owed_on_root.append("provider:" + legacy["id"])
+            remaining.extend(name for name in owed_on_root
+            if self.storage.vault.delete(name) == UNAVAILABLE)
+            self.storage.settings.pop("remote", None)
+            self.storage.settings.pop("remote_agent", None)
+            self.storage.save()
+        return remaining
+
+    def pending_cleanup_count(self):
+        """How many credentials still owe removal, across all records."""
+        return sum(len(record["credentials"]) for record in self.read_pending_deletions())
+
+    def publish_pending_cleanup(self):
+        """Tell the window whether anything is still owed.
+
+        Settings keeps this visible rather than relying on a toast, because
+        the condition can outlive the message that announced it.
+        """
+        owed = self.pending_cleanup_count()
+        self.emit("pending_cleanup", {"credentials": owed})
+        return owed
+
+    def retry_pending_deletions(self):
+        """Finish deletions that were interrupted part way through.
+
+        Called before any engine starts, so credentials owed from a previous
+        run are dealt with before the app connects to anything. Each pass is
+        idempotent: a credential already gone reports as absent, and a
+        directory already removed is skipped.
+        """
+        for record in self.read_pending_deletions():
+            entry = {"id": record["id"], "kind": record["kind"], "url": record["url"]}
+            if any(existing["id"] == entry["id"] for existing in self.catalog["workspaces"]):
+                # Interrupted before the catalog was written, so the removal
+                # itself never completed.
+                self.catalog["workspaces"] = [e for e in self.catalog["workspaces"]
+                                             if e["id"] != entry["id"]]
+                if not self.catalog["workspaces"]:
+                    self.catalog["workspaces"].append({"id": "local", "name": "My workspace",
+                                                       "kind": "local"})
+                if self.active_workspace_id == entry["id"]:
+                    self.active_workspace_id = self.catalog["active"] = self.catalog["workspaces"][0]["id"]
+                self.save_catalog()
+            remaining = self._purge_workspace_data(entry)
+            if remaining:
+                record["credentials"] = remaining
+                record["attempts"] += 1
+                self.write_pending_deletions(
+                    [r if r["id"] != entry["id"] else record
+                     for r in self.read_pending_deletions()])
+            else:
+                self.discard_pending_deletion(entry["id"])
+        owed = self.publish_pending_cleanup()
+        if owed:
+            # Counted separately from the notice so a store that stays locked
+            # does not produce a growing counter and a notice on every launch.
+            self.emit("notice", "Some saved credentials for a deleted workspace could "
+                                "not be removed. Unlock your credential store and "
+                                "restart; the app will try again.")
+
     async def delete_workspace(self):
         async with self.mutation:
             entry = self.entry()
@@ -318,54 +528,47 @@ class DesktopRuntime:
                     response = None
                 if response is not None and response.status_code not in (200, 401, 404, 501):
                     raise ValueError("The host could not remove this membership. Ask the workspace owner to remove your device.")
+            # The intent is durable before anything is removed, and the
+            # credential names are copied into it because the directory
+            # holding them is about to be deleted. If this deletion is
+            # interrupted, a later launch can finish it exactly.
+            self.add_pending_deletion(entry, self._credential_names_for(engine.storage))
+            previous_entries = list(self.catalog["workspaces"])
+            previous_active = self.active_workspace_id
             self.catalog["workspaces"].remove(entry)
-            self.engines.pop(entry["id"], None)
-            self.cache.pop(entry["id"], None)
             if not self.catalog["workspaces"]:
-                replacement = {"id": "workspace-" + uuid4().hex, "name": "My workspace", "kind": "local"}
-                self.catalog["workspaces"].append(replacement)
+                self.catalog["workspaces"].append({"id": "workspace-" + uuid4().hex, "name": "My workspace", "kind": "local"})
             replacement = self.catalog["workspaces"][0]
             self.active_workspace_id = replacement["id"]
             self.catalog["active"] = replacement["id"]
-            # Recorded before anything is destroyed, and before the relay for
-            # the replacement is started. ensure_engine() binds a socket and
-            # touches the credential store, so it can fail; previously the
-            # credentials and the conversation history were already gone by
-            # then, while workspaces.json still listed the workspace, so the
-            # next launch brought it back empty rather than removed.
-            self.save_catalog()
+            try:
+                # Recorded before the relay for the replacement is started.
+                # ensure_engine() binds a socket and touches the credential
+                # store, so it can fail; previously the credentials and the
+                # history were already gone by then, while the catalog still
+                # listed the workspace, so the next launch brought it back
+                # empty rather than removed.
+                self.save_catalog()
+            except Exception:
+                # Not recorded, so put the workspace back and keep the engine
+                # registered: close() only closes engines it still knows
+                # about, and dropping it here would strand its relay.
+                self.catalog["workspaces"] = previous_entries
+                self.active_workspace_id = self.catalog["active"] = previous_active
+                self.discard_pending_deletion(entry["id"])
+                raise
+            self.cache.pop(entry["id"], None)
+            self.engines.pop(entry["id"], None)
             self.emit("workspace_removed", entry["id"])
             await engine.close()
-            for identity in engine.storage.settings.get("identities", {}):
-                if hasattr(engine.storage.vault, "delete"):
-                    engine.storage.vault.delete("relay:" + identity)
-                    engine.storage.vault.delete("provider:" + identity)
-            profile_ids = {profile["id"] for profile in engine.storage.settings.get("agents", [])}
-            if engine.storage.settings.get("remote_agent"):
-                profile_ids.add(engine.storage.settings["remote_agent"]["id"])
-            for identity in profile_ids:
-                if hasattr(engine.storage.vault, "delete"):
-                    engine.storage.vault.delete("provider:" + identity)
-            if hasattr(engine.storage.vault, "delete"):
-                engine.storage.vault.delete("remote-token")
-            engine.history_store.clear()
-            if entry["id"] == "local":
-                for key in ("identities", "device_id", "agents", "remote", "remote_agent", "share_lan", "relay_port", "workspace_name", "workspace_id"):
-                    engine.storage.settings.pop(key, None)
+            remaining = self._purge_workspace_data(entry, engine)
+            if remaining:
+                self.emit("notice", "This workspace was deleted, but some of its saved "
+                                    "credentials could not be removed. Unlock your "
+                                    "credential store and restart; the app will try again.")
             else:
-                engine.storage.settings.clear()
-            engine.storage.save()
-            if entry["kind"] == "remote" and self.storage.settings.get("remote", {}).get("url") == entry.get("url"):
-                legacy_profile = self.storage.settings.get("remote_agent")
-                if (legacy_profile and legacy_profile.get("relay") == entry.get("url")
-                        and not any(profile["id"] == legacy_profile["id"] for profile in self.storage.settings.get("agents", []))
-                        and hasattr(self.storage.vault, "delete")):
-                    self.storage.vault.delete("provider:" + legacy_profile["id"])
-                self.storage.settings.pop("remote", None)
-                self.storage.settings.pop("remote_agent", None)
-                if hasattr(self.storage.vault, "delete"):
-                    self.storage.vault.delete("remote-token")
-                self.storage.save()
+                self.discard_pending_deletion(entry["id"])
+            self.publish_pending_cleanup()
             await self.ensure_engine(replacement)
             await self.snapshot()
 
