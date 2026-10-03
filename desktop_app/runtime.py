@@ -18,7 +18,6 @@ class DesktopRuntime:
         self.storage = storage
         self.emit = emit
         self.catalog_path = storage.directory / "workspaces.json"
-        self.pending_path = storage.directory / "pending-deletions.json"
         self.catalog = json.loads(self.catalog_path.read_text(encoding="utf-8")) if self.catalog_path.exists() else {
             "active": "local", "workspaces": [{"id": "local", "name": "My workspace", "kind": "local"}]}
         for entry in self.catalog["workspaces"]:
@@ -57,7 +56,8 @@ class DesktopRuntime:
         directory = self._workspace_directory(entry["id"])
         if directory is None:
             return self.storage
-        return Storage(directory, WorkspaceVault(self.storage.vault, entry["id"]))
+        return Storage(directory, WorkspaceVault(self.storage.vault, entry["id"]),
+                       root=self.storage.root)
 
     def _workspace_directory(self, workspace_id):
         """The directory a workspace owns, or None for the local root.
@@ -93,61 +93,10 @@ class DesktopRuntime:
     # would sit in the OS credential store indefinitely. Each record holds
     # the exact credential names still owed, so a later attempt does not have
     # to re-derive them from a directory that may already be gone.
-
-    def read_pending_deletions(self):
-        """Pending deletions, ignoring anything malformed.
-
-        A record is a best-effort cleanup instruction, so a corrupt or
-        hand-edited file is dropped rather than allowed to block startup.
-        Nothing here is trusted enough to delete a path without also going
-        through _workspace_directory.
-        """
-        if not self.pending_path.exists():
-            return []
-        try:
-            records = json.loads(self.pending_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return []
-        if not isinstance(records, list):
-            return []
-        valid = []
-        for record in records:
-            if not isinstance(record, dict):
-                continue
-            try:
-                self._workspace_directory(record["id"])
-            except (KeyError, ValueError, TypeError):
-                continue
-            valid.append({
-                "id": record["id"],
-                "kind": record.get("kind", "local"),
-                "url": record.get("url"),
-                "credentials": [name for name in record.get("credentials", []) if isinstance(name, str)],
-                "attempts": record.get("attempts", 0) if isinstance(record.get("attempts", 0), int) else 0,
-            })
-        return valid
-
-    def write_pending_deletions(self, records):
-        """Written before the catalog is changed, and after each pass."""
-        temporary = self.pending_path.with_suffix(".json.tmp")
-        temporary.write_text(json.dumps(records, indent=2), encoding="utf-8")
-        temporary.replace(self.pending_path)
-
-    def add_pending_deletion(self, entry, credentials):
-        records = [r for r in self.read_pending_deletions() if r["id"] != entry["id"]]
-        records.append({"id": entry["id"], "kind": entry["kind"], "url": entry.get("url"),
-                        "credentials": list(credentials), "attempts": 0})
-        self.write_pending_deletions(records)
-
-    def discard_pending_deletion(self, workspace_id):
-        records = self.read_pending_deletions()
-        remaining = [r for r in records if r["id"] != workspace_id]
-        if len(remaining) == len(records):
-            return
-        if remaining:
-            self.write_pending_deletions(remaining)
-        elif self.pending_path.exists():
-            self.pending_path.unlink()
+    #
+    # The ledger itself lives on Storage, beside the vault it describes, so
+    # that a workspace runtime can record what it could not delete without
+    # reaching into this class.
 
     def publish_catalog(self):
         self.emit("workspaces", {"workspaces": [dict(entry) for entry in self.catalog["workspaces"]],
@@ -241,7 +190,7 @@ class DesktopRuntime:
         # Before anything connects: a deletion interrupted on a previous run
         # may still owe credential deletions, and those are worth finishing
         # before the app starts a relay or reads a token.
-        self.retry_pending_deletions()
+        self.retry_pending_cleanup()
         # Migrate the single saved remote connection without changing old tokens.
         saved = self.storage.settings.get("remote")
         if not self.catalog_path.exists() and saved and self.storage.vault.get("remote-token"):
@@ -416,20 +365,28 @@ class DesktopRuntime:
             names.append("provider:" + identity)
         return list(dict.fromkeys(names))
 
-    def _purge_workspace_data(self, entry, engine=None):
+    def _purge_workspace_data(self, entry, engine=None, owed=()):
         """Delete one workspace's credentials and saved data.
 
-        Returns the credential names that are still owed, which is empty
-        when the workspace is fully gone. Credentials live in the OS store
-        and the directory holds both the settings and the chat archive, so
-        each is removed explicitly rather than relying on the directory.
+        Returns the names still owed in the workspace's own vault and, kept
+        separate, the ones owed in the root vault. They have to be separate
+        because the same name means a different entry under each, so a retry
+        that folded them together would look for ``remote-token`` behind the
+        workspace prefix and never touch the root entry.
+
+        ``owed`` is an already-read record for this workspace, if there is
+        one, so that a retry deletes exactly what is left rather than
+        re-deriving names from a directory that may be gone.
+
+        Credentials live in the OS store and the directory holds both the
+        settings and the chat archive, so each is removed explicitly rather
+        than relying on the directory.
 
         Usable without a live engine, which is what lets an interrupted
         deletion be finished on a later launch.
         """
         storage = engine.storage if engine is not None else self.scoped_storage(entry)
-        owed = [record for record in self.read_pending_deletions() if record["id"] == entry["id"]]
-        names = owed[0]["credentials"] if owed else self._credential_names_for(storage)
+        names = self.storage._owed(owed[0], "credentials") if owed else self._credential_names_for(storage)
         # Only the explicit UNAVAILABLE marker counts as a failure, so a vault
         # that does not speak in these terms is treated as having done the
         # work rather than as stranding a secret.
@@ -447,25 +404,42 @@ class DesktopRuntime:
         elif directory.exists():
             # settings.json and history.sqlite3 both live here.
             shutil.rmtree(directory, ignore_errors=True)
-        if entry["kind"] == "remote" and self.storage.settings.get("remote", {}).get("url") == entry.get("url"):
-            # The pre-catalog layout kept the invitation token and the
-            # provider key in the root settings rather than the workspace's,
-            # so those entries are addressed on the root vault here.
+        return remaining, self._purge_legacy_root_credentials(entry, owed)
+
+    def _purge_legacy_root_credentials(self, entry, owed=()):
+        """Delete the credentials the pre-catalog layout kept in the root.
+
+        Returns the names still owed there. A record naming them is retried
+        whether or not the root settings still describe them: they are popped
+        on the same pass, so the description is gone by the time a later
+        attempt runs and the names cannot be derived again.
+        """
+        names = self.storage._owed(owed[0], "root_credentials") if owed else []
+        if not names:
             legacy = self.storage.settings.get("remote_agent")
-            owed_on_root = ["remote-token"]
-            if (legacy and legacy.get("relay") == entry.get("url")
-                    and not any(p["id"] == legacy["id"] for p in self.storage.settings.get("agents", []))):
-                owed_on_root.append("provider:" + legacy["id"])
-            remaining.extend(name for name in owed_on_root
-            if self.storage.vault.delete(name) == UNAVAILABLE)
-            self.storage.settings.pop("remote", None)
-            self.storage.settings.pop("remote_agent", None)
-            self.storage.save()
+            matched = (entry["kind"] == "remote"
+                       and self.storage.settings.get("remote", {}).get("url") == entry.get("url"))
+            if matched:
+                names = ["remote-token"]
+                if (legacy and legacy.get("relay") == entry.get("url")
+                        and not any(p["id"] == legacy["id"]
+                                    for p in self.storage.settings.get("agents", []))):
+                    names.append("provider:" + legacy["id"])
+        if not names:
+            return []
+        remaining = [name for name in names
+                     if self.storage.vault.delete(name) == UNAVAILABLE]
+        self.storage.settings.pop("remote", None)
+        self.storage.settings.pop("remote_agent", None)
+        self.storage.save()
         return remaining
 
     def pending_cleanup_count(self):
         """How many credentials still owe removal, across all records."""
-        return sum(len(record["credentials"]) for record in self.read_pending_deletions())
+        records = self.storage.read_pending_cleanup()
+        return sum(len(self.storage._owed(record, key))
+                   for record in records
+                   for key in ("credentials", "root_credentials"))
 
     def publish_pending_cleanup(self):
         """Tell the window whether anything is still owed.
@@ -477,43 +451,78 @@ class DesktopRuntime:
         self.emit("pending_cleanup", {"credentials": owed})
         return owed
 
-    def retry_pending_deletions(self):
-        """Finish deletions that were interrupted part way through.
+    def _vault_for(self, scope):
+        """The vault a credential record belongs to.
+
+        ``scope`` is None for the root vault and the workspace id otherwise,
+        which is what ``Storage.vault_scope`` recorded when the name was owed.
+        """
+        return self.storage.vault if scope is None else WorkspaceVault(self.storage.vault, scope)
+
+    def retry_pending_cleanup(self):
+        """Finish cleanups that were interrupted part way through.
 
         Called before any engine starts, so credentials owed from a previous
         run are dealt with before the app connects to anything. Each pass is
         idempotent: a credential already gone reports as absent, and a
         directory already removed is skipped.
         """
-        for record in self.read_pending_deletions():
-            entry = {"id": record["id"], "kind": record["kind"], "url": record["url"]}
-            if any(existing["id"] == entry["id"] for existing in self.catalog["workspaces"]):
-                # Interrupted before the catalog was written, so the removal
-                # itself never completed.
-                self.catalog["workspaces"] = [e for e in self.catalog["workspaces"]
-                                             if e["id"] != entry["id"]]
-                if not self.catalog["workspaces"]:
-                    self.catalog["workspaces"].append({"id": "local", "name": "My workspace",
-                                                       "kind": "local"})
-                if self.active_workspace_id == entry["id"]:
-                    self.active_workspace_id = self.catalog["active"] = self.catalog["workspaces"][0]["id"]
-                self.save_catalog()
-            remaining = self._purge_workspace_data(entry)
-            if remaining:
-                record["credentials"] = remaining
-                record["attempts"] += 1
-                self.write_pending_deletions(
-                    [r if r["id"] != entry["id"] else record
-                     for r in self.read_pending_deletions()])
+        for record in self.storage.read_pending_cleanup():
+            if record["type"] == "credentials":
+                self._retry_owed_credentials(record)
             else:
-                self.discard_pending_deletion(entry["id"])
+                self._retry_workspace_deletion(record)
         owed = self.publish_pending_cleanup()
         if owed:
             # Counted separately from the notice so a store that stays locked
             # does not produce a growing counter and a notice on every launch.
-            self.emit("notice", "Some saved credentials for a deleted workspace could "
-                                "not be removed. Unlock your credential store and "
-                                "restart; the app will try again.")
+            self.emit("notice", "Some saved credentials could not be removed. "
+                                "Unlock your credential store and restart; the "
+                                "app will try again.")
+
+    def _retry_owed_credentials(self, record):
+        """Retry names owed by an identity reset or a removed member.
+
+        The workspace itself is untouched: only the credentials named in the
+        record are gone, so nothing here may reach the catalog.
+        """
+        scope = record.get("workspace")
+        if scope is not None and not re.fullmatch(r"workspace-[0-9a-f]{32}", scope):
+            self.storage.discard_pending_cleanup(
+                {"type": "credentials", "workspace": scope, "source": record.get("source")})
+            return
+        vault = self._vault_for(scope)
+        remaining = [name for name in self.storage._owed(record, "credentials")
+                     if vault.delete(name) == UNAVAILABLE]
+        self.storage.replace_owed_credentials(scope, record.get("source"), remaining)
+
+    def _retry_workspace_deletion(self, record):
+        entry = {"id": record["id"], "kind": record.get("kind", "local"), "url": record.get("url")}
+        try:
+            self._workspace_directory(entry["id"])
+        except ValueError:
+            self.storage.discard_pending_cleanup({"type": "workspace", "id": record["id"]})
+            return
+        if any(existing["id"] == entry["id"] for existing in self.catalog["workspaces"]):
+            # Interrupted before the catalog was written, so the removal
+            # itself never completed.
+            self.catalog["workspaces"] = [e for e in self.catalog["workspaces"]
+                                         if e["id"] != entry["id"]]
+            if not self.catalog["workspaces"]:
+                self.catalog["workspaces"].append({"id": "local", "name": "My workspace",
+                                                   "kind": "local"})
+            if self.active_workspace_id == entry["id"]:
+                self.active_workspace_id = self.catalog["active"] = self.catalog["workspaces"][0]["id"]
+            self.save_catalog()
+        remaining, owed_on_root = self._purge_workspace_data(entry, owed=[record])
+        key = {"type": "workspace", "id": entry["id"]}
+        if not remaining and not owed_on_root:
+            self.storage.discard_pending_cleanup(key)
+            return
+        # Pruned to what actually survived, so the record stops naming
+        # credentials that are already gone and a later pass cannot confuse a
+        # root name with a workspace-scoped one.
+        self.storage.record_workspace_deletion(entry, remaining, owed_on_root)
 
     async def delete_workspace(self):
         async with self.mutation:
@@ -532,7 +541,7 @@ class DesktopRuntime:
             # credential names are copied into it because the directory
             # holding them is about to be deleted. If this deletion is
             # interrupted, a later launch can finish it exactly.
-            self.add_pending_deletion(entry, self._credential_names_for(engine.storage))
+            self.storage.record_workspace_deletion(entry, self._credential_names_for(engine.storage))
             previous_entries = list(self.catalog["workspaces"])
             previous_active = self.active_workspace_id
             self.catalog["workspaces"].remove(entry)
@@ -555,19 +564,24 @@ class DesktopRuntime:
                 # about, and dropping it here would strand its relay.
                 self.catalog["workspaces"] = previous_entries
                 self.active_workspace_id = self.catalog["active"] = previous_active
-                self.discard_pending_deletion(entry["id"])
+                self.storage.discard_pending_cleanup({"type": "workspace", "id": entry["id"]})
                 raise
             self.cache.pop(entry["id"], None)
             self.engines.pop(entry["id"], None)
             self.emit("workspace_removed", entry["id"])
             await engine.close()
-            remaining = self._purge_workspace_data(entry, engine)
-            if remaining:
+            remaining, owed_on_root = self._purge_workspace_data(entry, engine)
+            key = {"type": "workspace", "id": entry["id"]}
+            if remaining or owed_on_root:
+                # Pruned to what actually survived, so the record stops
+                # naming credentials that are already gone and keeps the root
+                # names apart from the workspace's own.
+                self.storage.record_workspace_deletion(entry, remaining, owed_on_root)
                 self.emit("notice", "This workspace was deleted, but some of its saved "
                                     "credentials could not be removed. Unlock your "
                                     "credential store and restart; the app will try again.")
             else:
-                self.discard_pending_deletion(entry["id"])
+                self.storage.discard_pending_cleanup(key)
             self.publish_pending_cleanup()
             await self.ensure_engine(replacement)
             await self.snapshot()
