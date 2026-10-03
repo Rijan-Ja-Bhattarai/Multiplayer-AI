@@ -128,7 +128,15 @@ class AgentGateway:
             return None
         if not cls._usable_url(relay_url):
             return None
-        return cls(relay_url, token, float(os.getenv("A2A_GATEWAY_TIMEOUT", DEFAULT_TIMEOUT)))
+        raw_timeout = os.getenv("A2A_GATEWAY_TIMEOUT")
+        try:
+            timeout = float(raw_timeout) if raw_timeout else DEFAULT_TIMEOUT
+        except ValueError:
+            logger.warning(
+                "AGENT_GATEWAY bad_timeout value=%r using=%s", raw_timeout, DEFAULT_TIMEOUT
+            )
+            timeout = DEFAULT_TIMEOUT
+        return cls(relay_url, token, timeout)
 
     @staticmethod
     def _usable_url(relay_url: str) -> bool:
