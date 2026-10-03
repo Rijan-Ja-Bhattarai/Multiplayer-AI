@@ -9,7 +9,6 @@ or moved to another machine.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import tempfile
 import unittest
