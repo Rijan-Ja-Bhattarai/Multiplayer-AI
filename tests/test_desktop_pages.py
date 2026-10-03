@@ -62,6 +62,7 @@ def window(qt_app, storage):
     instance = win.MainWindow(storage)
     yield instance
     instance.network.shutdown()
+    instance.network.wait(10000)
 
 
 # --- navigation ----------------------------------------------------------
