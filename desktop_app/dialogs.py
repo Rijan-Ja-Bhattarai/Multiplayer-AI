@@ -1,5 +1,4 @@
 import json
-import socket
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QCheckBox, QComboBox, QDialog, QFormLayout, QHBoxLayout, QLineEdit, QPlainTextEdit, QScrollArea, QVBoxLayout, QWidget
@@ -7,6 +6,7 @@ from PySide6.QtWidgets import QCheckBox, QComboBox, QDialog, QFormLayout, QHBoxL
 from network_a2a.adapters import PROVIDERS
 
 from .theme import PROVIDER_NAMES, color
+from .lan import lan_addresses
 from .widgets import action, label
 
 
@@ -302,18 +302,21 @@ class InviteDialog(QDialog):
         self.lan = QCheckBox("Share this relay on my local network")
         self.lan.setChecked(True)
         self.url = QLineEdit()
-        try:
-            addresses = socket.gethostbyname_ex(socket.gethostname())[2]
-            address = next((ip for ip in addresses if not ip.startswith("127.")), "YOUR_LAN_IP")
-        except OSError:
-            address = "YOUR_LAN_IP"
+        self.network_address = QComboBox()
+        for name, ip in lan_addresses():
+            self.network_address.addItem(f"{name} · {ip}", ip)
+        address = self.network_address.currentData() or "YOUR_LAN_IP"
         self.url.setText(f"ws://{address}:{window.port}/connect")
         layout.addWidget(label("New device identity", "muted"))
         layout.addWidget(self.name)
         layout.addWidget(self.lan)
+        layout.addWidget(label("Host network · choose the Wi-Fi or hotspot connected to the other device", "muted", True))
+        layout.addWidget(self.network_address)
+        self.network_address.currentIndexChanged.connect(self.select_network)
+        self.lan.toggled.connect(self.network_address.setEnabled)
         layout.addWidget(label("Address the other device can reach", "muted"))
         layout.addWidget(self.url)
-        layout.addWidget(label("LAN sharing makes this relay listen for connections from other devices while the app is open. Your firewall must allow its port. For internet access, enter the WSS address of a TLS proxy pointing to this relay, or join a hosted relay.", "muted", True))
+        layout.addWidget(label("Keep the host app open and allow Multiplayer AI through its firewall. After changing Wi-Fi or hotspot, create a new invitation with the current address. Campus and guest Wi-Fi may block devices from reaching each other, even with the same Wi-Fi name. For those networks, use a reachable WSS relay or a network that allows device-to-device connections.", "muted", True))
         self.error = label("", "muted", True)
         self.error.setStyleSheet("color:#f38a8e")
         layout.addWidget(self.error)
@@ -328,6 +331,11 @@ class InviteDialog(QDialog):
         self.copy_button.hide()
         layout.addWidget(self.copy_button)
         layout.addWidget(action("Done", self.accept))
+
+    def select_network(self):
+        address = self.network_address.currentData()
+        if self.lan.isChecked() and address:
+            self.url.setText(f"ws://{address}:{self.window.port}/connect")
 
     def create(self):
         self.create_button.setEnabled(False)

@@ -132,6 +132,9 @@ class DesktopRuntime:
                                  "active": self.active_workspace_id})
 
     def forward(self, workspace_id, event, data):
+        # In-flight replies and shutdown notifications can arrive after deletion.
+        if workspace_id not in self.engines or not any(entry["id"] == workspace_id for entry in self.catalog["workspaces"]):
+            return
         self.cache.setdefault(workspace_id, {})[event] = data
         if event == "workspace_info":
             entry = self.entry(workspace_id)
@@ -599,7 +602,7 @@ class DesktopRuntime:
             if entry["kind"] == "remote" and engine.remote:
                 base = relay_http_url(engine.active_url, True)
                 try:
-                    response = await engine.http.post(base + "/workspace/leave", headers={"Authorization": "Bearer " + engine.active_token}, timeout=10)
+                    response = await engine.relay_http().post(base + "/workspace/leave", headers={"Authorization": "Bearer " + engine.active_token}, timeout=10)
                 except httpx.HTTPError:
                     # Offline hosts cannot revoke their token; forget it locally.
                     response = None

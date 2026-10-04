@@ -170,6 +170,19 @@ class WorkspacePersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.host.engine.history_store.load("ui").get("state", {}).get("chats"))
         self.assertEqual(self.host.app.state.relay.conversations.rooms, {})
 
+    async def test_deleted_workspace_notifications_cannot_recreate_state_or_break_replacement(self):
+        removed = self.host.active_workspace_id
+        original_close = self.host.engine.close
+        async def close_with_late_events():
+            self.host.forward(removed, "workspace_info", {"name": "Deleted"})
+            self.host.forward(removed, "incoming", {"from": "guest", "text": "Too late"})
+            await original_close()
+        self.host.engine.close = close_with_late_events
+        await self.host.delete_workspace()
+        self.assertNotIn(removed, self.host.cache)
+        self.assertNotIn(removed, self.host.engines)
+        self.assertIn("Still running", (await self.host.send(self.host.active_id, {"text": "Still running"}))["text"])
+
     async def test_guest_can_forget_an_offline_workspace_without_losing_owned_workspaces(self):
         invitation = await self.host.invite("guest", self.host.active_url)
         await self.guest_join(invitation)

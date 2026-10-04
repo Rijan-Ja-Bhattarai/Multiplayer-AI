@@ -177,10 +177,38 @@ identity, then specify a relay address it can reach. Each invitation contains a
 different private token. Copy it and send it privately to the intended user.
 
 For devices on a trusted LAN, leave **Share this relay on my local network**
-enabled and check the suggested IP address. Creating the invitation makes the
+enabled. Under **Host network**, choose the Wi-Fi or hotspot adapter connected
+to the other device. The suggested address favors active physical adapters over
+VPN and virtual adapters; you can choose another adapter or enter an address
+manually. Creating the invitation makes the
 relay listen on the LAN; the host firewall must allow the displayed port.
 Sharing remains enabled across app launches after you opt in. A `ws://` LAN
 connection is plaintext, so use WSS for untrusted networks.
+Create a new invitation after changing networks, because the host's IP address
+may change. LAN discovery, messaging, and synchronization connect directly,
+without using the system HTTP or WebSocket proxy. Public WSS relays and model
+providers continue to support proxy settings.
+
+If joining times out, keep the host open and check the invitation's address and
+port. On a Windows guest, run this in PowerShell using the host address and port:
+
+```powershell
+Test-NetConnection -ComputerName 192.168.43.12 -Port 54321
+```
+
+`TcpTestSucceeded: False` means the guest cannot reach that listener. Check the
+host's adapter address and allow Multiplayer AI through the host firewall on
+the appropriate network profile. Keep the firewall enabled. On a managed campus
+network, ask IT whether connections between devices and the relay port are
+allowed.
+
+The same Wi-Fi name does not guarantee that devices can reach each other.
+Campus and guest networks may isolate devices or put them on separate VLANs,
+including devices connected through different access points. Some mobile
+hotspots also isolate clients. See Cisco's
+[peer-to-peer blocking documentation](https://www.cisco.com/c/en/us/td/docs/wireless/controller/9800/17-16/config-guide/b_wl_17_16_cg/peer-to-peer-client-support.html).
+Use a trusted network that permits device-to-device traffic, a suitable private
+network/VPN, or the WSS option below when direct connections are blocked.
 
 For internet connections, use a reachable TLS-protected relay:
 

@@ -51,6 +51,8 @@ class WorkspaceDialog(QDialog):
         self.timer = QTimer(self)
         self.timer.setInterval(1000)
         self.timer.timeout.connect(self.refresh)
+        # Hidden dialogs must not keep rebuilding their native table widgets.
+        self.finished.connect(self.timer.stop)
         self.timer.start()
         self.refresh()
 

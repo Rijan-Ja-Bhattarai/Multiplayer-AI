@@ -157,6 +157,40 @@ class WorkspaceUITests(unittest.TestCase):
         # chat archive go with it rather than being emptied in place.
         self.assertFalse(deleted_directory.exists())
 
+    def test_repeated_last_workspace_deletion_keeps_window_open_and_stops_closed_dialogs(self):
+        dialogs = []
+        for _ in range(3):
+            original = self.host.workspace_id
+            dialog = WorkspaceDialog(self.host)
+            dialogs.append(dialog)
+            QTimer.singleShot(20, dialog.delete_button.click)
+            with patch("desktop_app.workspace_dialog.QMessageBox.question", return_value=QMessageBox.StandardButton.Yes):
+                dialog.exec()
+            self.assertFalse(dialog.timer.isActive())
+            self.assertNotEqual(self.host.workspace_id, original)
+            self.assertTrue(self.host.isVisible())
+            self.assertTrue(self.host.network.isRunning())
+            self.assertEqual(len(self.host.workspace_list), 1)
+        # A closed dialog used to fire its table-refresh timer here and crash Qt.
+        QTest.qWait(1200)
+        self.assertTrue(self.host.isVisible())
+        self.assertTrue(self.host.network.isRunning())
+        self.host.command("create_workspace", "After deletion")
+        self.wait(lambda: len(self.host.workspace_list) == 2)
+
+    def test_invitation_network_selector_updates_address_and_preserves_manual_wss(self):
+        with patch("desktop_app.dialogs.lan_addresses", return_value=[
+                ("Wi-Fi", "192.168.43.12"), ("Ethernet", "192.168.1.2")]):
+            dialog = InviteDialog(self.host)
+        self.assertEqual(dialog.url.text(), f"ws://192.168.43.12:{self.host.port}/connect")
+        dialog.network_address.setCurrentIndex(1)
+        self.assertEqual(dialog.url.text(), f"ws://192.168.1.2:{self.host.port}/connect")
+        dialog.lan.setChecked(False)
+        dialog.url.setText("wss://relay.example.com/connect")
+        dialog.network_address.setCurrentIndex(0)
+        self.assertEqual(dialog.url.text(), "wss://relay.example.com/connect")
+        dialog.close()
+
     def test_create_from_real_menu_and_dialog_preserves_existing_animated_rail_button(self):
         original = self.host.workspace_id
         button = self.host.workspace_buttons[original]
