@@ -8,6 +8,7 @@ from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
 from .adapters import ProviderError
+from .content import MAX_FRAME_BYTES
 
 
 class AgentClient:
@@ -61,7 +62,7 @@ class AgentClient:
     async def run(self):
         """Reconnect with library backoff; never replay potentially executed requests."""
         async for socket in connect(self.url, additional_headers={"Authorization": f"Bearer {self.token}"},
-                                    max_size=262144, ping_interval=20, ping_timeout=20):
+                                    max_size=MAX_FRAME_BYTES, ping_interval=20, ping_timeout=20):
             jobs = set()
             try:
                 self.socket = socket

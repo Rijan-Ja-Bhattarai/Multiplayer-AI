@@ -8,6 +8,7 @@ import httpx
 
 from .storage import Storage, WorkspaceVault
 from .workspace_runtime import WorkspaceRuntime, relay_http_url
+from network_a2a.content import content_summary
 
 
 class DesktopRuntime:
@@ -93,7 +94,7 @@ class DesktopRuntime:
                     chat["revision"] = room["revision"]
                     chat["pending"] = room["pending"]
                     chat["messages"] = [["user" if message["role"] == "user" and message["from"] == engine.active_id
-                        else "member:" + message["from"] if message["role"] == "user" else message["role"], message["content"]]
+                        else "member:" + message["from"] if message["role"] == "user" else message["role"], content_summary(message["content"])]
                         for message in room["messages"]]
                 engine.history_store.save("ui", "state", state)
             return
@@ -275,6 +276,10 @@ class DesktopRuntime:
 
     async def save_agent(self, profile, key=None):
         return await self.connected_engine().save_agent(profile, key)
+
+    async def prepare_attachments(self, paths, vision=False):
+        from .attachments import prepare_attachments
+        return await asyncio.to_thread(prepare_attachments, paths, vision)
 
     async def stop_agent(self, agent_id):
         return await self.connected_engine().stop_agent(agent_id)

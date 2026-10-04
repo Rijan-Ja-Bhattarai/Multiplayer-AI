@@ -17,13 +17,15 @@ class MarkdownMessage(QTextBrowser):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setMinimumWidth(0)
-        self.setStyleSheet("QTextBrowser { background: transparent; border: none; padding: 0; selection-background-color: #5865f2; }")
+        self.setStyleSheet("QTextBrowser { background: #000000; color: #ffffff; border: none; padding: 0; selection-background-color: #ffffff; selection-color: #000000; }")
         palette = self.palette()
-        palette.setColor(QPalette.ColorRole.Link, QColor("#a8b0ff"))
+        palette.setColor(QPalette.ColorRole.Link, QColor("#ffffff"))
+        palette.setColor(QPalette.ColorRole.Text, QColor("#ffffff"))
+        palette.setColor(QPalette.ColorRole.Base, QColor("#000000"))
         self.setPalette(palette)
         document = self.document()
         document.setDocumentMargin(0)
-        document.setDefaultStyleSheet("a { color: #a8b0ff; } pre, code { font-family: Consolas, monospace; }")
+        document.setDefaultStyleSheet("a { color: #ffffff; } pre, code { font-family: Consolas, monospace; }")
         document.setMarkdown(text, QTextDocument.MarkdownFeature.MarkdownDialectGitHub
                              | QTextDocument.MarkdownFeature.MarkdownNoHTML)
         # The Markdown importer assigns its own link colour; keep links readable
@@ -39,7 +41,7 @@ class MarkdownMessage(QTextBrowser):
                 fragment_iterator += 1
             block = block.next()
         link_format = QTextCharFormat()
-        link_format.setForeground(QColor("#a8b0ff"))
+        link_format.setForeground(QColor("#ffffff"))
         for position, length in links:
             cursor = QTextCursor(document)
             cursor.setPosition(position)

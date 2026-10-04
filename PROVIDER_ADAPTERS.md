@@ -139,9 +139,19 @@ history:
 }
 ```
 
-History must start and end with a user message. Only user/assistant text messages
-are accepted. There is no shared conversation memory: include history in each
+History must start and end with a user message. Assistant content is text; user
+content can also be a list of text, document, and image parts. The desktop app
+prepares PDF text and base64 images and maps them to each provider's native API.
+Set `vision=True` in `ProviderConfig` for a vision-capable model. There is no shared
+memory in the adapter: include history in each
 request, which prevents different peers' conversations from being mixed.
+
+Desktop model settings expose image support and SearXNG internet access. Python
+configuration accepts `web_search="auto"` or `"always"` with `searxng_url`; the
+default is `"off"`. Automatic mode permits the model to request a search, then
+generates an answer from bounded result snippets with source URLs. This is a
+model decision, not a comparison with its training dataset. See the setup and
+attachment limits in [DESKTOP_GUIDE.md](DESKTOP_GUIDE.md).
 
 ## Local settings and failures
 
@@ -158,12 +168,12 @@ configuration. Local models may need more time for an initial model load.
 
 Errors travel through the relay as safe categories: `authentication`,
 `rate_limit`, `http_error`, `timeout`, `connection`, `invalid_input`,
-`invalid_response`, or `no_text`. Provider bodies, keys and URLs are excluded
+`invalid_response`, `no_text`, or `web_search`. Provider bodies, keys and URLs are excluded
 from error messages. The adapters do not retry generation requests automatically,
 because a failed or timed-out call might already have generated billable output.
 
-These adapters produce non-streaming text. They do not execute tools, invoke
-shell commands, or implement provider-specific agent workflows. Use a custom
+These adapters produce non-streaming text and optionally search SearXNG. They do
+not invoke shell commands or implement provider-specific agent workflows. Use a custom
 handler or the existing local A2A bridge for those workflows. `--provider` and
 `--local-a2a-url` are mutually exclusive.
 
@@ -186,7 +196,7 @@ async def main():
 asyncio.run(main())
 ```
 
-Add a provider by implementing `HTTPAdapter.generate(messages)` and registering
+Add a provider by implementing `HTTPAdapter.generate(messages, instructions=None)` and registering
 a `ProviderSpec` in `network_a2a/adapters/__init__.py`. The base adapter handles
 input validation, concurrency, timeouts, bounded HTTP responses, and result
 formatting.

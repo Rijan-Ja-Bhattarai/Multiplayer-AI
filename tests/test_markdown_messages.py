@@ -39,7 +39,7 @@ class MarkdownMessageTests(unittest.TestCase):
         for text, url in (("Website", "https://example.test"), ("another link", "https://other.test")):
             link_format = document.find(text).charFormat()
             self.assertEqual(link_format.anchorHref(), url)
-            self.assertEqual(link_format.foreground().color().name(), "#a8b0ff")
+            self.assertEqual(link_format.foreground().color().name(), "#ffffff")
 
     def test_long_replies_resize_without_clipping_and_remain_selectable(self):
         widget = MarkdownMessage("## Long reply\n\n" + "A sentence that needs to wrap. " * 100)

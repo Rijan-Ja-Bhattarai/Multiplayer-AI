@@ -2,18 +2,19 @@ import json
 from datetime import datetime
 
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt, QTimer, Slot
-from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QFont
+from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QFont, QPalette
 from PySide6.QtWidgets import (QCheckBox, QFrame, QGraphicsOpacityEffect, QGridLayout, QHBoxLayout,
     QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QProgressBar, QScrollArea,
-    QStackedWidget, QVBoxLayout, QWidget, QInputDialog, QMenu)
+    QStackedWidget, QVBoxLayout, QWidget, QInputDialog, QMenu, QFileDialog)
 
 from network_a2a.persistence import HistoryStore, model_context
+from network_a2a.content import MAX_MESSAGE_BYTES, content_summary, validate_content
 
 from .bridge import NetworkThread
 from .dialogs import AgentDialog, InviteDialog, JoinDialog
 from .markdown import MarkdownMessage
 from .theme import PROVIDER_NAMES, THEME
-from .widgets import Composer, OrbitArt, WorkspaceButton, action, label
+from .widgets import Composer, WorkspaceButton, action, label
 
 
 def frame(name, layout_type=QVBoxLayout):
@@ -68,10 +69,15 @@ class MainWindow(QMainWindow):
         self.request_count = 0
         self.ready = False
         self.closing = False
+        self.preparing_files = False
         self.setWindowTitle("Multiplayer AI")
         self.setWindowIcon(app_icon())
-        self.resize(1330, 910)
         self.setMinimumSize(1010, 690)
+        available = self.screen().availableGeometry()
+        self.resize(min(1330, max(1010, available.width() - 40)), min(910, max(690, available.height() - 40)))
+        palette = self.palette()
+        palette.setColor(QPalette.ColorRole.PlaceholderText, QColor("#ffffff"))
+        self.setPalette(palette)
         self.setStyleSheet(THEME)
         self.network = NetworkThread(storage, self)
         self.network.event.connect(self.network_event)
@@ -115,7 +121,6 @@ class MainWindow(QMainWindow):
         workspace_scroll.setWidget(workspace_content)
         rail_layout.addWidget(workspace_scroll, 1)
         join = WorkspaceButton("+")
-        join.setStyleSheet("color:#3ba55d")
         join.setToolTip("Create or join a workspace")
         join.clicked.connect(self.add_workspace)
         self.add_workspace_button = join
@@ -160,7 +165,7 @@ class MainWindow(QMainWindow):
         row.setContentsMargins(10, 16, 10, 16)
         avatar = label(" M ")
         avatar.setFixedWidth(34)
-        avatar.setStyleSheet("background:#5865f2; border-radius:14px; padding:6px; font-weight:700;")
+        avatar.setStyleSheet("background:#000000; color:#ffffff; border:1px solid #ffffff; border-radius:14px; padding:6px; font-weight:700;")
         row.addWidget(avatar)
         copy = QVBoxLayout()
         copy.addWidget(label("This device"))
@@ -186,7 +191,7 @@ class MainWindow(QMainWindow):
         top_layout.addWidget(self.add_button)
         body_layout.addWidget(top)
         self.toast = label("", wrap=True)
-        self.toast.setStyleSheet("background:#243c32; color:#b3e4c7; padding:12px 24px;")
+        self.toast.setStyleSheet("background:#000000; color:#ffffff; border:1px solid #ffffff; padding:12px 24px;")
         self.toast.hide()
         body_layout.addWidget(self.toast)
         self.progress = QProgressBar()
@@ -213,30 +218,15 @@ class MainWindow(QMainWindow):
 
     def overview_page(self):
         page, layout = self.scroll_page()
-        layout.addWidget(label("YOUR COLLABORATION HUB", "eyebrow"))
-        layout.addWidget(label("A place for all your intelligence.", "title"))
-        layout.addWidget(label("Your agents. Your devices. A team that works wherever you do.", "muted"))
-        hero, row = frame("hero", QHBoxLayout)
-        row.setContentsMargins(28, 20, 12, 20)
-        copy = QVBoxLayout()
-        copy.setSpacing(14)
-        copy.addWidget(label("BETTER TOGETHER", "eyebrow"))
-        copy.addWidget(label("Your agents.\nAll in one place.", "heroTitle"))
-        copy.addWidget(label("The networking is already taken care of.\nConnect a model, invite a device, and get to work.", "muted", True))
-        call = action("Connect your first model  →", self.add_agent, True)
-        copy.addWidget(call, alignment=Qt.AlignmentFlag.AlignLeft)
-        row.addLayout(copy, 1)
-        self.orbit = OrbitArt()
-        row.addWidget(self.orbit, 1)
-        layout.addWidget(hero)
+        layout.addWidget(label("Workspace overview", "title"))
         stats = QHBoxLayout()
         stats.setSpacing(16)
         self.stat_values = []
-        for title, subtitle in (("Agents in your group", "Ready for teamwork"), ("Online right now", "Connected devices"), ("Requests this visit", "Ideas on the move")):
+        for index, (title, subtitle) in enumerate((("Agents in this workspace", "Click to see your model agents"), ("Agents online", "Connected models"), ("Requests this visit", "Completed and pending requests"))):
             card, column = frame("stat")
             column.setContentsMargins(18, 15, 18, 15)
             column.addWidget(label(title, "muted"))
-            value = label("0", "statValue")
+            value = action("0", self.show_workspace_agents, name="statValue") if index == 0 else label("0", "statValue")
             column.addWidget(value)
             column.addWidget(label(subtitle, "muted"))
             self.stat_values.append(value)
@@ -262,7 +252,7 @@ class MainWindow(QMainWindow):
         page, layout = self.scroll_page()
         layout.addWidget(label("YOUR DISTRIBUTED TEAM", "eyebrow"))
         layout.addWidget(label("Agents", "title"))
-        layout.addWidget(label("Every laptop and desktop has a place here.", "muted"))
+        layout.addWidget(label("Models connected to this workspace.", "muted"))
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search agents or models…")
         self.search.textChanged.connect(self.render_agents)
@@ -290,7 +280,12 @@ class MainWindow(QMainWindow):
         self.chat_subtitle = label("Start a conversation with a connected device.", "muted")
         column.addWidget(self.chat_subtitle)
         self.share_conversation_button = action("Invite to conversation", self.invite_conversation)
-        column.addWidget(self.share_conversation_button, alignment=Qt.AlignmentFlag.AlignLeft)
+        chat_actions = QHBoxLayout()
+        self.chat_agent_count = action("0 agents", self.show_chat_agents, name="ghost")
+        chat_actions.addWidget(self.chat_agent_count)
+        chat_actions.addWidget(self.share_conversation_button)
+        chat_actions.addStretch()
+        column.addLayout(chat_actions)
         self.messages_scroll = QScrollArea()
         self.messages_scroll.setWidgetResizable(True)
         self.messages_widget = QWidget()
@@ -304,8 +299,13 @@ class MainWindow(QMainWindow):
         self.composer.setPlaceholderText("What would you like to work on?")
         self.composer.setMaximumHeight(105)
         self.composer.submitted.connect(self.send_message)
+        self.attachment_rows = QVBoxLayout()
+        self.attachment_rows.setSpacing(6)
+        column.addLayout(self.attachment_rows)
         column.addWidget(self.composer)
         footer = QHBoxLayout()
+        self.attach_button = action("Attach images / PDFs", self.attach_files)
+        footer.addWidget(self.attach_button)
         footer.addWidget(label("Enter to send · Shift + Enter for a new line", "muted"))
         footer.addStretch()
         self.send_button = action("Send request  ↑", self.send_message, True)
@@ -317,15 +317,20 @@ class MainWindow(QMainWindow):
     def providers_page(self):
         page, layout = self.scroll_page()
         layout.addWidget(label("CHOOSE YOUR INTELLIGENCE", "eyebrow"))
-        layout.addWidget(label("Your next teammate starts here.", "title"))
+        layout.addWidget(label("Models", "title"))
         layout.addWidget(label("Configure a provider once. The app starts its agent for you, every time.", "muted"))
+        layout.addWidget(label("Imported models", "heading"))
+        self.imported_model_rows = QVBoxLayout()
+        self.imported_model_rows.setSpacing(10)
+        layout.addLayout(self.imported_model_rows)
+        layout.addWidget(label("Connect another model", "heading"))
         grid = QGridLayout()
         grid.setSpacing(16)
         for index, (provider, info) in enumerate(PROVIDER_NAMES.items()):
             card, column = frame("card")
             column.setContentsMargins(21, 20, 21, 20)
             glyph = label(info[2])
-            glyph.setStyleSheet(f"font-size:27px; color:{info[3]}; font-weight:650;")
+            glyph.setStyleSheet("font-size:27px; color:#ffffff; font-weight:650;")
             column.addWidget(glyph)
             column.addWidget(label(info[0], "heading"))
             column.addWidget(label(info[1], "muted", True))
@@ -343,7 +348,61 @@ class MainWindow(QMainWindow):
     def motion_changed(self, reduced):
         self.storage.settings["reduce_motion"] = reduced
         self.storage.save()
-        self.orbit.animation.stop() if reduced else self.orbit.animation.start()
+        if reduced and hasattr(self, "page_animation"):
+            self.page_animation.stop()
+            effect = self.stack.currentWidget().graphicsEffect()
+            if effect:
+                effect.setOpacity(1.0)
+
+    def is_model_agent(self, agent):
+        return bool(agent.get("kind") == "model" or agent.get("provider") or agent.get("model") or any(
+            member["id"] == agent["id"] and member.get("role") == "Model" for member in self.workspace_meta.get("members", [])))
+
+    def model_agents(self, chat_only=False):
+        agents = [agent for agent in self.agents if self.is_model_agent(agent)]
+        if chat_only:
+            room = self.conversations.get(self.selected)
+            identities = {room["target"], *room["members"]} if room else {self.selected}
+            agents = [agent for agent in agents if agent["id"] in identities]
+        return agents
+
+    def show_workspace_agents(self):
+        self.show_agent_list(False)
+
+    def show_chat_agents(self):
+        self.show_agent_list(True)
+
+    def show_agent_list(self, chat_only):
+        from .agent_list_dialog import AgentListDialog
+        dialog = AgentListDialog(self, chat_only)
+        dialog.exec()
+        dialog.deleteLater()
+
+    def render_imported_models(self):
+        models = self.model_agents()
+        signature = (self.workspace_id, json.dumps(models, sort_keys=True))
+        if getattr(self, "_model_rows_signature", None) == signature:
+            return
+        self._model_rows_signature = signature
+        clear_layout(self.imported_model_rows)
+        if not models:
+            self.imported_model_rows.addWidget(label("No models connected yet. Choose a provider below.", "muted", True))
+        for agent in models:
+            card, row = frame("card", QHBoxLayout)
+            copy = QVBoxLayout()
+            copy.addWidget(label(agent["id"], "heading"))
+            copy.addWidget(label(f"{agent.get('provider') or 'Model'} · {agent.get('model') or 'Configured model'}", "muted", True))
+            profile = agent.get("profile", {})
+            search = profile.get("web_search", "off")
+            if profile:
+                copy.addWidget(label("Web search: " + {"off": "Off", "auto": "Automatic", "always": "Always"}[search] +
+                    (" · Images enabled" if profile.get("vision") else " · Text and PDFs"), "muted"))
+            row.addLayout(copy, 1)
+            if profile:
+                row.addWidget(action("Edit model", lambda checked=False, current=agent: self.edit_agent(current)))
+            else:
+                row.addWidget(label("Managed on its device", "muted"))
+            self.imported_model_rows.addWidget(card)
 
     def navigate(self, index):
         self.stack.setCurrentIndex(index)
@@ -365,8 +424,9 @@ class MainWindow(QMainWindow):
     def render_agents(self):
         clear_layout(self.overview_cards)
         clear_layout(self.agent_cards)
-        for grid, agents in ((self.overview_cards, self.agents[:3]),
-                             (self.agent_cards, [agent for agent in self.agents if self.search.text().lower() in f"{agent['id']} {agent.get('model') or ''}".lower()])):
+        models = self.model_agents()
+        for grid, agents in ((self.overview_cards, models[:3]),
+                             (self.agent_cards, [agent for agent in models if self.search.text().lower() in f"{agent['id']} {agent.get('model') or ''}".lower()])):
             if not agents:
                 card, column = frame("card")
                 column.addWidget(label("Your team is getting ready.", "heading"))
@@ -378,7 +438,7 @@ class MainWindow(QMainWindow):
                 top = QHBoxLayout()
                 info = PROVIDER_NAMES.get(agent.get("provider"), ("Connectivity agent", "", "⌘", "#a59af5"))
                 glyph = label(info[2])
-                glyph.setStyleSheet(f"color:{info[3]}; font-size:24px;")
+                glyph.setStyleSheet("color:#ffffff; font-size:24px;")
                 top.addWidget(glyph)
                 top.addStretch()
                 status = label("● Online" if agent["online"] else "● Offline", "online" if agent["online"] else "muted")
@@ -426,10 +486,11 @@ class MainWindow(QMainWindow):
                 listing.addItem(item)
                 if target == self.selected:
                     listing.setCurrentItem(item)
-        self.stat_values[0].setText(str(len(self.agents)))
-        self.stat_values[1].setText(str(sum(agent["online"] for agent in self.agents)))
+        self.stat_values[0].setText(str(len(models)))
+        self.stat_values[1].setText(str(sum(agent["online"] for agent in models)))
         self.stat_values[2].setText(str(self.request_count))
         self.update_chat_controls()
+        self.render_imported_models()
 
     def update_chat_controls(self):
         room = self.conversations.get(self.selected)
@@ -437,7 +498,11 @@ class MainWindow(QMainWindow):
         agent = next((item for item in self.agents if item["id"] == target), None)
         chat = self.chats.get(self.selected, {})
         pending = chat.get("pending") or chat.get("local_pending")
-        self.send_button.setEnabled(bool(agent and agent["online"] and not pending))
+        self.send_button.setEnabled(bool(agent and agent["online"] and not pending and not self.preparing_files))
+        self.attach_button.setEnabled(bool(self.ready and agent and self.is_model_agent(agent) and not pending and not self.preparing_files))
+        count = len(self.model_agents(chat_only=True))
+        self.chat_agent_count.setText(f"{count} " + ("agent" if count == 1 else "agents"))
+        self.chat_agent_count.setEnabled(bool(self.selected))
         self.send_button.setText("Working…" if pending else "Send request  ↑")
         self.chat_title.setText(room["title"] if room else self.selected or "Choose an agent")
         subtitle = "Your agent is working…" if pending else "Online · Ready to collaborate" if agent and agent["online"] else "Start this agent on its device to continue" if agent else "Choose a connected agent to begin"
@@ -451,6 +516,7 @@ class MainWindow(QMainWindow):
         self.navigate(2)
         self.render_agents()
         self.render_messages()
+        self.render_attachments()
         self.composer.setFocus()
 
     @staticmethod
@@ -484,6 +550,7 @@ class MainWindow(QMainWindow):
         self.workspace_meta = state.get("workspace_info", {})
         self.selected = state.get("selected")
         self.composer.setPlainText(state.get("draft", ""))
+        self.render_attachments()
         for target, chat in self.chats.items():
             chat["messages"] = [tuple(message) for message in chat.get("messages", [])]
             if (self.workspace_id, target) not in self.live_requests:
@@ -528,7 +595,7 @@ class MainWindow(QMainWindow):
             room = self.conversations.get(self.selected)
             speaker = role.removeprefix("member:") if role.startswith("member:") else names.get(role, room["target"] if room else self.selected)
             title = label(speaker)
-            title.setStyleSheet("font-weight:650; color:" + ("#f38a8e" if role == "error" else "#a8b0ff") + ";")
+            title.setStyleSheet("font-weight:650; color:#ffffff;")
             column.addWidget(title)
             if role in ("assistant", "local_agent"):
                 body = MarkdownMessage(text)
@@ -543,22 +610,106 @@ class MainWindow(QMainWindow):
         self.persist_history()
         QTimer.singleShot(0, lambda: self.messages_scroll.verticalScrollBar().setValue(self.messages_scroll.verticalScrollBar().maximum()))
 
+    def render_attachments(self):
+        clear_layout(self.attachment_rows)
+        files = self.chats.get(self.selected, {}).get("draft_attachments", [])
+        for index, item in enumerate(files):
+            row = QHBoxLayout()
+            row.addWidget(label(item["name"] + " · " + item["note"], "muted", True), 1)
+            remove = action("Remove", lambda checked=False, position=index: self.remove_attachment(position), name="ghost")
+            remove.setEnabled(not self.preparing_files)
+            row.addWidget(remove)
+            self.attachment_rows.addLayout(row)
+
+    def remove_attachment(self, position):
+        files = self.chats.get(self.selected, {}).get("draft_attachments", [])
+        if 0 <= position < len(files):
+            files.pop(position)
+            self.render_attachments()
+            self.persist_history()
+
+    def attach_files(self):
+        if not self.selected or not self.attach_button.isEnabled():
+            return
+        paths, _ = QFileDialog.getOpenFileNames(self, "Attach images or PDFs", "",
+            "Images and PDFs (*.png *.jpg *.jpeg *.webp *.gif *.bmp *.pdf);;PDF documents (*.pdf);;Images (*.png *.jpg *.jpeg *.webp *.gif *.bmp)")
+        if paths:
+            self.prepare_files(paths)
+
+    def prepare_files(self, paths):
+        room = self.conversations.get(self.selected)
+        identity = room["target"] if room else self.selected
+        agent = next((agent for agent in self.agents if agent["id"] == identity), None)
+        if not agent or not self.is_model_agent(agent) or self.preparing_files:
+            return
+        workspace_id, target, store = self.workspace_id, self.selected, self.history_store
+        self.preparing_files = True
+        self.attach_button.setText("Reading files…")
+        self.update_chat_controls()
+        def finished():
+            self.preparing_files = False
+            self.attach_button.setText("Attach images / PDFs")
+            self.render_attachments()
+            self.update_chat_controls()
+        def success(prepared):
+            if not any(entry["id"] == workspace_id for entry in self.workspace_list):
+                finished()
+                return
+            state = None
+            if workspace_id == self.workspace_id:
+                chat = self.chats.setdefault(target, {"messages": [], "history": [], "pending": False})
+            else:
+                state = store.load("ui").get("state", {})
+                chat = state.setdefault("chats", {}).setdefault(target, {"messages": [], "history": [], "pending": False})
+            combined = [*chat.get("draft_attachments", []), *prepared]
+            if len(combined) > 8 or len(json.dumps(combined).encode()) > MAX_MESSAGE_BYTES - 65536:
+                self.notice("Attach up to 8 files within the request limit. Send the existing files first.")
+            else:
+                chat["draft_attachments"] = combined
+                try:
+                    validate_content([{"type": "text", "text": "Analyze attached files"},
+                                      *(part for item in combined for part in item["content"])])
+                except ValueError as exc:
+                    chat["draft_attachments"] = combined[:-len(prepared)]
+                    self.notice(str(exc))
+                if state is None:
+                    self.persist_history()
+                else:
+                    store.save("ui", "state", state)
+            finished()
+        def failed(message):
+            finished()
+            self.notice(message)
+        self.command("prepare_attachments", paths, agent.get("vision", False), success=success, failure=failed)
+
     def send_message(self):
         if not self.selected or not self.send_button.isEnabled():
             return
         text = self.composer.toPlainText().strip()
-        if not text:
+        attached = self.chats[self.selected].get("draft_attachments", [])
+        if not text and not attached:
             return
+        if not text:
+            text = "Please analyze the attached files."
         if len(json.dumps(text).encode()) > 180000:
             self.notice("This message is too large. Send a shorter request.")
             return
         target = self.selected
         chat = self.chats[target]
+        content = [{"type": "text", "text": text}, *(part for item in attached for part in item["content"])] if attached else text
+        try:
+            content = validate_content(content)
+        except ValueError as exc:
+            self.notice(str(exc))
+            return
+        display_text = content_summary(content)
         workspace_id, store = self.workspace_id, self.history_store
         self.live_requests.add((workspace_id, target))
         if target in self.conversations:
             chat["local_pending"] = True
+            chat["draft_attachments"] = []
             self.composer.clear()
+            self.render_attachments()
             self.request_count += 1
             self.stat_values[2].setText(str(self.request_count))
             self.render_messages()
@@ -577,12 +728,14 @@ class MainWindow(QMainWindow):
             def failed(message):
                 finished(None)
                 self.notice(message)
-            self.command("send_conversation", target, text, success=finished, failure=failed)
+            self.command("send_conversation", target, content, success=finished, failure=failed)
             return
-        payload = {"messages": model_context([*chat["history"], {"role": "user", "content": text}])} if chat["history"] else {"text": text}
+        payload = {"messages": model_context([*chat["history"], {"role": "user", "content": content}])} if chat["history"] or attached else {"text": text}
         chat["pending"] = True
-        chat["messages"].append(("user", text))
+        chat["messages"].append(("user", display_text))
+        chat["draft_attachments"] = []
         self.composer.clear()
+        self.render_attachments()
         self.request_count += 1
         self.stat_values[2].setText(str(self.request_count))
         self.render_messages()
@@ -593,7 +746,7 @@ class MainWindow(QMainWindow):
                 response = json.dumps(result, indent=2)
             chat["messages"].append(("assistant", response))
             if isinstance(result, dict) and result.get("provider"):
-                chat["history"] = [*chat["history"], {"role": "user", "content": text}, {"role": "assistant", "content": response}]
+                chat["history"] = [*chat["history"], {"role": "user", "content": content}, {"role": "assistant", "content": response}]
             chat["pending"] = False
             if workspace_id == self.workspace_id:
                 self.add_activity(f"{target} replied", "Request completed")
@@ -648,9 +801,8 @@ class MainWindow(QMainWindow):
             self.add_button.setEnabled(True)
             self.invite_button.setEnabled(not self.remote)
             self.workspace_settings_button.setEnabled(True)
+            self.update_chat_controls()
             self.add_activity("Your desktop is connected", "Local relay and device identity started automatically")
-            if self.storage.settings.get("reduce_motion"):
-                self.orbit.animation.stop()
         elif event == "workspace":
             changed = self.workspace_id != data["id"]
             if changed:
@@ -705,7 +857,7 @@ class MainWindow(QMainWindow):
                 chat["message_ids"] = new_ids
                 chat["revision"] = room["revision"]
                 chat["messages"] = [("user" if message["role"] == "user" and message["from"] == self.identity
-                    else "member:" + message["from"] if message["role"] == "user" else message["role"], message["content"])
+                    else "member:" + message["from"] if message["role"] == "user" else message["role"], content_summary(message["content"]))
                     for message in room["messages"]]
                 chat["pending"] = room["pending"]
             self.render_agents()
