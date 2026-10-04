@@ -27,7 +27,10 @@ def main():
         if not lock.tryLock(0):
             QMessageBox.information(None, "Multiplayer AI", "This workspace is already open on this device.")
             return 0
-        diagnostics = CrashDiagnostics(storage.directory)
+        try:
+            diagnostics = CrashDiagnostics(storage.directory)
+        except OSError:
+            pass
         window = MainWindow(storage)
         if args.check_startup:
             app.setQuitOnLastWindowClosed(False)
