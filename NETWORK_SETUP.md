@@ -180,7 +180,7 @@ idempotency keys before retrying operations with side effects.
 This implementation keeps connections and in-flight requests in memory. Run
 **one worker and one relay replica**. There is no two-device limit; practical
 capacity depends on server resources. Defaults: 256 pending requests globally,
-32 concurrent requests per connection, 256 KiB frames/bodies, and a 60-second
+32 concurrent requests per connection, 8 MiB + 64 KiB frames/bodies, and a 60-second
 relay response timeout. Each sender has a burst of 30 and refill of 5 requests
 per second. Set `A2A_MAX_PENDING` or `A2A_REQUEST_TIMEOUT` (1..300 seconds) on the
 relay as needed. Increase client and local HTTP timeouts in code for longer work.
