@@ -16,8 +16,10 @@ Implemented and tested:
 - Client-to-client message routing
 - Structured error responses and event logging
 
-The client Connection Server does not yet integrate with the Agent Gateway,
-sessions, or authentication. A separate authenticated agent relay and provider
+The client Connection Server can call agents through the Agent Gateway when
+`A2A_RELAY_URL` and `A2A_RELAY_TOKEN` configure a usable relay. Session
+management and client authentication are not implemented. The separate
+authenticated agent relay and provider
 adapters are available in `network_a2a/`; see below and [Scope](#scope).
 
 ## Multi-device agent networking
