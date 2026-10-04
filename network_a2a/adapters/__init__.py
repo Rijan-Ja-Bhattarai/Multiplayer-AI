@@ -34,7 +34,8 @@ PROVIDERS = {
 
 
 def load_config(provider, model=None, base_url=None, api_key_env=None, system_prompt=None,
-                max_tokens=1024, timeout=55, concurrency=4, allow_insecure=False, environ=None):
+                max_tokens=1024, timeout=55, concurrency=4, allow_insecure=False, environ=None,
+                vision=False, web_search="off", searxng_url="", searxng_allow_insecure=False):
     env = os.environ if environ is None else environ
     if provider not in PROVIDERS:
         raise ValueError(f"Unknown provider: {provider}")
@@ -48,7 +49,8 @@ def load_config(provider, model=None, base_url=None, api_key_env=None, system_pr
         raise ValueError(f"Set {spec.base_env} or --provider-base-url")
     return ProviderConfig(provider=provider, model=model or env.get("A2A_MODEL"), base_url=base_url,
                           api_key=key, system_prompt=system_prompt if system_prompt is not None else env.get("A2A_SYSTEM_PROMPT"),
-                          max_tokens=max_tokens, timeout=timeout, concurrency=concurrency, allow_insecure=allow_insecure)
+                          max_tokens=max_tokens, timeout=timeout, concurrency=concurrency, allow_insecure=allow_insecure,
+                          vision=vision, web_search=web_search, searxng_url=searxng_url, searxng_allow_insecure=searxng_allow_insecure)
 
 
 def create_adapter(config, http):

@@ -15,9 +15,10 @@ from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocketDisconnect
 
 from .conversations import Conversations
+from .content import MAX_FRAME_BYTES
 
 
-MAX_BYTES = 262144
+MAX_BYTES = MAX_FRAME_BYTES
 
 
 @dataclass
@@ -53,6 +54,42 @@ class Relay:
         self.conversations = Conversations(self, conversation_store)
         self.workspace = workspace or {}
         self.member_remover = None
+        self.profile_store = conversation_store
+        self.agent_profiles = conversation_store.load("agent_profiles").get("profiles", {}) if conversation_store else {}
+        self.agent_profiles.update(self.workspace.get("agent_profiles", {}))
+
+    def set_agent_profile(self, identity, profile):
+        self.agent_profiles[identity] = dict(profile)
+        if self.profile_store:
+            self.profile_store.save("agent_profiles", "profiles", self.agent_profiles)
+
+    def agent_description(self, identity):
+        profile = self.agent_profiles.get(identity, {})
+        model = bool(profile.get("model") or identity in self.workspace.get("models", []))
+        return {"id": identity, "kind": "model" if model else "device",
+                "online": identity in self.peers and (not model or profile.get("running", True)),
+                "provider": profile.get("provider"), "model": profile.get("model"), "vision": profile.get("vision", False)}
+
+    async def describe_self(self, request):
+        source = self.authenticate(request.headers.get("authorization", ""))
+        if not source:
+            return JSONResponse({"error": "Unauthorized"}, 401)
+        raw = bytearray()
+        async for chunk in request.stream():
+            raw.extend(chunk)
+            if len(raw) > 2048:
+                return JSONResponse({"error": "Profile is too large"}, 413)
+        try:
+            profile = json.loads(raw)
+            if (not isinstance(profile, dict) or set(profile) != {"provider", "model", "vision", "running"}
+                    or not isinstance(profile["provider"], str) or not re.fullmatch(r"[a-z0-9-]{1,64}", profile["provider"])
+                    or not isinstance(profile["model"], str) or not 1 <= len(profile["model"]) <= 256
+                    or type(profile["vision"]) is not bool or type(profile["running"]) is not bool):
+                raise ValueError()
+        except (ValueError, TypeError):
+            return JSONResponse({"error": "Use a valid model profile"}, 400)
+        self.set_agent_profile(source, profile)
+        return JSONResponse({"status": "saved"})
 
     def authenticate(self, header):
         token = header.removeprefix("Bearer ") if header.startswith("Bearer ") else ""
@@ -152,8 +189,10 @@ class Relay:
                             if "error" in frame:
                                 code = frame.get("code")
                                 safe_codes = ("authentication", "rate_limit", "http_error", "timeout", "connection",
-                                              "invalid_input", "invalid_response", "no_text")
+                                              "invalid_input", "invalid_response", "no_text", "web_search")
                                 detail = f"Remote provider error: {code}" if isinstance(code, str) and code in safe_codes else "Remote agent failed"
+                                if code == "web_search":
+                                    detail = "Web search failed. Check the SearXNG URL and use Test web search in the model's settings."
                                 entry[2].set_exception(ConnectionError(detail))
                             else:
                                 entry[2].set_result(frame.get("payload"))
@@ -179,7 +218,7 @@ class Relay:
         source = self.authenticate(request.headers.get("authorization", ""))
         if not source:
             return JSONResponse({"error": "Unauthorized"}, 401, headers={"WWW-Authenticate": "Bearer"})
-        return JSONResponse({"self": source, "agents": [{"id": agent, "online": agent in self.peers}
+        return JSONResponse({"self": source, "agents": [self.agent_description(agent)
             for agent in self.credentials if self.allowed(source, agent)]}, headers={"Cache-Control": "no-store"})
 
     async def workspace_info(self, request):
@@ -187,10 +226,9 @@ class Relay:
         if not source:
             return JSONResponse({"error": "Unauthorized"}, 401)
         owner = self.workspace.get("owner")
-        models = self.workspace.get("models", [])
         return JSONResponse({"id": self.workspace.get("id"), "name": self.workspace.get("name", "Shared workspace"),
-            "owner": owner, "self": source, "members": [{"id": member, "online": member in self.peers,
-                "role": "Owner" if member == owner else "Model" if member in models else "Member"}
+            "owner": owner, "self": source, "members": [{"id": member, "online": self.agent_description(member)["online"],
+                "role": "Owner" if member == owner else "Model" if self.agent_description(member)["kind"] == "model" else "Member"}
                 for member in self.credentials if self.allowed(source, member)]}, headers={"Cache-Control": "no-store"})
 
     async def leave_workspace(self, request):
@@ -233,6 +271,7 @@ class Relay:
 def create_app(credentials, timeout=60, max_pending=256, conversation_store=None, workspace=None):
     relay = Relay(credentials, timeout, max_pending, conversation_store, workspace)
     app = Starlette(routes=[Route("/health", relay.health), Route("/agents", relay.agents),
+        Route("/agent-profile", relay.describe_self, methods=["POST"]),
         Route("/workspace", relay.workspace_info), Route("/workspace/leave", relay.leave_workspace, methods=["POST"]),
         Route("/agents/{agent}/invoke", relay.http_invoke, methods=["POST"]),
         Route("/conversations", relay.conversations.listing),

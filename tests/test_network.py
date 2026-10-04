@@ -10,6 +10,7 @@ import unittest
 
 import httpx
 import uvicorn
+from network_a2a.content import MAX_FRAME_BYTES
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 from websockets.asyncio.client import connect
@@ -41,7 +42,7 @@ class NetworkTests(unittest.IsolatedAsyncioTestCase):
         cls.socket = socket.socket()
         cls.socket.bind(("127.0.0.1", 0))
         cls.port = cls.socket.getsockname()[1]
-        cls.server = uvicorn.Server(uvicorn.Config(cls.app, log_level="error", ws_max_size=262144))
+        cls.server = uvicorn.Server(uvicorn.Config(cls.app, log_level="error", ws_max_size=MAX_FRAME_BYTES))
         async def serve():
             cls.loop = asyncio.get_running_loop()
             await cls.server.serve(sockets=[cls.socket])
@@ -162,7 +163,7 @@ class NetworkTests(unittest.IsolatedAsyncioTestCase):
             url = self.http_url + "/agents/b/invoke"
             invalid = await http.post(url, headers=self.headers("a"), content="not JSON")
             self.assertEqual(invalid.status_code, 400)
-            huge = await http.post(url, headers=self.headers("a"), content="x" * 262145)
+            huge = await http.post(url, headers=self.headers("a"), content="x" * (MAX_FRAME_BYTES + 1))
             self.assertEqual(huge.status_code, 413)
 
     def test_remote_plaintext_rejected(self):

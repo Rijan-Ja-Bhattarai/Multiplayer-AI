@@ -13,9 +13,11 @@ import httpx
 import uvicorn
 
 from network_a2a.adapters import PROVIDERS, ProviderConfig, create_adapter
-from network_a2a.client import AgentClient
+from network_a2a.client import AgentClient, direct_relay_connection
 from network_a2a.server import Relay, create_app
 from network_a2a.persistence import HistoryStore
+from network_a2a.content import MAX_FRAME_BYTES, content_summary
+from network_a2a.web_search import SearXNG
 
 from .storage import UNAVAILABLE
 
@@ -41,6 +43,7 @@ class WorkspaceRuntime:
         self.server_task = None
         self.server_socket = None
         self.http = None
+        self.direct_http = None
         self.runners = {}
         self.active_url = None
         self.active_token = None
@@ -55,6 +58,7 @@ class WorkspaceRuntime:
 
     async def start(self):
         self.http = httpx.AsyncClient(timeout=65, follow_redirects=False)
+        self.direct_http = httpx.AsyncClient(timeout=65, follow_redirects=False, trust_env=False)
         self.credentials = self.storage.credentials() or {}
         # Recorded by Storage.credentials() before it dropped anything, so
         # it has to be read before a new token is minted below.
@@ -79,7 +83,9 @@ class WorkspaceRuntime:
         self.app = create_app(self.credentials, conversation_store=self.history_store, workspace={
             "id": self.storage.settings.get("workspace_id", "local"),
             "name": self.storage.settings.get("workspace_name", "My workspace"),
-            "owner": device_id, "models": [profile["id"] for profile in self.storage.settings.get("agents", [])]})
+            "owner": device_id, "models": [profile["id"] for profile in self.storage.settings.get("agents", [])],
+            "agent_profiles": {profile["id"]: self.public_profile(profile, running=False)
+                               for profile in self.storage.settings.get("agents", [])}})
         self.app.state.relay.member_remover = self.remove_member
         self.sharing = bool(self.storage.settings.get("share_lan", False))
         await self._start_server("0.0.0.0" if self.sharing else "127.0.0.1", self.storage.settings.get("relay_port", 0))
@@ -104,7 +110,7 @@ class WorkspaceRuntime:
             sock.bind((host, port))
             self.port = sock.getsockname()[1]
             self.server_socket = sock
-            config = uvicorn.Config(self.app, log_level="error", ws_max_size=262144, ws_ping_interval=20, ws_ping_timeout=20,
+            config = uvicorn.Config(self.app, log_level="error", ws_max_size=MAX_FRAME_BYTES, ws_ping_interval=20, ws_ping_timeout=20,
                                     proxy_headers=False, timeout_graceful_shutdown=5, log_config=None)
             self.server = uvicorn.Server(config)
             self.server_task = asyncio.create_task(self.server.serve(sockets=[sock]))
@@ -150,7 +156,9 @@ class WorkspaceRuntime:
                 if isinstance(payload, dict) and isinstance(payload.get("messages"), list):
                     messages = payload["messages"]
                     text = messages[-1].get("content") if messages and isinstance(messages[-1], dict) else text
-                if not isinstance(text, str):
+                if isinstance(text, list):
+                    text = content_summary(text)
+                elif not isinstance(text, str):
                     text = json.dumps(payload)
                 self.emit("incoming", {"from": source, "to": agent_id, "text": text})
             try:
@@ -299,17 +307,33 @@ class WorkspaceRuntime:
                 except Exception:
                     self.emit("notice", f"Could not restore {profile['id']}. Open Providers to check its configuration.")
 
+    def relay_http(self, url=None):
+        return self.direct_http if direct_relay_connection(url or self.active_url) else self.http
+
     async def inspect_invitation(self, url, token, allow_insecure=False, conversation_id=None):
         if conversation_id is not None and (not isinstance(conversation_id, str)
                 or not re.fullmatch(r"conversation-[0-9a-f]{32}", conversation_id)):
             raise ValueError("Use a valid shared conversation invitation")
         base = relay_http_url(url, allow_insecure)
+        http = self.relay_http(url)
+        address = urlsplit(url).netloc
+        help_text = ("Keep the host app open, select its Wi-Fi or hotspot address in Invite a device, "
+                     "and allow Multiplayer AI through the host firewall. Campus or guest Wi-Fi and some "
+                     "hotspots block connections between devices, even with the same Wi-Fi name. "
+                     "Use a network that allows device-to-device connections or a reachable WSS relay.")
         try:
-            response = await self.http.get(base + "/agents", headers={"Authorization": "Bearer " + token}, timeout=10)
+            response = await http.get(base + "/agents", headers={"Authorization": "Bearer " + token}, timeout=10)
+            if response.status_code == 200 and conversation_id:
+                conversation = await http.get(base + f"/conversations/{conversation_id}",
+                    headers={"Authorization": "Bearer " + token}, timeout=10)
+                if conversation.status_code != 200:
+                    raise ValueError("This shared conversation is unavailable. Keep the host app open and ask for a new conversation invitation.")
+        except httpx.ConnectTimeout:
+            raise ConnectionError(f"Could not reach the host at {address} within 10 seconds. " + help_text) from None
         except httpx.TimeoutException:
-            raise ConnectionError("The relay did not respond within 10 seconds. Keep the host app open and check the address, network, and host firewall. A LAN invitation works only on the same reachable network.") from None
+            raise ConnectionError(f"The relay at {address} did not respond within 10 seconds. " + help_text) from None
         except httpx.HTTPError:
-            raise ConnectionError("Could not connect to the relay. Check the address and port, keep the host app open, and allow its port through the host firewall. Internet connections need a reachable WSS relay.") from None
+            raise ConnectionError(f"Could not connect to the relay at {address}. " + help_text) from None
         if response.status_code != 200:
             raise ValueError("Relay rejected this invitation. Check the token and address.")
         try:
@@ -318,11 +342,6 @@ class WorkspaceRuntime:
             raise ValueError("This address did not return a relay response. Use the host's invitation URL ending in /connect.") from None
         if not isinstance(result, dict) or not isinstance(result.get("self"), str):
             raise ValueError("This relay does not support desktop identity discovery")
-        if conversation_id:
-            conversation = await self.http.get(base + f"/conversations/{conversation_id}",
-                headers={"Authorization": "Bearer " + token}, timeout=10)
-            if conversation.status_code != 200:
-                raise ValueError("This shared conversation is unavailable. Keep the host app open and ask for a new conversation invitation.")
         same_connection = self.remote and self.active_url == url and self.active_token == token
         if not same_connection and any(item.get("id") == result["self"] and item.get("online") for item in result.get("agents", [])):
             raise ValueError("This invitation's device identity is already connected. Ask the host to create a new invitation with a unique device name for this laptop.")
@@ -344,6 +363,8 @@ class WorkspaceRuntime:
                 remote_profile = self.storage.settings.get("remote_agent")
                 if remote_profile and remote_profile.get("autostart") and remote_profile["id"] == self.active_id and remote_profile.get("relay") == url:
                     await self._launch_profile(remote_profile, allow_insecure)
+                elif remote_profile and remote_profile["id"] == self.active_id and remote_profile.get("relay") == url:
+                    await self.publish_profile(remote_profile, running=False)
                 if save:
                     self.storage.vault.set("remote-token", token)
                     self.storage.settings["remote"] = {"url": url, "allow_insecure": allow_insecure}
@@ -380,7 +401,29 @@ class WorkspaceRuntime:
     def _config(self, profile, key):
         spec = PROVIDERS[profile["provider"]]
         return ProviderConfig(provider=profile["provider"], model=profile["model"], base_url=profile.get("base_url") or spec.base_url,
-                              api_key=key, system_prompt=profile.get("system_prompt"), allow_insecure=profile.get("allow_insecure", False))
+                              api_key=key, system_prompt=profile.get("system_prompt"), allow_insecure=profile.get("allow_insecure", False),
+                              vision=profile.get("vision", False), web_search=profile.get("web_search", "off"),
+                              searxng_url=profile.get("searxng_url", ""), searxng_allow_insecure=profile.get("searxng_allow_insecure", False))
+
+    @staticmethod
+    def public_profile(profile, running=True):
+        return {"provider": profile["provider"], "model": profile["model"], "vision": profile.get("vision", False), "running": running}
+
+    async def publish_profile(self, profile, running=True):
+        public = self.public_profile(profile, running)
+        if not self.remote:
+            self.app.state.relay.set_agent_profile(profile["id"], public)
+        else:
+            base = relay_http_url(self.active_url, allow_insecure=True)
+            try:
+                response = await self.relay_http().post(base + "/agent-profile", json=public,
+                    headers={"Authorization": "Bearer " + self.active_token}, timeout=5)
+                if response.status_code in (200, 404):
+                    return
+            except httpx.HTTPError:
+                pass
+            if not self.closed:
+                self.emit("notice", "Your model connected, but its details could not be published to the workspace.")
 
     async def _launch_profile(self, profile, allow_insecure=False):
         key = self.storage.vault.get("provider:" + profile["id"])
@@ -388,6 +431,7 @@ class WorkspaceRuntime:
         token = self.active_token if self.remote else self.credentials[profile["id"]]["token"]
         await self._remove_runner(profile["id"])
         await self._attach(profile["id"], token, adapter, allow_insecure)
+        await self.publish_profile(profile)
 
     async def save_agent(self, profile, key=None):
         async with self.mutation:
@@ -428,19 +472,20 @@ class WorkspaceRuntime:
             if self.remote:
                 if self.storage.settings.get("remote_agent"):
                     self.storage.settings["remote_agent"]["autostart"] = False
-                # Saved before re-attaching the echo agent. That attach waits
-                # on the network and raises on a closed socket or a timeout,
-                # and saving afterwards meant a failure left the stop
-                # unrecorded, so the next launch restored the agent the user
-                # had just stopped.
-                self.storage.save()
-                await self._attach(self.active_id, self.active_token, self._echo,
-                                   self.storage.settings.get("remote", {}).get("allow_insecure", False))
             else:
                 for profile in self.storage.settings.get("agents", []):
                     if profile["id"] == agent_id:
                         profile["autostart"] = False
-                self.storage.save()
+            # Persist the stop and publish the offline profile before the
+            # network reconnect, which can fail or be cancelled.
+            self.storage.save()
+            profile = self.storage.settings.get("remote_agent") if self.remote else next(
+                (profile for profile in self.storage.settings.get("agents", []) if profile["id"] == agent_id), None)
+            if profile:
+                await self.publish_profile(profile, running=False)
+            if self.remote:
+                await self._attach(self.active_id, self.active_token, self._echo,
+                                   self.storage.settings.get("remote", {}).get("allow_insecure", False))
             await self.refresh()
 
     async def refresh(self):
@@ -448,7 +493,8 @@ class WorkspaceRuntime:
             return
         generation = self.generation
         base = relay_http_url(self.active_url, allow_insecure=True)
-        response = await self.http.get(base + "/agents", headers={"Authorization": "Bearer " + self.active_token}, timeout=8)
+        http = self.relay_http()
+        response = await http.get(base + "/agents", headers={"Authorization": "Bearer " + self.active_token}, timeout=8)
         response.raise_for_status()
         if generation != self.generation:
             return
@@ -459,11 +505,13 @@ class WorkspaceRuntime:
         agents = []
         for item in response.json()["agents"]:
             profile = profiles.get(item["id"], {})
-            agents.append({**item, "provider": profile.get("provider"), "model": profile.get("model"),
+            agents.append({**item, "kind": "model" if profile else item.get("kind", "device"),
+                           "provider": profile.get("provider", item.get("provider")), "model": profile.get("model", item.get("model")),
+                           "vision": profile.get("vision", item.get("vision", False)),
                            "local": item["id"] in self.runners, "profile": profile})
         self.emit("agents", {"agents": agents, "self": self.active_id,
                             "connected": bool(self.runners.get(self.active_id, (None,))[0] and self.runners[self.active_id][0].ready.is_set())})
-        response = await self.http.get(base + "/conversations", headers={"Authorization": "Bearer " + self.active_token}, timeout=8)
+        response = await http.get(base + "/conversations", headers={"Authorization": "Bearer " + self.active_token}, timeout=8)
         # Older relays still support direct agent chats.
         if response.status_code != 404:
             response.raise_for_status()
@@ -472,7 +520,7 @@ class WorkspaceRuntime:
         if not self.remote:
             self.app.state.relay.workspace.update(name=self.storage.settings.get("workspace_name", "My workspace"),
                 models=[profile["id"] for profile in self.storage.settings.get("agents", [])])
-        response = await self.http.get(base + "/workspace", headers={"Authorization": "Bearer " + self.active_token}, timeout=8)
+        response = await http.get(base + "/workspace", headers={"Authorization": "Bearer " + self.active_token}, timeout=8)
         if response.status_code == 200 and generation == self.generation:
             self.emit("workspace_info", response.json())
 
@@ -498,7 +546,7 @@ class WorkspaceRuntime:
         generation = self.generation
         base = relay_http_url(self.active_url, allow_insecure=True)
         try:
-            response = await self.http.post(base + f"/agents/{target}/invoke", json=payload,
+            response = await self.relay_http().post(base + f"/agents/{target}/invoke", json=payload,
                                            headers={"Authorization": "Bearer " + self.active_token}, timeout=65)
             result = response.json()
             if response.status_code != 200:
@@ -515,8 +563,9 @@ class WorkspaceRuntime:
         generation = self.generation
         base = relay_http_url(self.active_url, allow_insecure=True)
         try:
-            response = await self.http.post(base + f"/conversations/{conversation_id}/messages",
-                json={"text": text}, headers={"Authorization": "Bearer " + self.active_token}, timeout=65)
+            response = await self.relay_http().post(base + f"/conversations/{conversation_id}/messages",
+                json={"content": text} if isinstance(text, list) else {"text": text},
+                headers={"Authorization": "Bearer " + self.active_token}, timeout=65)
             if generation != self.generation:
                 raise RuntimeError("Workspace changed while the request was running; it was not replayed")
             await self.refresh()
@@ -533,6 +582,25 @@ class WorkspaceRuntime:
         response = await self.http.get(base_url.rstrip("/") + "/api/tags", timeout=5)
         response.raise_for_status()
         return [item["name"] for item in response.json()["models"]]
+
+    async def provider_models(self, provider, base_url, key=None, allow_insecure=False, agent_id=None):
+        if key is None and agent_id:
+            profile = self.storage.settings.get("remote_agent") if self.remote else next(
+                (profile for profile in self.storage.settings.get("agents", []) if profile["id"] == agent_id), None)
+            # Reuse a saved key only for the endpoint it was configured for.
+            if profile and profile["provider"] == provider and (profile.get("base_url") or PROVIDERS[provider].base_url) == base_url:
+                key = self.storage.vault.get("provider:" + agent_id)
+        config = ProviderConfig(provider, "discovery", base_url, api_key=key, allow_insecure=allow_insecure)
+        path = "/api/tags" if provider == "ollama" else "/models"
+        response = await self.http.get(config.base_url.rstrip("/") + path,
+            headers={"Authorization": "Bearer " + key} if key else {}, timeout=8)
+        response.raise_for_status()
+        payload = response.json()
+        return [item["name"] for item in payload["models"]] if provider == "ollama" else [item["id"] for item in payload["data"]]
+
+    async def test_web_search(self, url, allow_insecure=False):
+        results = await SearXNG(self.http, url, allow_insecure).search("SearXNG")
+        return len(results)
 
     async def invite(self, agent_id, public_url, lan=False, conversation_id=None, target=None, messages=None):
         async with self.mutation:
@@ -624,3 +692,5 @@ class WorkspaceRuntime:
             self.server_socket.close()
         if self.http:
             await self.http.aclose()
+        if self.direct_http:
+            await self.direct_http.aclose()

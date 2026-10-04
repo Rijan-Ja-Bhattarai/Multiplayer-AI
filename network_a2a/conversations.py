@@ -5,6 +5,7 @@ from uuid import uuid4
 from starlette.responses import JSONResponse
 
 from .persistence import model_context
+from .content import MAX_MESSAGE_BYTES, validate_content
 
 
 class Conversations:
@@ -31,9 +32,10 @@ class Conversations:
                 "messages": [], "pending": False, "revision": 0}
         for message in messages:
             if (not isinstance(message, dict) or message.get("role") not in ("user", "assistant")
-                    or not isinstance(message.get("content"), str)):
+                    or "content" not in message):
                 raise ValueError("Conversation history must contain user and assistant text")
-            self._append(room, message["role"], message["content"],
+            content = validate_content(message["content"], message["role"])
+            self._append(room, message["role"], content,
                          owner if message["role"] == "user" else target)
         self.rooms[room["id"]] = room
         self.save(room)
@@ -63,7 +65,7 @@ class Conversations:
         return room
 
     def _append(self, room, role, text, source):
-        while len(json.dumps(text).encode()) > 180000:
+        while isinstance(text, str) and len(json.dumps(text).encode()) > 180000:
             text = text[:len(text) // 2] + "\n[Response shortened]"
         room["messages"].append({"id": uuid4().hex, "role": role,
                                  "content": text, "from": source})
@@ -100,15 +102,16 @@ class Conversations:
         raw = bytearray()
         async for chunk in request.stream():
             raw.extend(chunk)
-            if len(raw) > 190000:
+            if len(raw) > MAX_MESSAGE_BYTES:
                 return JSONResponse({"error": "Message is too large"}, 413)
         try:
             payload = json.loads(raw)
-            text = payload.get("text") if isinstance(payload, dict) else None
-            if not isinstance(text, str) or not text.strip():
+            if not isinstance(payload, dict) or set(payload) not in ({"text"}, {"content"}):
                 raise ValueError()
-            if len(json.dumps(text).encode()) > 180000:
+            text = payload.get("content", payload.get("text"))
+            if isinstance(text, str) and len(json.dumps(text).encode()) > 180000:
                 return JSONResponse({"error": "Message is too large"}, 413)
+            text = validate_content(text)
         except (ValueError, TypeError):
             return JSONResponse({"error": "Enter a message to send"}, 400)
         if room["pending"]:

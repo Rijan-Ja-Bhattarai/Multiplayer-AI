@@ -17,17 +17,18 @@ analysis = Analysis(
 )
 
 if sys.platform == 'win32':
-    # This app draws native widgets with QPainter. It has no QML, PDF viewer,
-    # virtual keyboard, SVG assets, or OpenGL surface. Qt's broad default hooks
+    # Keep Qt PDF extraction/rendering and supported image formats for uploads.
+    # This app has no QML, virtual keyboard, SVG assets, or OpenGL surface. Qt's broad default hooks
     # otherwise collect these features and their transitive DLLs.
     unused_dlls = {
         'opengl32sw.dll', 'Qt6Quick.dll', 'Qt6Qml.dll', 'Qt6QmlModels.dll',
         'Qt6QmlMeta.dll', 'Qt6QmlWorkerScript.dll', 'Qt6VirtualKeyboard.dll',
-        'Qt6Pdf.dll', 'Qt6Svg.dll', 'Qt6OpenGL.dll',
+        'Qt6Svg.dll', 'Qt6OpenGL.dll',
     }
     plugin_allowlist = {
         'platforms/qwindows.dll', 'platforms/qoffscreen.dll',
         'styles/qmodernwindowsstyle.dll', 'imageformats/qico.dll',
+        'imageformats/qwebp.dll', 'imageformats/qgif.dll',
         'networkinformation/qnetworklistmanager.dll',
         'tls/qcertonlybackend.dll', 'tls/qopensslbackend.dll',
         'tls/qschannelbackend.dll',

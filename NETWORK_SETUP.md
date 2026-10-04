@@ -54,7 +54,7 @@ all devices. Protect the file with OS permissions and never put tokens in URLs.
 
 ```powershell
 $env:A2A_CREDENTIALS_FILE = "$PWD\credentials.json"
-.venv\Scripts\python -m uvicorn network_a2a.server:app_from_env --factory --host 0.0.0.0 --port 8000 --workers 1 --ws-max-size 262144 --ws-ping-interval 20 --ws-ping-timeout 20
+.venv\Scripts\python -m uvicorn network_a2a.server:app_from_env --factory --host 0.0.0.0 --port 8000 --workers 1 --ws-max-size 8454144 --ws-ping-interval 20 --ws-ping-timeout 20
 ```
 
 For local testing, clients use `ws://127.0.0.1:8000/connect`. For a trusted LAN,
@@ -81,6 +81,9 @@ docker compose -f compose.network.yml logs --tail=100
 Caddy terminates TLS and forwards WebSocket traffic to the relay. Once DNS and
 certificate issuance succeed, devices use `wss://agents.example.com/connect`.
 The public health endpoint is `https://agents.example.com/health`.
+For image and PDF attachments, use the current relay code and the WebSocket
+size limit above. A separate reverse proxy must also accept request bodies of
+at least 8 MiB. Older relays have a 256 KiB limit and accept only text in shared chats.
 
 Use the native desktop app's **Join workspace** dialog to connect to this relay
 with `wss://agents.example.com/connect` and your device token. The public server
@@ -177,7 +180,7 @@ idempotency keys before retrying operations with side effects.
 This implementation keeps connections and in-flight requests in memory. Run
 **one worker and one relay replica**. There is no two-device limit; practical
 capacity depends on server resources. Defaults: 256 pending requests globally,
-32 concurrent requests per connection, 256 KiB frames/bodies, and a 60-second
+32 concurrent requests per connection, 8 MiB + 64 KiB frames/bodies, and a 60-second
 relay response timeout. Each sender has a burst of 30 and refill of 5 requests
 per second. Set `A2A_MAX_PENDING` or `A2A_REQUEST_TIMEOUT` (1..300 seconds) on the
 relay as needed. Increase client and local HTTP timeouts in code for longer work.

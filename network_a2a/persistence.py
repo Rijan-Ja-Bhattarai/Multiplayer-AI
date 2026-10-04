@@ -4,6 +4,8 @@ import sqlite3
 from contextlib import closing, contextmanager
 from pathlib import Path
 
+from .content import MAX_MESSAGE_BYTES, MAX_TEXT_BYTES, text_content
+
 
 class HistoryStore:
     def __init__(self, directory):
@@ -43,7 +45,10 @@ def model_context(messages, limit=100, byte_limit=190000):
     """Keep the saved archive intact while fitting the provider transport."""
     history = [{"role": message["role"], "content": message["content"]}
                for message in messages if message["role"] in ("user", "assistant")][-limit:]
-    while len(history) > 1 and len(json.dumps(history).encode()) > byte_limit:
+    media = any(isinstance(message["content"], list) for message in history)
+    budget = MAX_MESSAGE_BYTES - 4096 if media else byte_limit
+    while len(history) > 1 and (len(json.dumps(history).encode()) > budget or
+            sum(len(text_content(message["content"]).encode()) for message in history) > MAX_TEXT_BYTES - 4096):
         history.pop(0)
     while history and history[0]["role"] != "user":
         history.pop(0)

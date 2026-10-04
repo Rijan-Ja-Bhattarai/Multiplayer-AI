@@ -1,4 +1,4 @@
-"""Shared text contract, configuration, and bounded provider HTTP calls."""
+"""Shared message contract, configuration, and bounded provider HTTP calls."""
 import asyncio
 import json
 import math
@@ -6,6 +6,9 @@ from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
 import httpx
+
+from ..content import MAX_MESSAGE_BYTES, MAX_TEXT_BYTES, images, text_content, validate_content
+from ..web_search import AUTO_SEARCH, SEARCH_EVIDENCE, SearchError, SearXNG, requested_query, validate_search_url
 
 
 class ProviderError(Exception):
@@ -27,6 +30,10 @@ class ProviderConfig:
     timeout: float = 55
     concurrency: int = 4
     allow_insecure: bool = False
+    vision: bool = False
+    web_search: str = "off"
+    searxng_url: str = ""
+    searxng_allow_insecure: bool = False
 
     def __post_init__(self):
         if not isinstance(self.model, str) or not self.model.strip():
@@ -46,6 +53,12 @@ class ProviderConfig:
             raise ValueError("Provider concurrency must be in 1..32")
         if self.system_prompt is not None and not isinstance(self.system_prompt, str):
             raise ValueError("System prompt must be text")
+        if type(self.vision) is not bool or type(self.searxng_allow_insecure) is not bool:
+            raise ValueError("Image support and SearXNG HTTP access must be boolean settings")
+        if self.web_search not in ("off", "auto", "always"):
+            raise ValueError("Choose Off, Automatic, or Always for web search")
+        if self.web_search != "off":
+            validate_search_url(self.searxng_url, self.searxng_allow_insecure)
 
 
 def parse_messages(payload):
@@ -59,17 +72,20 @@ def parse_messages(payload):
     else:
         raise ProviderError("invalid_input", "Send text, {text: ...}, or {messages: [...]} only")
     if not isinstance(messages, list) or not 1 <= len(messages) <= 100:
-        raise ProviderError("invalid_input", "Provide 1..100 text messages")
+        raise ProviderError("invalid_input", "Provide 1..100 messages")
     clean = []
     for message in messages:
         if (not isinstance(message, dict) or set(message) != {"role", "content"}
-                or message["role"] not in ("user", "assistant")
-                or not isinstance(message["content"], str) or not message["content"].strip()):
-            raise ProviderError("invalid_input", "Messages require user/assistant role and nonempty text content")
-        clean.append(dict(message))
+                or message["role"] not in ("user", "assistant")):
+            raise ProviderError("invalid_input", "Messages require user/assistant role and valid content")
+        try:
+            clean.append({"role": message["role"], "content": validate_content(message["content"], message["role"])})
+        except ValueError as exc:
+            raise ProviderError("invalid_input", str(exc)) from None
     if clean[0]["role"] != "user" or clean[-1]["role"] != "user":
         raise ProviderError("invalid_input", "History must start and end with a user message")
-    if len(json.dumps(clean).encode()) > 200000:
+    text_bytes = sum(len(text_content(message["content"]).encode()) for message in clean)
+    if text_bytes > MAX_TEXT_BYTES or len(json.dumps(clean).encode()) > MAX_MESSAGE_BYTES:
         raise ProviderError("invalid_input", "Message history is too large")
     return clean
 
@@ -80,9 +96,13 @@ class HTTPAdapter:
         self.http = http
         self.slots = asyncio.Semaphore(config.concurrency)
 
-    def messages_with_system(self, messages):
-        if self.config.system_prompt:
-            return [{"role": "system", "content": self.config.system_prompt}, *messages]
+    def system_instructions(self, instructions=None):
+        return "\n\n".join(text for text in (self.config.system_prompt, instructions) if text)
+
+    def messages_with_system(self, messages, instructions=None):
+        system = self.system_instructions(instructions)
+        if system:
+            return [{"role": "system", "content": system}, *messages]
         return messages
 
     def headers(self):
@@ -115,11 +135,13 @@ class HTTPAdapter:
 
     async def __call__(self, payload, sender):
         messages = parse_messages(payload)
+        if not self.config.vision and any(images(message["content"]) for message in messages):
+            raise ProviderError("invalid_input", "Choose a vision-capable model and enable image support in its settings")
         # Bound queueing plus HTTP time; this also protects against slow streams.
         try:
             async with asyncio.timeout(self.config.timeout):
                 async with self.slots:
-                    text, usage, finish_reason = await self.generate(messages)
+                    text, usage, finish_reason, sources = await self.generate_with_search(messages)
         except TimeoutError:
             raise ProviderError("timeout", f"{self.config.provider} request timed out") from None
         except (KeyError, IndexError, TypeError, AttributeError):
@@ -128,9 +150,32 @@ class HTTPAdapter:
             raise ProviderError("no_text", "Provider returned no text (blocked, tool-only, or token budget exhausted)")
         result = {"text": text, "provider": self.config.provider, "model": self.config.model,
                   "usage": usage if isinstance(usage, dict) else {}, "finish_reason": finish_reason}
+        if sources:
+            result["sources"] = sources
+            missing = [source for source in sources if source["url"] not in text]
+            if missing:
+                result["text"] += "\n\nSources:\n" + "\n".join(f"- [{source['title'].replace('[', '').replace(']', '')}]({source['url']})" for source in missing)
         if len(json.dumps(result).encode()) > 240000:
             raise ProviderError("invalid_response", "Provider output is too large for the relay")
         return result
 
-    async def generate(self, messages):
+    async def generate_with_search(self, messages):
+        mode = self.config.web_search
+        if mode == "off":
+            return (*await self.generate(messages), [])
+        query = text_content(messages[-1]["content"], include_documents=False)[:500].strip()
+        if mode == "auto":
+            initial = await self.generate(messages, AUTO_SEARCH)
+            query = requested_query(initial[0])
+            if query is None:
+                return (*initial, [])
+        try:
+            sources = await SearXNG(self.http, self.config.searxng_url, self.config.searxng_allow_insecure).search(query)
+        except SearchError as exc:
+            raise ProviderError("web_search", str(exc)) from None
+        evidence = SEARCH_EVIDENCE + "\n\n" + (json.dumps(sources, ensure_ascii=False) if sources else "No useful results were found. State this limitation.")
+        text, usage, reason = await self.generate(messages, evidence)
+        return text, usage, reason, sources
+
+    async def generate(self, messages, instructions=None):
         raise NotImplementedError

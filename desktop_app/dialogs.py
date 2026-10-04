@@ -1,12 +1,12 @@
 import json
-import socket
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QCheckBox, QComboBox, QDialog, QFormLayout, QHBoxLayout, QLineEdit, QPlainTextEdit, QVBoxLayout
+from PySide6.QtWidgets import QCheckBox, QComboBox, QDialog, QFormLayout, QHBoxLayout, QLineEdit, QPlainTextEdit, QScrollArea, QVBoxLayout, QWidget
 
 from network_a2a.adapters import PROVIDERS
 
 from .theme import PROVIDER_NAMES, color
+from .lan import lan_addresses
 from .widgets import action, label
 
 
@@ -25,14 +25,23 @@ class AgentDialog(QDialog):
     def __init__(self, window, provider="ollama", profile=None):
         super().__init__(window)
         self.window = window
-        self.setWindowTitle("Connect a model · Multiplayer AI")
-        self.setMinimumWidth(490)
+        self.profile = profile
+        self.setWindowTitle(("Edit model" if profile else "Connect a model") + " · Multiplayer AI")
+        self.setMinimumWidth(560)
+        self.resize(640, 780)
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(28, 26, 28, 26)
         self.layout.setSpacing(14)
-        self.layout.addWidget(label("MAKE ROOM FOR A NEW TEAMMATE", "eyebrow"))
-        self.layout.addWidget(label("Connect a model", "title"))
+        self.layout.addWidget(label("Edit model" if profile else "Connect a model", "title"))
         self.layout.addWidget(label("Your model runs on this device. Its key stays in your OS credential store.", "muted", True))
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        body = QWidget()
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 12, 0)
+        body_layout.setSpacing(12)
+        scroll.setWidget(body)
+        self.layout.addWidget(scroll, 1)
         form = QFormLayout()
         form.setVerticalSpacing(12)
         self.name = QLineEdit()
@@ -43,7 +52,7 @@ class AgentDialog(QDialog):
         self.model = QComboBox()
         self.model.setEditable(True)
         self.model.lineEdit().setPlaceholderText("Model ID, e.g. llama3.2")
-        self.models_button = action("Find local models", self.find_models)
+        self.models_button = action("Find models", self.find_models)
         model_row = QHBoxLayout()
         model_row.addWidget(self.model, 1)
         model_row.addWidget(self.models_button)
@@ -63,62 +72,118 @@ class AgentDialog(QDialog):
         form.addRow("API root", self.base)
         form.addRow("API key", self.key)
         form.addRow("Instructions", self.system)
-        self.layout.addLayout(form)
-        self.layout.addWidget(self.autostart)
-        self.layout.addWidget(self.insecure)
+        body_layout.addLayout(form)
+        body_layout.addWidget(self.autostart)
+        body_layout.addWidget(self.insecure)
+        self.vision = QCheckBox("Enable image support for this model")
+        body_layout.addWidget(self.vision)
+        body_layout.addWidget(label("Select a vision-capable model to understand images and scanned PDFs. Text PDFs work with any model.", "muted", True))
+        body_layout.addWidget(label("Internet access", "heading"))
+        self.internet = QCheckBox("Allow this model to search the web with SearXNG")
+        body_layout.addWidget(self.internet)
+        search_form = QFormLayout()
+        self.search_mode = QComboBox()
+        self.search_mode.addItem("Automatic · when the model needs outside information", "auto")
+        self.search_mode.addItem("Always · search for every question", "always")
+        self.search_url = QLineEdit()
+        self.search_url.setPlaceholderText("https://your-searxng-server.example.com")
+        search_form.addRow("Search mode", self.search_mode)
+        search_form.addRow("SearXNG server", self.search_url)
+        body_layout.addLayout(search_form)
+        self.search_insecure = QCheckBox("Allow SearXNG over HTTP on a trusted LAN")
+        body_layout.addWidget(self.search_insecure)
+        self.search_test = action("Test web search", self.test_search)
+        body_layout.addWidget(self.search_test)
+        self.search_status = label("", "muted", True)
+        body_layout.addWidget(self.search_status)
+        body_layout.addWidget(label("Automatic search asks the model to search when it needs current or uncertain facts. Your SearXNG server must allow JSON results. Search results and source links are included in its answer.", "muted", True))
         self.error = label("", "muted", True)
-        _style_error(self.error, self.window)
+        self.error.setStyleSheet("color: #f38a8e;")
         self.layout.addWidget(self.error)
         row = QHBoxLayout()
         row.addWidget(action("Cancel", self.reject))
-        self.save_button = action("Connect agent", self.save, True)
+        self.save_button = action("Save changes" if profile else "Connect agent", self.save, True)
         row.addWidget(self.save_button)
         self.layout.addLayout(row)
         self.provider.currentIndexChanged.connect(self.change_provider)
+        self.internet.toggled.connect(self.change_internet)
         self.change_provider()
         if profile:
             self.name.setText(profile["id"])
+            self.name.setReadOnly(True)
             self.model.setCurrentText(profile["model"])
             self.base.setText(profile.get("base_url") or "")
             self.system.setPlainText(profile.get("system_prompt") or "")
             self.autostart.setChecked(profile.get("autostart", True))
             self.insecure.setChecked(profile.get("allow_insecure", False))
+            self.vision.setChecked(profile.get("vision", False))
+            self.internet.setChecked(profile.get("web_search", "off") != "off")
+            self.search_mode.setCurrentIndex(max(0, self.search_mode.findData(profile.get("web_search", "auto"))))
+            self.search_url.setText(profile.get("searxng_url", ""))
+            self.search_insecure.setChecked(profile.get("searxng_allow_insecure", False))
         if window.remote:
             self.name.setText(window.identity)
             self.name.setReadOnly(True)
+        self.change_internet()
 
     def change_provider(self):
         key = self.provider.currentData()
         spec = PROVIDERS[key]
-        self.name.setText(f"{key}-agent")
+        if not self.profile:
+            self.name.setText(f"{key}-agent")
         if self.window.remote:
             self.name.setText(self.window.identity)
         self.base.setText(spec.base_url or "")
         self.base.setPlaceholderText("https://your-deployment.example.com/v1")
-        self.models_button.setVisible(key == "ollama")
+        self.models_button.setVisible(key not in ("anthropic", "gemini"))
         self.key.setPlaceholderText("Optional for local Ollama" if not spec.key_required else "API key · leave blank to keep a saved key")
 
     def find_models(self):
         self.models_button.setEnabled(False)
+        selected = self.model.currentText()
         def success(models):
             if self.isVisible():
                 self.models_button.setEnabled(True)
                 self.model.clear()
                 self.model.addItems(models)
+                if selected:
+                    self.model.setCurrentText(selected)
                 if not models:
-                    self.error.setText("No models found. Pull a model in Ollama first.")
+                    self.error.setText("No models found. Pull a model in Ollama or enter your provider's model ID.")
         def fail(message):
             if self.isVisible():
                 self.models_button.setEnabled(True)
-                self.error.setText("Could not reach Ollama. Start Ollama on this device and try again.")
-        self.window.command("ollama_models", self.base.text(), success=success, failure=fail)
+                self.error.setText("Could not list models. Check the API root and key, or enter the model ID directly.")
+        self.window.command("provider_models", self.provider.currentData(), self.base.text().strip(),
+                            self.key.text() or None, self.insecure.isChecked(),
+                            self.profile["id"] if self.profile else None, success=success, failure=fail)
+
+    def change_internet(self):
+        for widget in (self.search_mode, self.search_url, self.search_insecure, self.search_test):
+            widget.setEnabled(self.internet.isChecked())
+
+    def test_search(self):
+        self.search_test.setEnabled(False)
+        self.search_status.setText("Testing SearXNG…")
+        def success(count):
+            if self.isVisible():
+                self.change_internet()
+                self.search_status.setText(f"SearXNG is reachable · {count} results returned")
+        def failure(message):
+            if self.isVisible():
+                self.change_internet()
+                self.search_status.setText(message)
+        self.window.command("test_web_search", self.search_url.text().strip(), self.search_insecure.isChecked(),
+                            success=success, failure=failure)
 
     def save(self):
         self.error.setText("")
         profile = {"id": self.name.text().strip(), "provider": self.provider.currentData(),
                    "model": self.model.currentText().strip(), "base_url": self.base.text().strip(),
                    "system_prompt": self.system.toPlainText().strip(), "autostart": self.autostart.isChecked(),
-                   "allow_insecure": self.insecure.isChecked()}
+                   "allow_insecure": self.insecure.isChecked(), "vision": self.vision.isChecked(),
+                   "web_search": self.search_mode.currentData() if self.internet.isChecked() else "off",
+                   "searxng_url": self.search_url.text().strip(), "searxng_allow_insecure": self.search_insecure.isChecked()}
         self.save_button.setEnabled(False)
         def success(result):
             self.key.clear()
@@ -158,7 +223,7 @@ class JoinDialog(QDialog):
         self.insecure = QCheckBox("This is a trusted LAN connection (allow ws://)")
         layout.addWidget(self.insecure)
         self.error = label("", "muted", True)
-        _style_error(self.error, self.window)
+        self.error.setStyleSheet("color:#f38a8e")
         layout.addWidget(self.error)
         self.connect_button = action("Join workspace", self.join, True)
         layout.addWidget(self.connect_button)
@@ -237,20 +302,23 @@ class InviteDialog(QDialog):
         self.lan = QCheckBox("Share this relay on my local network")
         self.lan.setChecked(True)
         self.url = QLineEdit()
-        try:
-            addresses = socket.gethostbyname_ex(socket.gethostname())[2]
-            address = next((ip for ip in addresses if not ip.startswith("127.")), "YOUR_LAN_IP")
-        except OSError:
-            address = "YOUR_LAN_IP"
+        self.network_address = QComboBox()
+        for name, ip in lan_addresses():
+            self.network_address.addItem(f"{name} · {ip}", ip)
+        address = self.network_address.currentData() or "YOUR_LAN_IP"
         self.url.setText(f"ws://{address}:{window.port}/connect")
         layout.addWidget(label("New device identity", "muted"))
         layout.addWidget(self.name)
         layout.addWidget(self.lan)
+        layout.addWidget(label("Host network · choose the Wi-Fi or hotspot connected to the other device", "muted", True))
+        layout.addWidget(self.network_address)
+        self.network_address.currentIndexChanged.connect(self.select_network)
+        self.lan.toggled.connect(self.network_address.setEnabled)
         layout.addWidget(label("Address the other device can reach", "muted"))
         layout.addWidget(self.url)
-        layout.addWidget(label("LAN sharing makes this relay listen for connections from other devices while the app is open. Your firewall must allow its port. For internet access, enter the WSS address of a TLS proxy pointing to this relay, or join a hosted relay.", "muted", True))
+        layout.addWidget(label("Keep the host app open and allow Multiplayer AI through its firewall. After changing Wi-Fi or hotspot, create a new invitation with the current address. Campus and guest Wi-Fi may block devices from reaching each other, even with the same Wi-Fi name. For those networks, use a reachable WSS relay or a network that allows device-to-device connections.", "muted", True))
         self.error = label("", "muted", True)
-        _style_error(self.error, self.window)
+        self.error.setStyleSheet("color:#f38a8e")
         layout.addWidget(self.error)
         self.create_button = action("Create invitation", self.create, True)
         layout.addWidget(self.create_button)
@@ -263,6 +331,11 @@ class InviteDialog(QDialog):
         self.copy_button.hide()
         layout.addWidget(self.copy_button)
         layout.addWidget(action("Done", self.accept))
+
+    def select_network(self):
+        address = self.network_address.currentData()
+        if self.lan.isChecked() and address:
+            self.url.setText(f"ws://{address}:{self.window.port}/connect")
 
     def create(self):
         self.create_button.setEnabled(False)

@@ -201,7 +201,8 @@ class WorkspaceDurabilityTests(unittest.IsolatedAsyncioTestCase):
         saved, and that attach waits on the network. When it raised, the
         stop was lost and the next launch started the agent again.
         """
-        self.runtime.engine.storage.settings["remote_agent"] = {"id": self.runtime.active_id, "autostart": True}
+        self.runtime.engine.storage.settings["remote_agent"] = {
+            "id": self.runtime.active_id, "provider": "bionic", "model": "test-model", "autostart": True}
         self.runtime.engine.remote = True
         original = self.runtime.engine._attach
 
@@ -218,6 +219,7 @@ class WorkspaceDurabilityTests(unittest.IsolatedAsyncioTestCase):
 
         on_disk = json.loads(self.storage.path.read_text(encoding="utf-8"))
         self.assertFalse(on_disk["remote_agent"]["autostart"])
+        self.assertFalse(self.runtime.app.state.relay.agent_profiles[self.runtime.active_id]["running"])
 
     async def test_deleting_a_workspace_is_recorded_before_anything_is_destroyed(self):
         """A failure after the wipe must not resurrect the workspace.

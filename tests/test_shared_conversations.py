@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import tempfile
 import unittest
@@ -65,6 +66,53 @@ class SharedConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rooms[0], host_reply)
         self.assertEqual(rooms[0]["messages"][-2]["from"], self.host.active_id)
         self.assertNotIn(invitation["token"], json.dumps(rooms))
+
+    async def test_large_image_crosses_http_and_websocket_and_is_saved_for_followups(self):
+        calls = []
+        async def model(payload, source):
+            calls.append(payload["messages"])
+            return {"text": "Understood attached image", "provider": "test"}
+        await self.model(model)
+        invitation = await self.invitation()
+        await self.join(invitation)
+        room_id = invitation["conversation_id"]
+        image = {"type": "image", "name": "large.png", "mime_type": "image/png",
+                 "data": base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"x" * 300000).decode()}
+        content = [{"type": "text", "text": "Understand the picture"}, image]
+        reply = await self.guest.send_conversation(room_id, content)
+        self.assertEqual(reply["messages"][0]["content"], content)
+        self.assertEqual(calls[0][0]["content"], content)
+        stored = self.host.history_store.load("rooms")[room_id]
+        self.assertEqual(stored["messages"][0]["content"], content)
+        await self.host.send_conversation(room_id, "Remember that picture?")
+        self.assertEqual(calls[-1][0]["content"], content)
+        self.assertEqual(calls[-1][-1]["content"], "Remember that picture?")
+
+    async def test_remote_model_metadata_is_authenticated_and_excludes_private_settings(self):
+        invitation = await self.host.invite("guest", self.host.active_url)
+        await self.guest.join(invitation["url"], invitation["token"])
+        profile = {"id": "guest", "provider": "ollama", "model": "vision-model", "vision": True,
+                   "searxng_url": "http://localhost:8888", "system_prompt": "PRIVATE INSTRUCTIONS"}
+        await self.guest.publish_profile(profile)
+        await self.host.refresh()
+        base = f"http://127.0.0.1:{self.host.port}"
+        headers = {"Authorization": "Bearer " + self.host.active_token}
+        agents = (await self.host.http.get(base + "/agents", headers=headers)).json()["agents"]
+        self.assertEqual([agent["id"] for agent in agents if agent["kind"] == "model"], ["guest"])
+        guest = next(agent for agent in agents if agent["id"] == "guest")
+        self.assertTrue(guest["vision"])
+        self.assertEqual(guest["model"], "vision-model")
+        self.assertNotIn("PRIVATE", json.dumps(agents))
+        self.assertNotIn("searxng", json.dumps(agents))
+        public = self.guest.public_profile(profile)
+        self.assertEqual((await self.host.http.post(base + "/agent-profile", json=public)).status_code, 401)
+        guest_headers = {"Authorization": "Bearer " + invitation["token"]}
+        self.assertEqual((await self.host.http.post(base + "/agent-profile", headers=guest_headers,
+                                                   json={**public, "id": self.host.active_id})).status_code, 400)
+        await self.guest.publish_profile(profile, running=False)
+        guest = next(agent for agent in (await self.host.http.get(base + "/agents", headers=headers)).json()["agents"]
+                     if agent["id"] == "guest")
+        self.assertFalse(guest["online"])
 
     async def test_uninvited_device_cannot_read_or_send_to_conversation(self):
         async def model(payload, source):

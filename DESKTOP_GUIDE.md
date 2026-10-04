@@ -80,8 +80,56 @@ model ID, configure the API root if needed, and enter its API key. Click
 There is no generated terminal command or separate agent process to start.
 
 For Ollama, start the Ollama application and install your chosen model first.
-**Find local models** lists installed models from the running Ollama service.
+**Find models** lists installed Ollama models or models available at a compatible
+provider's API root. You can always enter the model ID directly.
 For Bionic GPT or a custom compatible endpoint, enter your deployment's API root.
+
+The **Providers** page lists imported models. Click **Edit model** to change the
+model, instructions, image support, or internet access. Models running on another
+device are edited on that device. Model names stay fixed so existing chats and
+invitations keep their identity.
+
+To enable internet access, select **Allow this model to search the web with
+SearXNG**, enter your SearXNG server URL, and choose **Automatic** or **Always**.
+Automatic mode lets the model request a search for current or uncertain facts;
+it cannot guarantee detection of everything absent from its training data.
+Always mode searches the question before each answer. The app supplies up to
+five result snippets and source links to the model. It does not fetch full pages.
+Use **Test web search** to check the endpoint before saving. Your server must
+enable JSON search in `settings.yml`, as described in the
+[SearXNG Search API](https://docs.searxng.org/dev/search_api.html):
+
+```yaml
+search:
+  formats:
+    - html
+    - json
+```
+
+Internet access is off until you enable it for that model. Search queries go to
+your configured SearXNG server; provider API keys are sent only to the provider.
+
+## Attach images and PDFs
+
+In a model's conversation, click **Attach images / PDFs** and select your files.
+The app reads them locally and shows the prepared files above the composer.
+Add a question and send, or send the files alone to request an analysis. **Remove**
+discards an attachment before sending. Files work in direct and shared chats,
+and their content remains available in saved conversation history for follow-ups.
+The selected model's provider receives the prepared content when you send it;
+members invited to a shared chat can see its attachments.
+
+Text PDFs are extracted for any model. Enable **image support** with a
+vision-capable model to send images or scanned PDFs. Vision mode includes PDF
+page images for diagrams as well as extracted text. For PDFs above 16 pages,
+only extracted text is included; split the PDF to include page images. Scanned
+PDFs need at most 16 pages per file. Password-protected PDFs must be unlocked.
+
+Attach up to eight files, each up to 20 MiB, within an 8 MiB prepared request
+and about 190 KB of extracted text. PDFs can have up to 200 pages. Large documents
+must be split. Images are resized to fit 1600 pixels and converted to JPEG;
+animated GIFs use their first frame. No OCR or image capability is added to a
+text-only model by enabling a checkbox.
 
 Tokens and API keys are stored in the OS credential store. Nonsecret settings
 (model IDs, endpoints, instructions, and autostart choices) live in:
@@ -96,6 +144,8 @@ The same directory contains `workspaces.json` and the default workspace's
 `history.sqlite3`. Additional workspaces keep separate settings and history
 under `workspaces/<workspace-id>/`. Chat history is saved on disk; tokens and
 provider keys remain in the OS credential store with workspace-specific keys.
+If the app closes unexpectedly, `desktop-crash.log` in the preferences directory
+records Python exceptions, Qt messages, and native crash details for diagnosis.
 
 ## Recover a lost device identity
 
@@ -127,10 +177,38 @@ identity, then specify a relay address it can reach. Each invitation contains a
 different private token. Copy it and send it privately to the intended user.
 
 For devices on a trusted LAN, leave **Share this relay on my local network**
-enabled and check the suggested IP address. Creating the invitation makes the
+enabled. Under **Host network**, choose the Wi-Fi or hotspot adapter connected
+to the other device. The suggested address favors active physical adapters over
+VPN and virtual adapters; you can choose another adapter or enter an address
+manually. Creating the invitation makes the
 relay listen on the LAN; the host firewall must allow the displayed port.
 Sharing remains enabled across app launches after you opt in. A `ws://` LAN
 connection is plaintext, so use WSS for untrusted networks.
+Create a new invitation after changing networks, because the host's IP address
+may change. LAN discovery, messaging, and synchronization connect directly,
+without using the system HTTP or WebSocket proxy. Public WSS relays and model
+providers continue to support proxy settings.
+
+If joining times out, keep the host open and check the invitation's address and
+port. On a Windows guest, run this in PowerShell using the host address and port:
+
+```powershell
+Test-NetConnection -ComputerName 192.168.43.12 -Port 54321
+```
+
+`TcpTestSucceeded: False` means the guest cannot reach that listener. Check the
+host's adapter address and allow Multiplayer AI through the host firewall on
+the appropriate network profile. Keep the firewall enabled. On a managed campus
+network, ask IT whether connections between devices and the relay port are
+allowed.
+
+The same Wi-Fi name does not guarantee that devices can reach each other.
+Campus and guest networks may isolate devices or put them on separate VLANs,
+including devices connected through different access points. Some mobile
+hotspots also isolate clients. See Cisco's
+[peer-to-peer blocking documentation](https://www.cisco.com/c/en/us/td/docs/wireless/controller/9800/17-16/config-guide/b_wl_17_16_cg/peer-to-peer-client-support.html).
+Use a trusted network that permits device-to-device traffic, a suitable private
+network/VPN, or the WSS option below when direct connections are blocked.
 
 For internet connections, use a reachable TLS-protected relay:
 
@@ -168,6 +246,9 @@ workspace continue running while you use a remote workspace.
 ## Work with your team
 
 **Overview** shows real agent counts and activity from the current visit.
+Counts include model agents, excluding users and connectivity devices. Click
+the workspace agent count or the **agents** button in a chat to see each model's
+name, provider, model ID, and online status.
 **Agents** supports search, editing local model configuration, and stopping local
 model agents. **Conversations** sends requests to connected agents and includes
 history in follow-ups to provider agents. Unconfigured device agents reply with
@@ -186,10 +267,10 @@ the AI reply and the model receives their combined conversation history.
 An ordinary **Invite a device** invitation connects the workspace without sharing
 a chat. Shared chats are visible only to their invited devices.
 
-The design uses charcoal surfaces, blurple actions, a workspace rail, an agent
-sidebar, fading page transitions, animated hover shapes, and quiet orbital
-motion. **Reduce animations** in Providers disables the welcome animation and
-page fades.
+The dark theme uses black backgrounds and white text, with a workspace rail and
+agent sidebar. **Settings → Theme** also offers Light, Miku, and Follow system.
+**Reduce animations** in Settings disables page fades. **Resources** shows local
+CPU, memory, and disk usage while that page is open.
 
 Direct chats, shared chats, and their model context are saved as messages arrive
 and restored after switching workspaces or reopening the app. Shared history and
@@ -198,7 +279,8 @@ reading. Existing invitations remain valid across a host restart unless revoked.
 Keep the host app open to send new requests and synchronize a shared workspace.
 
 The complete chat archive remains saved. Follow-up requests send up to 100 recent
-user and assistant messages within a 190 KB transport budget; older messages
+user and assistant messages within about 190 KB of text and, for attachments,
+an 8 MiB prepared request; older messages
 remain readable but are outside that model context window. Large individual
 shared replies can be shortened to fit the relay. Requests interrupted by an
 app shutdown are marked unsuccessful and never automatically replayed.
@@ -218,8 +300,8 @@ build on each operating system you want to distribute to, and sign releases
 before public distribution. The checked build in this workspace targets Windows.
 The packaging script creates `dist/MultiplayerAI-Windows-x64.zip` with the
 complete app, installer scripts, and this guide. Upload that ZIP as a release asset.
-The Windows build omits unused Qt QML, PDF, virtual keyboard, translation,
-and image-format components. It retains the native interface, animations,
+The Windows build omits unused Qt QML, virtual keyboard, and translation
+components. It retains PDF extraction, supported image formats, the native interface, animations,
 networking, credentials, and all supported provider adapters. Source code,
 tests, build tools, and local settings are not included in the release ZIP.
 

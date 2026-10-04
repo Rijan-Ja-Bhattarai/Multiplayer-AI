@@ -23,11 +23,13 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("PySide6", reason="PySide6 is needed for the desktop theme tests")
 
+from PySide6.QtGui import QPalette  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from desktop_app.dialogs import _style_error  # noqa: E402
 from desktop_app.storage import Storage  # noqa: E402
-from desktop_app.theme import DARK, LIGHT, MIKU, stylesheet  # noqa: E402
+from desktop_app.theme import DARK, LIGHT, MIKU, color, provider_entry, stylesheet  # noqa: E402
+from desktop_app.markdown import MarkdownMessage  # noqa: E402
 from desktop_app.widgets import OrbitArt, label  # noqa: E402
 
 
@@ -110,11 +112,12 @@ def test_apply_theme_replaces_the_stylesheet(window) -> None:
     assert window.styleSheet() == stylesheet(DARK)
 
 
-def test_apply_theme_repaints_the_custom_painted_widget(window) -> None:
-    """OrbitArt is hand-painted, so it needs telling about the theme."""
+def test_apply_theme_recolours_provider_glyphs(window) -> None:
+    """Provider controls must remain readable when switching to light."""
+    dark = window.provider_glyphs["openai"].styleSheet()
     window.apply_theme(LIGHT)
-
-    assert window.orbit._theme == LIGHT
+    assert window.provider_glyphs["openai"].styleSheet() != dark
+    assert provider_entry(LIGHT, "openai")[3] in window.provider_glyphs["openai"].styleSheet()
 
 
 def test_apply_theme_recolours_hand_styled_widgets(window) -> None:
@@ -146,22 +149,18 @@ def test_orbit_art_accepts_a_theme() -> None:
 
 
 @pytest.mark.parametrize("name", [LIGHT, MIKU, DARK])
-def test_the_orbit_paints_with_the_stored_theme_on_first_paint(
+def test_model_controls_use_the_stored_theme_on_first_paint(
     qt_app, storage, name: str
 ) -> None:
-    """The palette must reach the orbit at construction, not on first switch.
-
-    OrbitArt is hand-painted, so the application stylesheet does not
-    reach it, and apply_theme() is never called during startup. Without
-    the theme passed in, a light or Miku install painted the welcome
-    panel with dark colours until the user changed the theme by hand.
-    """
+    """The palette must reach controls at construction, before any switch."""
     storage.settings["theme"] = name
     from desktop_app.window import MainWindow
 
     instance = MainWindow(storage)
     try:
-        assert instance.orbit._theme == name
+        assert provider_entry(name, "openai")[3] in instance.provider_glyphs["openai"].styleSheet()
+        assert instance.palette().color(QPalette.ColorRole.PlaceholderText).name() == color(name, "text_muted")
+        assert not instance.findChildren(OrbitArt)
     finally:
         instance.network.shutdown()
         instance.network.wait(10000)
@@ -204,3 +203,19 @@ def test_app_icon_differs_between_themes(qt_app) -> None:
     light = app_icon(LIGHT).pixmap(64, 64).toImage().pixelColor(32, 32)
 
     assert dark.name() != light.name()
+
+
+@pytest.mark.parametrize("name", [LIGHT, MIKU, DARK])
+def test_theme_switch_preserves_markdown_links_and_chat_history(window, name) -> None:
+    """A saved reply follows the theme without changing its content."""
+    reply = "[Website](https://example.test) and **a saved reply**"
+    window.selected = "model"
+    window.chats = {"model": {"messages": [("assistant", reply)], "history": []}}
+    window.apply_theme(name)
+    body = window.messages.itemAt(0).widget().findChild(MarkdownMessage)
+    assert body is not None
+    assert body.palette().color(QPalette.ColorRole.Base).name() == color(name, "surface")
+    link_format = body.document().find("Website").charFormat()
+    assert link_format.anchorHref() == "https://example.test"
+    assert link_format.foreground().color().name() == color(name, "agent_title")
+    assert window.chats["model"]["messages"] == [("assistant", reply)]

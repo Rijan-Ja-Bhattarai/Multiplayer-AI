@@ -355,6 +355,7 @@ def test_follow_system_persists_immediately(window) -> None:
 
 def test_a_failed_command_is_reported_in_the_error_colour(window) -> None:
     """A failure must not be painted in the success colours."""
+    window.apply_theme(LIGHT)
     window.command_failure("no-such-request", "Could not save credentials.")
 
     assert window.toast_error is True

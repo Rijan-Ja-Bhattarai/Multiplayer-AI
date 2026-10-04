@@ -1,15 +1,19 @@
 from urllib.parse import quote
 
 from .base import HTTPAdapter
+from ..content import images, text_content
 
 
 class GeminiAdapter(HTTPAdapter):
-    async def generate(self, messages):
+    async def generate(self, messages, instructions=None):
         body = {"contents": [{"role": "model" if message["role"] == "assistant" else "user",
-                              "parts": [{"text": message["content"]}]} for message in messages],
+                              "parts": [{"text": text_content(message["content"])}] + [
+                                  {"inlineData": {"mimeType": image["mime_type"], "data": image["data"]}}
+                                  for image in images(message["content"])]} for message in messages],
                 "generationConfig": {"maxOutputTokens": self.config.max_tokens}}
-        if self.config.system_prompt:
-            body["systemInstruction"] = {"parts": [{"text": self.config.system_prompt}]}
+        system = self.system_instructions(instructions)
+        if system:
+            body["systemInstruction"] = {"parts": [{"text": system}]}
         model = self.config.model.removeprefix("models/")
         data = await self.post(f"models/{quote(model, safe='')}:generateContent", body,
                                {"x-goog-api-key": self.config.api_key})

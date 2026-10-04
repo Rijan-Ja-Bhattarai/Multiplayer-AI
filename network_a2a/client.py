@@ -1,6 +1,7 @@
 """Reusable client; handlers run on the device that owns the agent."""
 import asyncio
 import contextlib
+import ipaddress
 import json
 from uuid import uuid4
 from urllib.parse import urlsplit
@@ -9,6 +10,19 @@ from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
 from .adapters import ProviderError
+from .content import MAX_FRAME_BYTES
+
+
+def direct_relay_connection(url):
+    """LAN and loopback relays must not be routed through a system proxy."""
+    parsed = urlsplit(url)
+    if parsed.scheme == "ws" or parsed.hostname == "localhost":
+        return True
+    try:
+        address = ipaddress.ip_address(parsed.hostname)
+    except ValueError:
+        return False
+    return address.is_private or address.is_loopback or address.is_link_local
 
 
 class AgentClient:
@@ -61,8 +75,9 @@ class AgentClient:
 
     async def run(self):
         """Reconnect with library backoff; never replay potentially executed requests."""
+        options = {"proxy": None} if direct_relay_connection(self.url) else {}
         async for socket in connect(self.url, additional_headers={"Authorization": f"Bearer {self.token}"},
-                                    max_size=262144, ping_interval=20, ping_timeout=20):
+                                    max_size=MAX_FRAME_BYTES, ping_interval=20, ping_timeout=20, **options):
             jobs = set()
             try:
                 self.socket = socket
