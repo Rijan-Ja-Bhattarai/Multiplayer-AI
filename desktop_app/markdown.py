@@ -5,9 +5,11 @@ from PySide6.QtCore import QByteArray, Qt, QTimer
 from PySide6.QtGui import QColor, QDesktopServices, QPalette, QTextCharFormat, QTextCursor, QTextDocument
 from PySide6.QtWidgets import QFrame, QSizePolicy, QTextBrowser
 
+from .theme import DARK, color
+
 
 class MarkdownMessage(QTextBrowser):
-    def __init__(self, text, parent=None):
+    def __init__(self, text, parent=None, theme_name=DARK):
         super().__init__(parent)
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setReadOnly(True)
@@ -17,15 +19,21 @@ class MarkdownMessage(QTextBrowser):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setMinimumWidth(0)
-        self.setStyleSheet("QTextBrowser { background: #000000; color: #ffffff; border: none; padding: 0; selection-background-color: #ffffff; selection-color: #000000; }")
+        foreground = color(theme_name, "text")
+        background = color(theme_name, "surface")
+        link = color(theme_name, "agent_title")
+        self.setStyleSheet("QTextBrowser { background: " + background + "; color: " + foreground
+                          + "; border: none; padding: 0; selection-background-color: "
+                          + color(theme_name, "accent") + "; selection-color: "
+                          + color(theme_name, "on_accent") + "; }")
         palette = self.palette()
-        palette.setColor(QPalette.ColorRole.Link, QColor("#ffffff"))
-        palette.setColor(QPalette.ColorRole.Text, QColor("#ffffff"))
-        palette.setColor(QPalette.ColorRole.Base, QColor("#000000"))
+        palette.setColor(QPalette.ColorRole.Link, QColor(link))
+        palette.setColor(QPalette.ColorRole.Text, QColor(foreground))
+        palette.setColor(QPalette.ColorRole.Base, QColor(background))
         self.setPalette(palette)
         document = self.document()
         document.setDocumentMargin(0)
-        document.setDefaultStyleSheet("a { color: #ffffff; } pre, code { font-family: Consolas, monospace; }")
+        document.setDefaultStyleSheet("a { color: " + link + "; } pre, code { font-family: Consolas, monospace; }")
         document.setMarkdown(text, QTextDocument.MarkdownFeature.MarkdownDialectGitHub
                              | QTextDocument.MarkdownFeature.MarkdownNoHTML)
         # The Markdown importer assigns its own link colour; keep links readable
@@ -41,7 +49,7 @@ class MarkdownMessage(QTextBrowser):
                 fragment_iterator += 1
             block = block.next()
         link_format = QTextCharFormat()
-        link_format.setForeground(QColor("#ffffff"))
+        link_format.setForeground(QColor(link))
         for position, length in links:
             cursor = QTextCursor(document)
             cursor.setPosition(position)

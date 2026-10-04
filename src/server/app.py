@@ -15,7 +15,8 @@ the sender as structured errors.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator, Dict
 
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -23,6 +24,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
+from src.agents.gateway import AgentGateway, AgentGatewayError
 from src.errors import (
     AgentNotFoundError,
     ClientDeliveryError,
@@ -48,6 +50,36 @@ logger = logging.getLogger("connection_server")
 # One registry per process. The prototype runs a single process, so there
 # is nothing to share or coordinate.
 connection_manager = ConnectionManager()
+
+# The Agent Gateway, present only when a relay is configured. When it is
+# None an agent destination fails with AGENT_NOT_FOUND rather than the
+# server refusing to start, so the client-to-client path keeps working on
+# its own.
+agent_gateway = AgentGateway.from_env()
+
+# Named as a constant so the hint is assertable. The variable must be
+# A2A_RELAY_TOKEN, which is the one AgentGateway.from_env reads; naming
+# A2A_TOKEN here sent operators to the variable that means the opposite
+# thing, namely a process's own agent identity.
+GATEWAY_DISABLED_HINT = "set A2A_RELAY_URL and A2A_RELAY_TOKEN"
+
+if agent_gateway is None:
+    logger.info(
+        "AGENT_GATEWAY status=disabled reason=missing_config "
+        "hint=" + GATEWAY_DISABLED_HINT
+    )
+
+
+@asynccontextmanager
+async def lifespan(app: Starlette) -> AsyncIterator[None]:
+    """Release the gateway's pooled connections on shutdown.
+
+    Starlette's ``on_shutdown`` constructor argument has been removed, so
+    cleanup is expressed as a lifespan handler instead.
+    """
+    yield
+    if agent_gateway is not None:
+        await agent_gateway.aclose()
 
 async def health(request: Request) -> JSONResponse:
     """Liveness probe. Reports process health only, never agent health."""
@@ -180,17 +212,23 @@ async def _handle_frame(
     )
 
     try:
-        destination = await route_message(envelope, client_id, connection_manager)
+        reply = await route_message(
+            envelope, client_id, connection_manager, agent_gateway
+        )
     except (
         ClientNotFoundError,
         ClientDeliveryError,
         InvalidMessageError,
         AgentNotFoundError,
+        AgentGatewayError,
     ) as exc:
         logger.warning(
-            "MESSAGE_ROUTED messageId=%s clientId=%s code=%s status=failed",
+            "MESSAGE_ROUTED messageId=%s clientId=%s destination=%s:%s "
+            "code=%s status=failed",
             envelope.message_id,
             client_id,
+            envelope.destination_type,
+            envelope.destination_id,
             exc.code,
         )
         await websocket.send_text(
@@ -213,14 +251,24 @@ async def _handle_frame(
         )
         return
 
-    # Success is reported to nobody: the destination received the frame.
     logger.info(
         "MESSAGE_ROUTED messageId=%s clientId=%s destination=%s:%s status=delivered",
         envelope.message_id,
         client_id,
-        destination["type"],
-        destination["id"],
+        envelope.destination_type,
+        envelope.destination_id,
     )
+
+    if reply is not None:
+        # An agent destination answers, so the reply goes back to the
+        # client that asked. Client-to-client sends still return nothing:
+        # the destination already holds the message.
+        logger.info(
+            "MESSAGE_DELIVERED messageId=%s clientId=%s from=agent",
+            envelope.message_id,
+            client_id,
+        )
+        await websocket.send_text(reply.to_wire())
 
 
 routes = [
@@ -229,4 +277,4 @@ routes = [
     WebSocketRoute("/ws/{client_id}", client_socket),
 ]
 
-app = Starlette(routes=routes)
+app = Starlette(routes=routes, lifespan=lifespan)

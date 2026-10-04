@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 from desktop_app.runtime import DesktopRuntime
-from desktop_app.storage import Storage
+from desktop_app.storage import UNAVAILABLE, Storage
 from tests.test_desktop_runtime import MemoryVault
 
 
@@ -100,6 +100,43 @@ class WorkspacePersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("guest", self.host.credentials)
         self.assertNotIn("guest", self.host.app.state.relay.conversations.rooms[invitation["conversation_id"]]["members"])
 
+    async def test_member_removal_says_so_when_a_token_cannot_be_deleted(self):
+        """A revoked member whose token lingers is worth reporting.
+
+        The member is out of the workspace either way, so the deletion
+        succeeds. What must not happen is silence: a secret this device
+        still holds for someone with no access is the part the owner
+        would want to know about.
+        """
+        invitation = await self.host.invite("guest", self.host.active_url, target=self.host.active_id)
+        await self.guest_join(invitation)
+        original = self.vault.delete
+
+        def locked(name):
+            return UNAVAILABLE
+        self.vault.delete = locked
+        try:
+            await self.host.remove_member("guest")
+        finally:
+            self.vault.delete = original
+
+        self.assertNotIn("guest", self.host.credentials, "access is revoked either way")
+        self.assertIn("relay:guest", self.vault.values, "the token could not be removed")
+        notices = [data for kind, data in self.events
+                   if kind == "notice" and "credential" in str(data).lower()]
+        self.assertTrue(notices, "the user must be told the token survived")
+
+    async def test_member_removal_is_quiet_when_the_token_is_gone(self):
+        """The happy path should not cry wolf."""
+        invitation = await self.host.invite("guest", self.host.active_url, target=self.host.active_id)
+        await self.guest_join(invitation)
+
+        await self.host.remove_member("guest")
+
+        self.assertNotIn("relay:guest", self.vault.values)
+        self.assertFalse([data for kind, data in self.events
+                          if kind == "notice" and "credential" in str(data).lower()])
+
     async def test_guests_cannot_rename_or_remove_members_and_can_leave(self):
         invitation = await self.host.invite("guest", self.host.active_url)
         await self.guest_join(invitation)
@@ -121,7 +158,10 @@ class WorkspacePersistenceTests(unittest.IsolatedAsyncioTestCase):
         store.save("ui", "state", {"chats": {"deleted": {"messages": [["user", "Delete this"]]}}})
         await self.host.delete_workspace()
         self.assertEqual(self.host.active_workspace_id, root_id)
-        self.assertEqual(store.load("ui"), {})
+        # The workspace's whole directory is removed, so its archive goes with
+        # it rather than being emptied in place. The store object captured
+        # above can no longer open its file, which is the point.
+        self.assertFalse((Path(self.directory.name) / "host" / "workspaces" / second["id"]).exists())
         self.assertIn("Keep this", json.dumps(self.host.engine.history_store.load("ui")))
         self.assertNotIn(second["id"], {entry["id"] for entry in self.host.catalog["workspaces"]})
         await self.host.delete_workspace()
@@ -139,7 +179,7 @@ class WorkspacePersistenceTests(unittest.IsolatedAsyncioTestCase):
         await self.guest.delete_workspace()
         self.assertEqual(self.guest.active_workspace_id, owned_id)
         self.assertNotIn(remote_id, {entry["id"] for entry in self.guest.catalog["workspaces"]})
-        self.assertEqual(store.load("ui"), {})
+        self.assertFalse((Path(self.directory.name) / "guest" / "workspaces" / remote_id).exists())
         self.assertIsNone(self.guest.storage.vault.get(remote_id + ":remote-token"))
         self.assertIn("guest", self.host.credentials)
 
@@ -173,6 +213,125 @@ class WorkspacePersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(vault.get(remote_id + ":provider:legacy-guest"))
         self.assertIsNone(vault.get("provider:legacy-guest"))
         self.assertIsNone(vault.get("remote-token"))
+
+    async def test_a_legacy_root_token_that_will_not_delete_is_retried(self):
+        """The pre-catalog layout's tokens live on the root vault.
+
+        They are a different entry from the workspace's own identically
+        named ones, so a retry that treated them as workspace-scoped would
+        look for <workspace-id>:remote-token and leave the root token in
+        place forever. They also cannot be re-derived afterwards, because the
+        pass that fails to delete them is the pass that removes the root
+        settings naming them.
+        """
+        invitation = await self.host.invite("legacy-guest", self.host.active_url)
+        vault = MemoryVault()
+        storage = Storage(Path(self.directory.name) / "guest", vault)
+        storage.settings.update(remote={"url": invitation["url"], "allow_insecure": False},
+                                remote_agent={"id": "legacy-guest", "provider": "bionic",
+                                              "model": "test-model", "base_url": "https://model.example/v1",
+                                              "autostart": True, "relay": invitation["url"]})
+        vault.set("remote-token", invitation["token"])
+        vault.set("provider:legacy-guest", "legacy-api-key")
+        storage.save()
+        self.guest = DesktopRuntime(storage)
+        await self.guest.start()
+        remote_id = self.guest.active_workspace_id
+        self.guest.app.state.relay.member_remover = None
+        # The store refuses the root entries, so the workspace's own
+        # credentials are cleaned up as normal. A workspace-scoped name
+        # arrives already prefixed with the workspace id.
+        original = vault.delete
+
+        def locked_root(name):
+            if name.startswith("workspace-"):
+                return original(name)
+            return UNAVAILABLE
+        vault.delete = locked_root
+        try:
+            await self.guest.delete_workspace()
+        finally:
+            vault.delete = original
+
+        records = self.guest.storage.read_pending_cleanup()
+        self.assertEqual([r["id"] for r in records], [remote_id])
+        self.assertEqual(sorted(records[0]["root_credentials"]),
+                         ["provider:legacy-guest", "remote-token"],
+                         "the root names must be recorded separately")
+        self.assertEqual(records[0]["credentials"], [],
+                         "the workspace's own credentials were deleted")
+        self.assertEqual(vault.get("remote-token"), invitation["token"])
+        self.assertEqual(vault.get("provider:legacy-guest"), "legacy-api-key")
+        self.assertIsNone(self.guest.storage.settings.get("remote"),
+                          "the description that named them is already gone")
+
+        # Next launch, with the store unlocked.
+        await self.guest.close()
+        self.guest = DesktopRuntime(Storage(Path(self.directory.name) / "guest", vault))
+        await self.guest.start()
+
+        self.assertIsNone(vault.get("remote-token"))
+        self.assertIsNone(vault.get("provider:legacy-guest"))
+        self.assertEqual(self.guest.storage.read_pending_cleanup(), [])
+        self.assertNotIn(remote_id + ":remote-token", vault.values,
+                         "the retry must not look behind the workspace prefix")
+
+    async def test_a_member_token_that_will_not_delete_is_retried_on_the_next_launch(self):
+        """The notice promises a retry, so there must be something to retry."""
+        invitation = await self.host.invite("guest", self.host.active_url, target=self.host.active_id)
+        await self.guest_join(invitation)
+        original = self.vault.delete
+
+        def locked(name):
+            return UNAVAILABLE
+        self.vault.delete = locked
+        try:
+            await self.host.remove_member("guest")
+        finally:
+            self.vault.delete = original
+
+        records = self.host.storage.read_pending_cleanup()
+        self.assertEqual([(r["type"], r["source"], r["workspace"]) for r in records],
+                         [("credentials", "member", None)])
+        self.assertEqual(sorted(records[0]["credentials"]),
+                         ["provider:guest", "relay:guest"])
+        self.assertIn("relay:guest", self.vault.values)
+
+        await self.guest.close()
+        await self.host.close()
+        self.host = DesktopRuntime(Storage(Path(self.directory.name) / "host", self.vault))
+        await self.host.start()
+
+        self.assertNotIn("relay:guest", self.vault.values)
+        self.assertNotIn("provider:guest", self.vault.values)
+        self.assertEqual(self.host.storage.read_pending_cleanup(), [])
+
+    async def test_an_owed_token_record_does_not_remove_a_live_workspace(self):
+        """A record about credentials must not be read as a deletion.
+
+        Both kinds share one file. Handled by the workspace-deletion path, a
+        credential record would match its own workspace in the catalog and
+        delete it on the next launch, and would delete the name through the
+        root vault instead of the workspace's own.
+        """
+        second = await self.host.create_workspace("Writing")
+        live = second["id"]
+        live_token = "relay:device-livehost"
+        self.vault.set(live_token, "the host's own working token")
+        self.host.storage.write_pending_cleanup(
+            self.host.storage.read_pending_cleanup()
+            + [{"type": "credentials", "workspace": live, "source": "reset",
+                "credentials": [live_token]}])
+
+        await self.host.close()
+        self.host = DesktopRuntime(Storage(Path(self.directory.name) / "host", self.vault))
+        await self.host.start()
+
+        self.assertIn(live, {e["id"] for e in self.host.catalog["workspaces"]},
+                      "only credentials were owed; the workspace stays")
+        self.assertEqual(self.vault.get(live_token), "the host's own working token",
+                         "a workspace-scoped record must not delete the root entry")
+        self.assertEqual(self.host.storage.read_pending_cleanup(), [])
 
     async def test_interrupted_request_is_recovered_without_replaying_model(self):
         invitation = await self.host.invite("guest", self.host.active_url, target=self.host.active_id)

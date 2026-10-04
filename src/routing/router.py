@@ -16,16 +16,17 @@ The shape of the decision (section 20)::
            |
            +-- destination.type == agent  --> Agent Gateway --> A2A
 
-Only the client branch is implemented. The agent branch fails loudly with
-``AGENT_NOT_FOUND`` because the Agent Gateway does not exist yet; that is
-deliberate, so an agent destination is never silently accepted and dropped.
+Both branches are implemented. The agent branch holds no HTTP or relay
+detail of its own (section 29): it hands the payload to the Agent Gateway
+and converts the returned payload into the normalised response envelope
+from section 16.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Optional
 
-from src.errors import InvalidMessageError
+from src.errors import AgentNotFoundError, InvalidMessageError
 from src.messages.envelope import MessageEnvelope
 
 
@@ -33,8 +34,9 @@ async def route_message(
     envelope: MessageEnvelope,
     client_id: str,
     connection_manager: Any,
-) -> Dict[str, str]:
-    """Deliver one validated envelope to its destination.
+    agent_gateway: Any = None,
+) -> Optional[MessageEnvelope]:
+    """Route one validated envelope to its destination.
 
     The source recorded in the delivered frame is always rewritten to the
     id of the connection that sent it. A client-supplied ``source`` is
@@ -45,15 +47,22 @@ async def route_message(
         envelope: The parsed message envelope.
         client_id: Id of the connection that sent this frame.
         connection_manager: Registry used to reach the destination client.
+        agent_gateway: Agent Gateway used for agent destinations. When
+            None, agent destinations fail with ``AGENT_NOT_FOUND``.
 
     Returns:
-        The destination as it was resolved, for logging.
+        For a client destination, None: the destination has the message
+        and the sender is told nothing, which is the established
+        behaviour. For an agent destination, the response envelope to
+        deliver back to the originating client (section 16). Returning
+        the reply rather than sending it keeps delivery in one place.
 
     Raises:
         InvalidMessageError: Destination id or type is missing/unknown.
         ClientNotFoundError: Destination client is not connected.
         ClientDeliveryError: Destination client socket rejected the write.
-        AgentNotFoundError: Destination is an agent; not yet supported.
+        AgentNotFoundError: An agent was addressed but none is reachable.
+        AgentGatewayError: The agent call failed; ``code`` is set.
     """
     destination_type = envelope.destination_type
     destination_id = envelope.destination_id
@@ -68,10 +77,10 @@ async def route_message(
 
     if destination_type == "client":
         await connection_manager.send_to_client(destination_id, envelope.to_wire())
-        return {"type": destination_type, "id": destination_id}
+        return None
 
     if destination_type == "agent":
-        raise _agent_unsupported(destination_id)
+        return await _route_to_agent(envelope, client_id, agent_gateway)
 
     raise InvalidMessageError(
         f"Unknown destination type '{destination_type}'. "
@@ -79,18 +88,32 @@ async def route_message(
     )
 
 
-def _agent_unsupported(agent_id: str) -> Exception:
-    """Build the error for an agent destination.
+async def _route_to_agent(
+    envelope: MessageEnvelope,
+    client_id: str,
+    agent_gateway: Any,
+) -> MessageEnvelope:
+    """Call an agent and build the response envelope for the requester.
 
-    The Agent Gateway (agent.md sections 13 and 14) is not implemented,
-    so there is no registry to resolve an agent id against and no A2A
-    endpoint to call. Returning a constructed error keeps the branch
-    explicit and documented at the point of failure.
+    The correlation fields are copied from the request rather than
+    generated, so the client can match the response to the request that
+    caused it (section 15).
     """
-    from src.errors import AgentNotFoundError
+    if agent_gateway is None:
+        raise AgentNotFoundError(
+            f"Agent '{envelope.destination_id}' cannot be reached: no agent "
+            "relay is configured for this server. Set A2A_RELAY_URL and "
+            "A2A_RELAY_TOKEN to enable agent messaging."
+        )
 
-    return AgentNotFoundError(
-        f"Agent '{agent_id}' cannot be reached: the Agent Gateway is not "
-        "implemented yet. Client-to-client messaging is the only "
-        "supported destination."
+    result = await agent_gateway.invoke(envelope.destination_id, envelope.payload)
+
+    return MessageEnvelope(
+        messageId=envelope.message_id,
+        type="response",
+        source={"id": envelope.destination_id, "type": "agent"},
+        destination={"id": client_id, "type": "client"},
+        sessionId=envelope.session_id,
+        timestamp=envelope.timestamp,
+        payload=result,
     )

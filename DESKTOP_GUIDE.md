@@ -147,6 +147,29 @@ provider keys remain in the OS credential store with workspace-specific keys.
 If the app closes unexpectedly, `desktop-crash.log` in the preferences directory
 records Python exceptions, Qt messages, and native crash details for diagnosis.
 
+## Recover a lost device identity
+
+The token for an identity lives in the OS credential store, while the list of
+identities lives in `settings.json`. If the token is removed but the entry stays
+behind — a cleared keyring, a store that was locked or reset, or settings
+restored from a backup on another machine — the app replaces that identity
+instead of refusing to start. It starts normally, tells you that the identity
+changed, and keeps every other preference, including your theme.
+
+Because the old token is gone, workspaces that were joined with that identity
+stop recognising the device and need a fresh invitation. Other identities on the
+same device are unaffected.
+
+To discard an identity deliberately, for instance after suspecting the token was
+exposed, use **Settings → Reset local identity**. This replaces every identity on
+the device with a new token, stops and restarts connected agents, and leaves
+joined workspaces requiring new invitations. The action asks for confirmation
+first.
+
+An *unavailable* credential store is still reported as an error rather than being
+treated as empty, because a replacement token could not be saved either. Unlock
+the store and relaunch.
+
 ## Invite another device
 
 In your local workspace, click **Invite a device**. Give the other device a new
@@ -216,8 +239,10 @@ the AI reply and the model receives their combined conversation history.
 An ordinary **Invite a device** invitation connects the workspace without sharing
 a chat. Shared chats are visible only to their invited devices.
 
-The app uses black backgrounds and white text, with a workspace rail and agent
-sidebar. **Reduce animations** in Providers disables page fades.
+The dark theme uses black backgrounds and white text, with a workspace rail and
+agent sidebar. **Settings → Theme** also offers Light, Miku, and Follow system.
+**Reduce animations** in Settings disables page fades. **Resources** shows local
+CPU, memory, and disk usage while that page is open.
 
 Direct chats, shared chats, and their model context are saved as messages arrive
 and restored after switching workspaces or reopening the app. Shared history and
@@ -226,7 +251,8 @@ reading. Existing invitations remain valid across a host restart unless revoked.
 Keep the host app open to send new requests and synchronize a shared workspace.
 
 The complete chat archive remains saved. Follow-up requests send up to 100 recent
-user and assistant messages within a 190 KB transport budget; older messages
+user and assistant messages within about 190 KB of text and, for attachments,
+an 8 MiB prepared request; older messages
 remain readable but are outside that model context window. Large individual
 shared replies can be shortened to fit the relay. Requests interrupted by an
 app shutdown are marked unsuccessful and never automatically replayed.
@@ -246,8 +272,8 @@ build on each operating system you want to distribute to, and sign releases
 before public distribution. The checked build in this workspace targets Windows.
 The packaging script creates `dist/MultiplayerAI-Windows-x64.zip` with the
 complete app, installer scripts, and this guide. Upload that ZIP as a release asset.
-The Windows build omits unused Qt QML, PDF, virtual keyboard, translation,
-and image-format components. It retains the native interface, animations,
+The Windows build omits unused Qt QML, virtual keyboard, and translation
+components. It retains PDF extraction, supported image formats, the native interface, animations,
 networking, credentials, and all supported provider adapters. Source code,
 tests, build tools, and local settings are not included in the release ZIP.
 

@@ -2,12 +2,14 @@ import asyncio
 import json
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 import httpx
 
 from desktop_app.runtime import DesktopRuntime, relay_http_url
-from desktop_app.storage import Storage
+from desktop_app.storage import ABSENT, REMOVED, UNAVAILABLE, Storage
+import desktop_app.runtime as runtime_module
 
 
 class MemoryVault:
@@ -21,7 +23,12 @@ class MemoryVault:
         self.values[name] = value
 
     def delete(self, name):
-        self.values.pop(name, None)
+        # Speaks the same vocabulary as the real Vault so a cleanup that
+        # reports an outstanding credential is exercised for real.
+        if name in self.values:
+            del self.values[name]
+            return REMOVED
+        return ABSENT
 
 
 class DesktopRuntimeTests(unittest.IsolatedAsyncioTestCase):
@@ -167,6 +174,602 @@ class DesktopRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(relay_http_url("wss://remote.example/connect"), "https://remote.example")
         with self.assertRaises(ValueError):
             relay_http_url("wss://remote.example/connect?token=secret")
+
+
+class WorkspaceDurabilityTests(unittest.IsolatedAsyncioTestCase):
+    """Paths where a failure could undo or hide a destructive action.
+
+    Each of these wrote something the user asked for, then did a network
+    or disk operation that can fail before the change reached disk.
+    """
+
+    async def asyncSetUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.vault = MemoryVault()
+        self.events = []
+        self.storage = Storage(self.directory.name, self.vault)
+        self.runtime = DesktopRuntime(self.storage, lambda kind, data: self.events.append((kind, data)))
+        await self.runtime.start()
+
+    async def asyncTearDown(self):
+        await self.runtime.close()
+
+    async def test_stopping_an_agent_survives_a_failed_reconnect(self):
+        """Stopping an agent must be recorded even if the echo agent fails.
+
+        The remote branch re-attaches the connectivity agent before it
+        saved, and that attach waits on the network. When it raised, the
+        stop was lost and the next launch started the agent again.
+        """
+        self.runtime.engine.storage.settings["remote_agent"] = {
+            "id": self.runtime.active_id, "provider": "bionic", "model": "test-model", "autostart": True}
+        self.runtime.engine.remote = True
+        original = self.runtime.engine._attach
+
+        async def fail(*args, **kwargs):
+            raise TimeoutError("Agent did not connect.")
+
+        self.runtime.engine._attach = fail
+        try:
+            with self.assertRaises(TimeoutError):
+                await self.runtime.engine.stop_agent(self.runtime.active_id)
+        finally:
+            self.runtime.engine._attach = original
+            self.runtime.engine.remote = False
+
+        on_disk = json.loads(self.storage.path.read_text(encoding="utf-8"))
+        self.assertFalse(on_disk["remote_agent"]["autostart"])
+        self.assertFalse(self.runtime.app.state.relay.agent_profiles[self.runtime.active_id]["running"])
+
+    async def test_deleting_a_workspace_is_recorded_before_anything_is_destroyed(self):
+        """A failure after the wipe must not resurrect the workspace.
+
+        ensure_engine() starts a relay and touches the credential store.
+        It previously ran after the credentials and history were gone but
+        before workspaces.json was written, so a failure there left the
+        workspace listed on disk with nothing behind it.
+        """
+        second = await self.runtime.create_workspace("Writing")
+        await self.runtime.switch_workspace(second["id"])
+        original = self.runtime.ensure_engine
+
+        async def fail(entry):
+            raise RuntimeError("Local relay could not start")
+
+        self.runtime.ensure_engine = fail
+        with self.assertRaisesRegex(RuntimeError, "relay could not start"):
+            await self.runtime.delete_workspace()
+
+        catalog = json.loads(self.runtime.catalog_path.read_text(encoding="utf-8"))
+        remaining = {entry["id"] for entry in catalog["workspaces"]}
+        self.assertNotIn(second["id"], remaining)
+        self.assertTrue(remaining, "a replacement workspace must remain")
+        self.runtime.ensure_engine = original
+
+    async def test_reset_identity_rotates_every_local_workspace(self):
+        """Each local workspace owns its own relay and credential set.
+
+        The catalog manager delegates the rotation per workspace, and this
+        loop had no coverage at all, which is how a method call chained
+        onto an un-awaited coroutine survived review.
+        """
+        second = await self.runtime.create_workspace("Writing")
+        await self.runtime.switch_workspace(second["id"])
+        engines = [self.runtime.engines[entry["id"]]
+                   for entry in self.runtime.catalog["workspaces"] if entry["kind"] == "local"]
+        before = {engine.active_id: engine.credentials[engine.active_id]["token"]
+                  for engine in engines}
+        self.assertEqual(len(engines), 2, "expected two local workspaces")
+
+        results = await self.runtime.reset_identity()
+
+        self.assertEqual(len(results), 2)
+        for engine in engines:
+            after = engine.credentials[engine.active_id]["token"]
+            self.assertNotEqual(after, before[engine.active_id],
+                                "each workspace should have received a new token")
+            # Read through the engine's own vault: only the workspace
+            # called "local" shares the root one, the rest are namespaced.
+            self.assertTrue(engine.storage.vault.get("relay:" + engine.active_id),
+                            "the replacement token must be in the vault")
+
+    async def test_a_cancelled_reset_still_leaves_the_record_behind(self):
+        """Cancelling the reset between forgetting and announcing used to lose both.
+
+        The record used to be written after ``await self._stop_agents()``, so
+        a cancellation there left a superseded token that no settings entry
+        named and nothing would ever retry.
+        """
+        engine = self.runtime.engine
+        engine.storage.settings["identities"]["guest"] = "workspace"
+        engine.storage.save()
+        engine.storage.vault.set("relay:guest", "the superseded token")
+        original = self.vault.delete
+
+        def locked(name):
+            return UNAVAILABLE
+        self.vault.delete = locked
+
+        async def stop_forever():
+            raise asyncio.CancelledError()
+        engine._stop_agents = stop_forever
+        try:
+            with self.assertRaises(asyncio.CancelledError):
+                await self.runtime.reset_identity()
+        finally:
+            self.vault.delete = original
+            del engine._stop_agents
+
+        records = self.runtime.storage.read_pending_cleanup()
+        self.assertEqual([(r["source"], r["credentials"]) for r in records],
+                         [("reset", ["relay:guest"])],
+                         "the record must not depend on reaching the notice")
+
+    async def test_an_undeleted_reset_token_is_recorded_and_retried(self):
+        """The reset's notice promises a retry, so it must record one.
+
+        A superseded token that outlives the reset belongs to nobody and
+        nothing on disk names it, so without a record it would sit in the
+        credential store for good.
+        """
+        engine = self.runtime.engine
+        engine.storage.settings["identities"]["guest"] = "workspace"
+        engine.storage.save()
+        engine.storage.vault.set("relay:guest", "the superseded token")
+        original = self.vault.delete
+
+        def locked(name):
+            return UNAVAILABLE
+        self.vault.delete = locked
+        try:
+            results = await self.runtime.reset_identity()
+        finally:
+            self.vault.delete = original
+
+        owed = sorted({agent_id for result in results for agent_id in result["undeleted"]})
+        self.assertTrue(owed, "the reset should have been unable to delete a token")
+        records = self.runtime.storage.read_pending_cleanup()
+        self.assertEqual(sorted((r["type"], r["source"]) for r in records),
+                         [("credentials", "reset")],
+                         "one record per workspace, both scoped to the root vault")
+        self.assertEqual(records[0]["workspace"], None,
+                         "the local workspace shares the root vault")
+        self.assertEqual(sorted(records[0]["credentials"]),
+                         sorted("relay:" + agent_id for agent_id in owed))
+
+        self.vault.delete = original
+        self.runtime.retry_pending_cleanup()
+
+        for name in records[0]["credentials"]:
+            self.assertIsNone(self.vault.get(name), f"{name} should be gone")
+        self.assertEqual(self.runtime.storage.read_pending_cleanup(), [])
+
+    async def test_a_workspace_folder_that_will_not_go_keeps_the_record(self):
+        """A chat archive left on disk must not pass for a finished deletion.
+
+        rmtree used to be called with ignore_errors, so a locked or read-only
+        folder reported success: the workspace left the catalog, the record
+        was discarded, and settings.json plus history.sqlite3 stayed behind
+        with nothing pointing at them.
+        """
+        second = await self.runtime.create_workspace("Writing")
+        await self.runtime.switch_workspace(second["id"])
+        self.runtime.app.state.relay.member_remover = None
+        folder = self.runtime._workspace_directory(second["id"])
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "history.sqlite3").write_text("a chat archive", encoding="utf-8")
+
+        with unittest.mock.patch("desktop_app.runtime.shutil.rmtree",
+                                 side_effect=OSError("folder is in use")):
+            await self.runtime.delete_workspace()
+
+        self.assertTrue((folder / "history.sqlite3").exists(), "the archive is still there")
+        records = self.runtime.storage.read_pending_cleanup()
+        self.assertEqual([r["id"] for r in records], [second["id"]],
+                         "nothing else is owed, so only the folder can be holding it")
+        self.assertTrue(records[0]["data_owed"], "the record must say what is left")
+        self.assertEqual(records[0]["credentials"], [])
+        self.assertTrue([1 for kind, data in self.events
+                         if kind == "notice" and "files" in str(data).lower()],
+                        "the user must be told their files survived")
+
+    async def test_a_stranded_folder_is_retried_until_it_goes(self):
+        """Retaining the record is only useful if a later launch converges."""
+        second = await self.runtime.create_workspace("Writing")
+        await self.runtime.switch_workspace(second["id"])
+        self.runtime.app.state.relay.member_remover = None
+        folder = self.runtime._workspace_directory(second["id"])
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "history.sqlite3").write_text("a chat archive", encoding="utf-8")
+        data = Path(self.directory.name)
+        held = unittest.mock.patch("desktop_app.runtime.shutil.rmtree",
+                                   side_effect=OSError("folder is in use"))
+
+        async def relaunch():
+            await self.runtime.close()
+            self.runtime = DesktopRuntime(
+                Storage(data, self.vault),
+                lambda kind, payload: self.events.append((kind, payload)))
+
+        with held:
+            await self.runtime.delete_workspace()
+        self.assertTrue(self.runtime.storage.read_pending_cleanup(),
+                        "the first failure leaves the record")
+
+        # Two more launches where the folder is still held. The mock has to
+        # wrap the start-up itself, because that is where the retry happens.
+        for attempt in range(2):
+            await relaunch()
+            with held:
+                await self.runtime.start()
+            self.assertTrue(self.runtime.storage.read_pending_cleanup(),
+                            f"failure {attempt + 2} must not clear the record")
+
+        await relaunch()
+        await self.runtime.start()
+
+        self.assertFalse(folder.exists(), "the archive is gone once the folder releases")
+        self.assertEqual(self.runtime.storage.read_pending_cleanup(), [])
+
+    async def test_the_local_workspace_is_never_held_back_by_its_folder(self):
+        """It shares the root, so it has no folder of its own to be stuck on."""
+        self.runtime.app.state.relay.member_remover = None
+
+        await self.runtime.delete_workspace()
+
+        self.assertEqual(self.runtime.storage.read_pending_cleanup(), [],
+                         "the local workspace must not retain itself forever")
+
+    async def test_a_directory_that_will_not_flush_does_not_undo_the_deletion(self):
+        """The whole path, from the failing flush rather than a stubbed save.
+
+        The rename happens before the directory flush, so a flush failure
+        once raised out of a write that had already succeeded. delete_workspace
+        caught it, put the workspace back into memory and dropped the pending
+        record, while the file no longer listed it. Memory and disk then
+        disagreed, and the next unrelated save_catalog would have written the
+        workspace back with its directory and credentials already destroyed.
+        """
+        second = await self.runtime.create_workspace("Writing")
+        await self.runtime.switch_workspace(second["id"])
+        self.runtime.app.state.relay.member_remover = None
+        attempted = []
+        real = runtime_module.write_json_durably
+
+        def failing(path, text):
+            # Only the catalog's own flush is refused; every earlier write in
+            # this sequence has to succeed for the deletion to get that far.
+            if Path(path) != self.runtime.catalog_path:
+                return real(path, text)
+            attempted.append(path)
+            with unittest.mock.patch("desktop_app.storage._fsync_directory",
+                                     side_effect=OSError("no space left on device")):
+                return real(path, text)
+
+        with unittest.mock.patch.object(runtime_module, "write_json_durably", failing):
+            await self.runtime.delete_workspace()
+
+        self.assertTrue(attempted, "the catalog's flush should have been attempted")
+        self.assertNotIn(second["id"], {e["id"] for e in self.runtime.catalog["workspaces"]})
+        on_disk = json.loads(self.runtime.catalog_path.read_text(encoding="utf-8"))
+        self.assertNotIn(second["id"], {e["id"] for e in on_disk["workspaces"]},
+                         "memory and disk must agree once the rename has landed")
+        self.assertIn(self.runtime.active_workspace_id, self.runtime.engines,
+                      "the replacement must still be usable")
+        self.assertEqual([r["id"] for r in self.runtime.storage.read_pending_cleanup()],
+                         [second["id"]],
+                         "a power cut could still restore the old catalog, which "
+                         "would bring the workspace back empty")
+
+        self.runtime.retry_pending_cleanup()
+        self.assertEqual(self.runtime.storage.read_pending_cleanup(), [],
+                         "re-running the purge is idempotent and settles it")
+
+    async def test_an_unflushed_catalog_still_finishes_the_deletion(self):
+        """A rename that landed must not be rolled back.
+
+        The rename happens before the directory flush, so a flush failure
+        raises from a write that already succeeded. Rolling the workspace
+        back into memory there left the two disagreeing: the file no longer
+        listed it, and the next unrelated save_catalog would have written it
+        back with its directory and credentials already destroyed.
+        """
+        second = await self.runtime.create_workspace("Writing")
+        await self.runtime.switch_workspace(second["id"])
+        self.runtime.app.state.relay.member_remover = None
+        real = self.runtime.save_catalog
+        calls = []
+
+        def flaky():
+            calls.append(1)
+            if len(calls) == 1:
+                real()          # the rename lands
+                return False    # but the directory flush could not confirm it
+            return real()
+        self.runtime.save_catalog = flaky
+
+        await self.runtime.delete_workspace()
+
+        self.assertNotIn(second["id"], {e["id"] for e in self.runtime.catalog["workspaces"]})
+        on_disk = json.loads(self.runtime.catalog_path.read_text(encoding="utf-8"))
+        self.assertNotIn(second["id"], {e["id"] for e in on_disk["workspaces"]},
+                         "memory and disk must agree once the rename has landed")
+        self.assertIn(self.runtime.active_workspace_id, self.runtime.engines,
+                      "the replacement must still be usable")
+        records = self.runtime.storage.read_pending_cleanup()
+        self.assertEqual([r["id"] for r in records], [second["id"]],
+                         "the record is kept, because a power cut could restore "
+                         "the old catalog and bring the workspace back empty")
+        self.assertTrue([1 for kind, data in self.events
+                         if kind == "notice" and "next launch" in str(data).lower()],
+                        "the user must be told it will be checked again")
+
+        self.runtime.save_catalog = real
+        self.runtime.retry_pending_cleanup()
+        self.assertEqual(self.runtime.storage.read_pending_cleanup(), [],
+                         "re-running the purge is idempotent and settles it")
+
+    async def test_the_reset_records_the_owed_names_before_it_awaits(self):
+        """The record has to exist while the reset is still suspended.
+
+        Written after the await instead, a cancellation there would lose the
+        record and the notice together.
+        """
+        engine = self.runtime.engine
+        engine.storage.settings["identities"]["guest"] = "workspace"
+        engine.storage.save()
+        engine.storage.vault.set("relay:guest", "the superseded token")
+        original = self.vault.delete
+        self.vault.delete = lambda name: UNAVAILABLE
+        during = []
+        stop = engine._stop_agents
+
+        async def peek():
+            # Look, then really stop, so the re-attach later cannot collide
+            # with a connection this left open.
+            records = self.runtime.storage.read_pending_cleanup()
+            during.append(sorted(name for r in records for name in r["credentials"]))
+            await stop()
+        engine._stop_agents = peek
+        try:
+            await self.runtime.reset_identity()
+        finally:
+            self.vault.delete = original
+            del engine._stop_agents
+
+        self.assertTrue(during, "the reset should have awaited at least once")
+        self.assertEqual(during[0], ["relay:guest"],
+                         "the ledger must already be written at the first await")
+
+    async def test_a_stranded_folder_is_reported_without_blaming_the_keyring(self):
+        """A folder that will not go owes no names, so nothing would report it.
+
+        The pending-cleanup counter only ever counted credential names. A
+        workspace held back solely by its directory counted zero, so no notice
+        and no Settings line, for as long as the failure lasted.
+        """
+        second = await self.runtime.create_workspace("Writing")
+        await self.runtime.switch_workspace(second["id"])
+        self.runtime.app.state.relay.member_remover = None
+        folder = self.runtime._workspace_directory(second["id"])
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "history.sqlite3").write_text("a chat archive", encoding="utf-8")
+        data = Path(self.directory.name)
+
+        with unittest.mock.patch("desktop_app.runtime.shutil.rmtree",
+                                 side_effect=OSError("folder is in use")):
+            await self.runtime.delete_workspace()
+            self.assertEqual(self.runtime.pending_cleanup_count(), 0,
+                             "no credentials are owed; only the folder is")
+            self.assertEqual(self.runtime.pending_data_cleanup_count(), 1)
+            published = [d for k, d in self.events if k == "pending_cleanup"][-1]
+            self.assertEqual(published, {"credentials": 0, "files": 1})
+
+            await self.runtime.close()
+            self.runtime = DesktopRuntime(
+                Storage(data, self.vault),
+                lambda kind, payload: self.events.append((kind, payload)))
+            with unittest.mock.patch("desktop_app.runtime.shutil.rmtree",
+                                     side_effect=OSError("folder is in use")):
+                await self.runtime.start()
+
+        # Only what the relaunched runtimes said: the delete above already
+        # raised its own notice about the same folder.
+        notices = " ".join(str(payload) for kind, payload in self.events
+                           if kind == "notice" and "files" in str(payload).lower()).lower()
+        self.assertNotIn("credential store", notices,
+                         "the keyring is not what is wrong here")
+        self.assertIn("next launch", notices,
+                      "a later launch is where the user learns it is still stuck")
+
+    # --- an interrupted deletion ------------------------------------------
+
+    async def test_a_locked_credential_store_leaves_a_record_the_user_can_see(self):
+        """A token that outlives its workspace must not pass unnoticed.
+
+        The workspace really is deleted, so nothing on disk points at the
+        leftover credentials. The record is what lets a later launch finish
+        the job, and the count is what lets Settings say so.
+        """
+        second = await self.runtime.create_workspace("Writing")
+        await self.runtime.switch_workspace(second["id"])
+        self.runtime.app.state.relay.member_remover = None
+        original = self.runtime.engine.storage.vault.delete
+
+        def locked(name):
+            return UNAVAILABLE
+        self.runtime.engine.storage.vault.delete = locked
+        try:
+            await self.runtime.delete_workspace()
+        finally:
+            self.runtime.engine.storage.vault.delete = original
+
+        records = self.runtime.storage.read_pending_cleanup()
+        self.assertEqual([r["id"] for r in records], [second["id"]])
+        self.assertTrue(records[0]["credentials"], "the owed names must be recorded")
+        owed = [data for kind, data in self.events if kind == "pending_cleanup"]
+        self.assertTrue(owed and owed[-1]["credentials"] > 0)
+        self.assertTrue([1 for kind, data in self.events
+                         if kind == "notice" and "credential" in str(data).lower()],
+                        "the user must be told the cleanup did not finish")
+
+    async def test_a_recorded_deletion_is_finished_on_the_next_launch(self):
+        """The interrupted half is completed without any further action."""
+        second = await self.runtime.create_workspace("Writing")
+        await self.runtime.switch_workspace(second["id"])
+        self.runtime.app.state.relay.member_remover = None
+        vault = self.runtime.engine.storage.vault
+        owed_names = list(self.runtime._credential_names_for(self.runtime.engine.storage))
+        self.runtime.storage.record_workspace_deletion(
+            {"id": second["id"], "kind": "local"}, owed_names)
+
+        self.runtime.retry_pending_cleanup()
+
+        for name in owed_names:
+            self.assertIsNone(vault.get(name), f"{name} should have been deleted")
+        self.assertEqual(self.runtime.storage.read_pending_cleanup(), [])
+
+    async def test_retrying_a_finished_deletion_is_harmless(self):
+        """Idempotent, because a crash after the purge leaves the record."""
+        second = await self.runtime.create_workspace("Writing")
+        await self.runtime.switch_workspace(second["id"])
+        self.runtime.app.state.relay.member_remover = None
+        self.runtime.storage.record_workspace_deletion(
+            {"id": second["id"], "kind": "local"},
+            list(self.runtime._credential_names_for(self.runtime.engine.storage)))
+
+        self.runtime.retry_pending_cleanup()
+        self.runtime.storage.record_workspace_deletion(
+            {"id": second["id"], "kind": "local"}, ["remote-token"])
+        self.runtime.retry_pending_cleanup()
+
+        self.assertEqual(self.runtime.storage.read_pending_cleanup(), [])
+
+    async def test_a_failed_catalog_write_keeps_the_engine_registered(self):
+        """close() only closes engines it still knows about.
+
+        Dropping the engine before the catalog was written would strand its
+        relay and its port for the rest of the process, with no error.
+        """
+        engine = self.runtime.engine
+        workspace_id = self.runtime.active_workspace_id
+
+        def refuse():
+            raise OSError("disk full")
+        self.runtime.save_catalog = refuse
+        with self.assertRaises(OSError):
+            await self.runtime.delete_workspace()
+
+        self.assertIn(workspace_id, self.runtime.engines,
+                      "the engine must stay registered so close() can reach it")
+        self.assertEqual(self.runtime.active_workspace_id, workspace_id)
+        self.assertIn(workspace_id,
+                      {e["id"] for e in self.runtime.catalog["workspaces"]})
+        self.assertEqual(self.runtime.storage.read_pending_cleanup(), [],
+                         "nothing was recorded, so nothing should be owed")
+
+    async def test_the_local_workspace_directory_is_never_removed(self):
+        """The local workspace shares the root, so its directory must stay.
+
+        Every other workspace lives under workspaces/<id>. Treating the
+        local one the same way would delete settings.json, the catalog and
+        every other workspace along with it.
+        """
+        self.assertIsNone(self.runtime._workspace_directory("local"))
+        second = await self.runtime.create_workspace("Writing")
+        self.assertTrue(self.runtime._workspace_directory(second["id"]))
+
+        self.runtime.app.state.relay.member_remover = None
+        await self.runtime.delete_workspace()
+
+        self.assertTrue(self.storage.path.exists(), "the root settings must survive")
+        self.assertTrue(self.runtime.catalog_path.exists())
+
+    async def test_a_ledger_of_hostile_scopes_does_not_stop_the_app_starting(self):
+        """A record whose scope is the wrong type used to abort start-up.
+
+        re.fullmatch raises TypeError on anything that is not a string, and
+        the retry let that escape, so a corrupt file turned into a fatal
+        error rather than the dropped-and-ignored record it should have been.
+        """
+        hostile = [{"type": "credentials", "workspace": scope, "source": "reset",
+                    "credentials": ["relay:guest"]}
+                   for scope in (5, ["x"], {"a": 1}, True, 1.5, "workspace-../../etc")]
+        hostile += [{"type": "workspace", "id": bad, "kind": "local",
+                     "credentials": ["remote-token"]}
+                    for bad in (5, ["x"], {"a": 1}, True, "workspace-../../etc")]
+        self.vault.set("relay:guest", "a token that must survive a dropped record")
+        self.runtime.storage.write_pending_cleanup(hostile)
+
+        # Asserted before the retry runs: afterwards the records would be gone
+        # either way, because a retry that did reach them would also discard
+        # them, and the reader's own check would look like it had worked.
+        self.assertEqual(self.runtime.storage.read_pending_cleanup(), [],
+                         "the reader must drop a scope it cannot match")
+
+        await self.runtime.close()
+        self.runtime = DesktopRuntime(Storage(Path(self.directory.name) / "run", self.vault))
+        await self.runtime.start()
+
+        self.assertIn("relay:guest", self.vault.values,
+                      "a dropped record must not delete anything on the way past")
+
+    def test_a_hand_edited_record_cannot_point_outside_the_workspaces_folder(self):
+        """The record's id is used to build a path that is then removed."""
+        attempted = []
+        original = self.vault.delete
+        for hostile in ("../../..", "workspace-../../etc", "local/../..",
+                        "C:/Windows", "", "workspace-" + "z" * 32):
+            with self.subTest(workspace_id=hostile):
+                with self.assertRaises(ValueError):
+                    self.runtime._workspace_directory(hostile)
+                self.vault.delete = lambda name: attempted.append(name) or ABSENT
+                self.runtime.storage.ledger_path.write_text(json.dumps(
+                    [{"type": "workspace", "id": hostile, "kind": "local",
+                      "credentials": ["remote-token"]}]), encoding="utf-8")
+
+                self.runtime.retry_pending_cleanup()
+
+                self.assertEqual(attempted, [],
+                                 "a malformed id must be dropped, not acted on")
+                self.assertEqual(self.runtime.storage.read_pending_cleanup(), [])
+        self.vault.delete = original
+
+    def test_a_hand_edited_record_cannot_reach_outside_the_credential_namespace(self):
+        """Names in the file become calls into the OS credential store.
+
+        The store is shared with every other application on the machine, so
+        a hand-edited ledger must not be able to name an entry this app
+        never minted. Note what this does not do: a name the app *could*
+        have minted, such as the device's own live token, still matches and
+        would be deleted. The file lives in the user's own data directory,
+        so it is not a remote attack surface, and ruling that out would need
+        the ledger to know which identity is still current, which is
+        precisely what a record of the past cannot know.
+        """
+        attempted = []
+        original = self.vault.delete
+
+        def record(name):
+            attempted.append(name)
+            return original(name)
+        self.vault.delete = record
+        self.runtime.storage.ledger_path.write_text(json.dumps(
+            [{"type": "credentials", "workspace": None, "source": "reset",
+              "credentials": ["SomeOtherApp:token", "../../relay:device", "relay:",
+                              "relay:" + "x" * 200, "provider:has space",
+                              "remote-token", "relay:guest"]}]), encoding="utf-8")
+
+        self.runtime.retry_pending_cleanup()
+
+        rejected = {"SomeOtherApp:token", "../../relay:device", "relay:",
+                    "relay:" + "x" * 200, "provider:has space"}
+        self.assertFalse(rejected & set(attempted),
+                         "a name the app never mints must never be passed on")
+        self.assertEqual(set(attempted) & {"remote-token", "relay:guest"},
+                         {"remote-token", "relay:guest"},
+                         "the names the app does mint are still cleaned up")
+        self.assertEqual(self.runtime.storage.read_pending_cleanup(), [])
 
 
 if __name__ == "__main__":
