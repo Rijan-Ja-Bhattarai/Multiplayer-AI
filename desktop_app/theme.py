@@ -308,7 +308,7 @@ QPushButton#danger { background: #000000; color: #ffffff; }
 QLineEdit, QPlainTextEdit, QComboBox { background: #000000; color: #ffffff; border: 1px solid #555555; border-radius: 7px; padding: 10px; selection-background-color: #ffffff; selection-color: #000000; }
 QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus { border: 1px solid #ffffff; }
 QComboBox::drop-down { border: 0; width: 24px; }
-QComboBox QAbstractItemView { background: #000000; color: #ffffff; selection-background-color: #000000; selection-color: #ffffff; padding: 5px; }
+QComboBox QAbstractItemView { background: #000000; color: #ffffff; selection-background-color: #ffffff; selection-color: #000000; padding: 5px; }
 QCheckBox { spacing: 8px; color: #ffffff; }
 QCheckBox::indicator { width: 16px; height: 16px; border-radius: 4px; background: #000000; border: 1px solid #ffffff; }
 QCheckBox::indicator:checked { background: #ffffff; border-color: #ffffff; }
