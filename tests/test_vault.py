@@ -68,6 +68,15 @@ def vault_with(backend):
     return vault
 
 
+def leftovers(directory):
+    """Temporary files a durable write should have renamed away.
+
+    The name is no longer a fixed ``<name>.tmp`` because two writers must not
+    share one, so this looks for the pattern rather than a single path.
+    """
+    return sorted(entry.name for entry in Path(directory).glob("*.tmp"))
+
+
 class VaultTests(unittest.TestCase):
     def test_reads_and_writes_under_the_app_service(self) -> None:
         backend = FakeBackend()
@@ -259,8 +268,34 @@ class SettingsFileTests(unittest.TestCase):
 
             self.assertEqual(json.loads(Path(directory, "settings.json").read_text(encoding="utf-8")),
                              {"theme": "miku"})
-            self.assertFalse(Path(directory, "settings.json.tmp").exists(),
+            self.assertEqual(leftovers(directory), [],
                              "the temporary file must be renamed, not left behind")
+
+    def test_two_saves_never_share_a_temporary_file(self) -> None:
+        """A shared name let concurrent writers put stale contents on disk.
+
+        Settings are written from the UI thread and from the runtime's own,
+        so one could rename the other's half-written document into place and
+        the caller would still believe its write landed.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(directory, FakeBackend())
+            storage.settings["theme"] = "miku"
+            seen = []
+            real = Path.open
+
+            def record(self, *args, **kwargs):
+                if str(self).endswith(".tmp"):
+                    seen.append(self.name)
+                return real(self, *args, **kwargs)
+            with mock.patch.object(Path, "open", record):
+                storage.save()
+                storage.save()
+
+            self.assertEqual(len(seen), 2, "both saves should have used a temporary file")
+            self.assertEqual(len(set(seen)), 2,
+                             "two concurrent writers must not share one temporary name")
+            self.assertEqual(leftovers(directory), [])
 
 
 class DurableWriteTests(unittest.TestCase):
@@ -270,79 +305,63 @@ class DurableWriteTests(unittest.TestCase):
     Without it a rename can be lost, leaving the previous contents or no file
     at all, which for the cleanup ledger means credentials that nothing on
     disk points at any more.
+
+    The directory flush is stubbed rather than driven through a real POSIX
+    filesystem. Pretending ``os.name`` is ``posix`` on Windows looks
+    harmless and is not: ``pathlib`` chooses its class from ``os.name`` at
+    construction, so every ``Path(...)`` inside the writer starts raising
+    UnsupportedOperation. The contract worth checking is that the flush is
+    attempted after the rename and that its failure is reported rather than
+    raised, and that is stub-independent.
     """
-
-    def calls(self):
-        """Record the fsyncs and directory opens a write performs.
-
-        A directory is never really opened: Windows will not allow it, so the
-        POSIX branch is exercised by patching os.name instead.
-        """
-        events = []
-        real_fsync, real_open = os.fsync, os.open
-        directories = set()
-
-        def fsync(handle):
-            mode = os.fstat(handle).st_mode
-            events.append(("fsync", mode))
-            if handle not in directories:
-                # A directory descriptor stands in for os.devnull, which
-                # cannot really be flushed; the file itself is.
-                real_fsync(handle)
-
-        def open_it(path, *args, **kwargs):  # noqa: A002 - mirrors os.open
-            events.append(("open", str(path)))
-            if Path(path).is_dir():
-                # A real descriptor, so os.fstat and os.fsync still accept it.
-                handle = real_open(os.devnull, os.O_RDONLY)
-                directories.add(handle)
-                return handle
-            return real_open(path, *args, **kwargs)
-
-        return events, fsync, open_it
-
-    def with_stubs(self, action, posix):
-        events, fsync, open_it = self.calls()
-        with mock.patch.object(os, "fsync", fsync), mock.patch.object(os, "open", open_it), \
-                mock.patch.object(os, "name", "posix" if posix else "nt"):
-            action()
-        return events
 
     def test_the_temporary_file_is_flushed_to_disk_before_the_rename(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory, "ledger.json")
+            flushed = []
+            real_fsync = os.fsync
 
-            events = self.with_stubs(lambda: write_json_durably(target, "{}"), posix=True)
+            def fsync(handle):
+                flushed.append(os.fstat(handle).st_mode)
+                real_fsync(handle)
+            with mock.patch.object(os, "fsync", fsync):
+                self.assertTrue(write_json_durably(target, "{}"))
 
-            regular = [mode for kind, mode in events
-                       if kind == "fsync" and mode & stat.S_IFREG]
-            self.assertTrue(regular, "the temporary file's bytes must be fsynced")
-            self.assertEqual(Path(directory, "ledger.json").read_text(encoding="utf-8"), "{}")
+            self.assertTrue([mode for mode in flushed if mode & stat.S_IFREG],
+                            "the temporary file's bytes must be fsynced")
+            self.assertEqual(target.read_text(encoding="utf-8"), "{}")
 
     def test_the_parent_directory_is_flushed_after_the_rename(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory, "ledger.json")
+            order = []
+            real_replace = Path.replace
 
-            events = self.with_stubs(lambda: write_json_durably(target, "{}"), posix=True)
+            def replace(self, other):
+                order.append("rename")
+                return real_replace(self, other)
 
-            flushed = [index for index, (kind, mode) in enumerate(events)
-                       if kind == "fsync" and mode & stat.S_IFREG]
-            renamed = events.index(("open", str(Path(directory))))
-            self.assertTrue(flushed and max(flushed) < renamed,
-                            "the contents must reach the disk before the rename does")
-            self.assertEqual(events[-1][0], "fsync",
-                             "the directory entry itself is flushed last")
+            def flush(path):
+                order.append("flush")
+            with mock.patch.object(Path, "replace", replace), \
+                    mock.patch("desktop_app.storage._fsync_directory", flush):
+                write_json_durably(target, "{}")
 
-    def test_the_directory_flush_is_skipped_on_windows(self) -> None:
-        """Windows will not open a directory for this, and does not need to."""
-        with tempfile.TemporaryDirectory() as directory:
-            target = Path(directory, "ledger.json")
+            self.assertEqual(order, ["rename", "flush"],
+                             "the directory entry is only durable after the rename")
 
-            events = self.with_stubs(lambda: write_json_durably(target, "{}"), posix=False)
+    def test_the_directory_flush_is_asked_for_on_every_platform(self) -> None:
+        """Windows skips it inside the helper, but the writer still asks."""
+        for platform in ("posix", "nt"):
+            with self.subTest(platform=platform):
+                with tempfile.TemporaryDirectory() as directory:
+                    target = Path(directory, "ledger.json")
+                    asked = []
+                    with mock.patch("desktop_app.storage._fsync_directory",
+                                    side_effect=lambda path: asked.append(path)):
+                        write_json_durably(target, "{}")
 
-            self.assertEqual([e for e in events if e[0] == "open"], [])
-            self.assertTrue([e for e in events if e[0] == "fsync"],
-                            "the file itself is still flushed")
+                    self.assertEqual(asked, [Path(directory)])
 
     def test_an_unflushed_directory_is_reported_rather_than_raised(self) -> None:
         """The rename has already happened, so raising would undo it.
@@ -354,9 +373,8 @@ class DurableWriteTests(unittest.TestCase):
             target = Path(directory, "ledger.json")
             written = []
 
-            with mock.patch.object(os, "name", "posix"), \
-                    mock.patch("desktop_app.storage._fsync_directory",
-                               side_effect=OSError("no space left on device")):
+            with mock.patch("desktop_app.storage._fsync_directory",
+                            side_effect=OSError("no space left on device")):
                 written.append(write_json_durably(target, "{}"))
 
             self.assertEqual(written, [False], "False, not an exception")
@@ -377,18 +395,20 @@ class DurableWriteTests(unittest.TestCase):
             self.assertFalse(target.exists())
 
     def test_removing_the_final_record_flushes_the_directory(self) -> None:
+        """A lost unlink would resurrect a ledger of finished work for ever."""
         with tempfile.TemporaryDirectory() as directory:
             storage = Storage(directory, FakeBackend())
             storage.record_owed_credentials(["relay:guest"], "member")
             self.assertTrue(storage.ledger_path.exists())
+            asked = []
 
-            events = self.with_stubs(
-                lambda: storage.discard_pending_cleanup(
-                    {"type": "credentials", "workspace": None, "source": "member"}),
-                posix=True)
+            with mock.patch("desktop_app.storage._fsync_directory",
+                            side_effect=lambda path: asked.append(path)):
+                storage.discard_pending_cleanup(
+                    {"type": "credentials", "workspace": None, "source": "member"})
 
             self.assertFalse(storage.ledger_path.exists())
-            self.assertIn(("open", str(Path(directory))), events)
+            self.assertEqual(asked, [Path(directory)])
 
 
 class PendingCleanupRecordTests(unittest.TestCase):

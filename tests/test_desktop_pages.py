@@ -68,6 +68,100 @@ def window(qt_app, storage):
 # --- first run -----------------------------------------------------------
 
 
+def test_every_nav_button_explains_its_page(window) -> None:
+    """A page whose name does not describe it needs saying out loud."""
+    for button in window.nav_buttons:
+        assert button.toolTip(), f"a nav button with no tooltip: {button.text()!r}"
+    assert set(win.PAGE_HELP) == {key for _, key in win.PAGES}, (
+        "every page needs an entry, or a tooltip is about to be missing")
+
+
+def test_the_sidebar_says_when_there_is_nothing_to_chat_to(window) -> None:
+    """An empty list read as a hole rather than as an absence of anything."""
+    window.agents = []
+    window.conversations = {}
+    window.render_agents()
+
+    assert not window.chats_hint.isHidden()
+    assert "Nothing" in window.chats_hint.text()
+
+
+def test_the_sidebar_hint_goes_once_there_is_something(window) -> None:
+    window.agents = []
+    window.render_agents()
+    assert not window.chats_hint.isHidden()
+
+    window.agents = [{"id": "model", "online": True, "provider": "ollama", "model": "m"}]
+    window.render_agents()
+
+    assert window.chats_hint.isHidden()
+
+
+def test_the_device_identity_is_shown_on_the_profile_card(window, tmp_path) -> None:
+    """It used to sit on its own line beside a card already saying 'This device'.
+
+    Someone reading their identity out to join a workspace should find it in
+    the place that names them, not on a line of its own above it. The
+    history directory is a real path because the handler opens it, and a
+    relative one lands in the repository.
+    """
+    window.network_event("workspace", {
+        "id": "local", "name": "My workspace", "remote": False,
+        "self": "device-abc123", "port": 5000,
+        "history_directory": str(tmp_path / "history")})
+
+    assert window.profile_identity.text() == "device-abc123"
+    assert window.profile_identity.toolTip(), "it has to be explainable on hover"
+
+
+def test_working_is_shown_while_a_command_is_in_flight(window) -> None:
+    """Every command goes through one place, so all of them get feedback."""
+    window.ready = True
+    window.network.submit = lambda *args, **kwargs: "request-1"
+
+    window.command("join_workspace")
+
+    assert window.busy, "submitting work must show that the app is waiting"
+    assert not window.progress.isHidden()
+
+    window.command_success("request-1", None)
+
+    assert not window.busy
+    assert window.progress.isHidden()
+
+
+def test_two_overlapping_commands_do_not_clear_the_indicator_early(window) -> None:
+    """The first to finish must not report done while the second is running."""
+    window.ready = True
+    submitted = iter(["request-1", "request-2"])
+    window.network.submit = lambda *args, **kwargs: next(submitted)
+
+    window.command("join_workspace")
+    window.command("create_workspace")
+    window.command_success("request-1", None)
+
+    assert window.busy, "one command is still in flight"
+
+    window.command_failure("request-2", "nope")
+
+    assert not window.busy
+
+
+def test_a_command_refused_before_submitting_leaves_no_busy_state(window) -> None:
+    """Refused while starting up is a notice, not something to wait for."""
+    window.ready = False
+    window.network.submit = lambda *args, **kwargs: "should-not-happen"
+    # The bar is up because the app is still starting; a refused command
+    # must leave that alone rather than clearing it.
+    startup_bar = not window.progress.isHidden()
+
+    window.command("join_workspace")
+
+    assert not window.busy, "nothing was submitted, so nothing is in flight"
+    assert not window.progress.isHidden() == startup_bar, (
+        "the startup indicator must not be disturbed by a refused command")
+
+
 def test_an_empty_workspace_shows_a_welcome_instead_of_three_zeroes(window) -> None:
     """A first-run user should be told what to do, not shown three zeroes.
 

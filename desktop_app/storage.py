@@ -2,6 +2,7 @@
 import json
 import os
 import re
+import tempfile
 import threading
 from pathlib import Path
 from uuid import uuid4
@@ -56,7 +57,15 @@ def write_json_durably(path, text):
         ``True`` when the directory was flushed, ``False`` when the contents
         were replaced but that could not be confirmed.
     """
-    temporary = path.with_suffix(path.suffix + ".tmp")
+    # A unique name per call, not one shared "<name>.tmp". Settings are
+    # written from the UI thread and from the runtime's own, so a fixed name
+    # let two writers share a file: one could rename the other's half-written
+    # document into place, putting stale contents on disk after the caller
+    # had been told the write succeeded.
+    descriptor, name = tempfile.mkstemp(dir=str(path.parent),
+                                        prefix=path.name + ".", suffix=".tmp")
+    os.close(descriptor)
+    temporary = Path(name)
     with temporary.open("w", encoding="utf-8") as handle:
         handle.write(text)
         handle.flush()

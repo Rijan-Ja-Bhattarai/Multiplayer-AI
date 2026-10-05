@@ -60,6 +60,18 @@ PAGES = (
     ("Settings", "settings"),
 )
 PAGE_TITLES = tuple(f"#  {key}" for _, key in PAGES)
+
+# Tooltips for the navigation buttons. Every one of them is reachable from
+# the keyboard and from the rail, so a page whose name does not describe its
+# contents needs saying out loud.
+PAGE_HELP = {
+    "overview": "What is in this workspace, and what to do next",
+    "agents": "Every model agent on this workspace, online or not",
+    "conversations": "Shared conversations and the messages in them",
+    "providers": "Where models come from: local, hosted, or your own endpoint",
+    "resources": "Disk, memory and what this device is using",
+    "settings": "Appearance, privacy and resetting this device's identity",
+}
 RESOURCES_PAGE = 4
 SETTINGS_PAGE = 5
 
@@ -102,6 +114,7 @@ class MainWindow(QMainWindow):
         self.live_requests = set()
         self.workspace_buttons = {}
         self.callbacks = {}
+        self.busy = False
         self.toast_error = False
         self.request_count = 0
         self.ready = False
@@ -181,11 +194,12 @@ class MainWindow(QMainWindow):
         side.setSpacing(8)
         self.workspace_label = label("My workspace", "heading", True)
         side.addWidget(self.workspace_label)
-        side.addWidget(label("Your intelligence, connected.", "muted"))
         self.workspace_settings_button = action("Workspace settings", self.manage_workspace, name="ghost")
         self.workspace_settings_button.setEnabled(False)
+        self.workspace_settings_button.setToolTip(
+            "Rename, invite a device to, or delete this workspace")
         side.addWidget(self.workspace_settings_button)
-        side.addSpacing(25)
+        side.addSpacing(18)
         side.addWidget(label("WORKSPACE", "eyebrow"))
         self.nav_buttons = []
         for index, (name, key) in enumerate(PAGES):
@@ -193,20 +207,34 @@ class MainWindow(QMainWindow):
             button.setIcon(navigation_icon(key, color(self.theme, "text")))
             button.setIconSize(QSize(20, 20))
             button.setCheckable(True)
+            button.setToolTip(PAGE_HELP[key])
             self.nav_buttons.append(button)
             side.addWidget(button)
-        side.addSpacing(23)
-        side.addWidget(label("CHATS AND AGENTS", "eyebrow"))
+        side.addSpacing(16)
+        chats = QHBoxLayout()
+        chats.setContentsMargins(15, 0, 15, 0)
+        self.chats_heading = label("CHATS AND AGENTS", "eyebrow")
+        chats.addWidget(self.chats_heading)
+        chats.addStretch()
+        # The list below is blank until something is connected, which read as
+        # a hole in the sidebar rather than as an absence of anything.
+        self.chats_hint = label("Nothing yet", "muted", True)
+        self.chats_hint.setStyleSheet("font-size:11px")
+        # The sidebar is 238px wide; letting this wrap put it on a line of its
+        # own under the heading, which read as a mistake rather than a note.
+        self.chats_hint.setWordWrap(False)
+        chats.addWidget(self.chats_hint)
+        side.addLayout(chats)
         self.sidebar_agents = QListWidget()
         self.sidebar_agents.setMaximumHeight(245)
+        self.sidebar_agents.setToolTip("Every conversation and agent you can open")
         self.sidebar_agents.itemClicked.connect(lambda item: self.select_agent(item.data(Qt.ItemDataRole.UserRole)))
         side.addWidget(self.sidebar_agents)
         side.addStretch()
         self.connection_status = label("●  Starting your network…", "online", True)
+        self.connection_status.setToolTip(
+            "Whether this device is talking to its own relay. Unlocked keys are needed to send.")
         side.addWidget(self.connection_status)
-        self.identity_label = label("Creating a private device identity", "muted", True)
-        self.identity_label.setStyleSheet("font-size:11px")
-        side.addWidget(self.identity_label)
         side.addSpacing(14)
         profile, row = frame("profile", QHBoxLayout)
         row.setContentsMargins(10, 16, 10, 16)
@@ -218,8 +246,17 @@ class MainWindow(QMainWindow):
                              + " color:" + color(self.theme, "on_accent") + ";")
         row.addWidget(avatar)
         copy = QVBoxLayout()
-        copy.addWidget(label("This device"))
-        copy.addWidget(label("Desktop app", "muted"))
+        copy.setSpacing(1)
+        # The device identity used to sit on its own line just above this
+        # card, next to a card that already said "This device". One line
+        # carrying the actual id is both shorter and more use to somebody
+        # who has to read it out to join someone else's workspace.
+        self.profile_identity = label("Starting…")
+        self.profile_identity.setToolTip(
+            "This device's identity. Someone inviting you to a workspace will "
+            "need it.")
+        copy.addWidget(self.profile_identity)
+        copy.addWidget(label("This device", "muted"))
         row.addLayout(copy)
         side.addWidget(profile)
         shell.addWidget(sidebar)
@@ -246,7 +283,13 @@ class MainWindow(QMainWindow):
         body_layout.addWidget(self.toast)
         self.progress = QProgressBar()
         self.progress.setRange(0, 0)
+        self.progress.setToolTip("Waiting on the network")
         body_layout.addWidget(self.progress)
+        # Beside the bar rather than replacing it, so the message and the
+        # movement reinforce each other instead of competing.
+        self.busy_label = label("", "muted", True)
+        self.busy_label.hide()
+        body_layout.addWidget(self.busy_label)
         self.stack = QStackedWidget()
         self.stack.addWidget(self.overview_page())
         self.stack.addWidget(self.agents_page())
@@ -1014,6 +1057,9 @@ class MainWindow(QMainWindow):
                 listing.addItem(item)
                 if target == self.selected:
                     listing.setCurrentItem(item)
+        # The list is blank until something is connected, which read as a
+        # hole in the sidebar rather than as an absence of anything.
+        self.chats_hint.setVisible(not self.sidebar_agents.count())
         self.stat_values[0].setText(str(len(models)))
         self.stat_values[1].setText(str(sum(agent["online"] for agent in models)))
         self.stat_values[2].setText(str(self.request_count))
@@ -1308,16 +1354,41 @@ class MainWindow(QMainWindow):
             return
         request_id = self.network.submit(method, *args)
         self.callbacks[request_id] = (success, failure)
+        self.busy_changed(len(self.callbacks) + 1)
+
+    def busy_changed(self, in_flight):
+        """Show that the app is waiting on the network, and what for.
+
+        Every command goes through here, so joining a workspace, switching
+        to one and connecting a model all get the same feedback rather than
+        only the ones that happened to remember it. Counted rather than
+        toggled, because two commands can overlap and the first to finish
+        must not clear the indicator while the second is still running.
+        """
+        if in_flight and not self.busy:
+            self.busy = True
+            self.progress.show()
+            self.busy_label.setText("  Working…")
+        elif not in_flight and self.busy:
+            self.busy = False
+            self.progress.hide()
+            self.busy_label.setText("")
+        if in_flight:
+            self.busy_label.setVisible(True)
+        else:
+            self.busy_label.setVisible(False)
 
     @Slot(str, object)
     def command_success(self, request_id, result):
         success, _ = self.callbacks.pop(request_id, (None, None))
+        self.busy_changed(len(self.callbacks))
         if success:
             success(result)
 
     @Slot(str, str)
     def command_failure(self, request_id, message):
         _, failure = self.callbacks.pop(request_id, (None, None))
+        self.busy_changed(len(self.callbacks))
         if failure:
             failure(message)
         else:
@@ -1376,7 +1447,7 @@ class MainWindow(QMainWindow):
             self.identity = data["self"]
             self.port = data["port"]
             self.workspace_label.setText(data["name"])
-            self.identity_label.setText(data["self"])
+            self.profile_identity.setText(data["self"])
             self.invite_button.setEnabled(self.ready and not self.remote)
             if changed:
                 self.request_count = 0
