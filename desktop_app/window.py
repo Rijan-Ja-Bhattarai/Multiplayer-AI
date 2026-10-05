@@ -11,9 +11,9 @@ from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QSize, Qt, QTimer, 
 from PySide6.QtGui import (QGuiApplication, QIcon, QKeySequence, QPixmap, QPainter,
                            QColor, QDesktopServices, QFont, QPalette, QShortcut)
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QFrame,
-    QGraphicsOpacityEffect, QGridLayout, QHBoxLayout, QInputDialog, QLineEdit,
-    QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QProgressBar,
-    QScrollArea, QStackedWidget, QVBoxLayout, QWidget)
+    QGraphicsOpacityEffect, QGridLayout, QHBoxLayout, QInputDialog, QLabel,
+    QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
+    QProgressBar, QScrollArea, QStackedWidget, QVBoxLayout, QWidget)
 
 from network_a2a.persistence import HistoryStore, model_context
 from network_a2a.content import MAX_MESSAGE_BYTES, content_summary, validate_content
@@ -76,24 +76,63 @@ RESOURCES_PAGE = 4
 SETTINGS_PAGE = 5
 
 
-def app_icon(theme_name=DARK):
-    """The window and taskbar icon, drawn in the accent colour.
+def app_mark(theme_name=DARK, initial="M", size=64):
+    """The rounded accent tile the app is recognised by.
 
     Painted rather than themed, so the accent is read from the palette
-    instead of hardcoded.
+    instead of hardcoded, and drawn at whatever size is asked for so the
+    window icon and the sidebar avatar stay the same mark rather than
+    becoming two hand-built approximations of each other.
     """
-    pixmap = QPixmap(64, 64)
+    pixmap = QPixmap(size, size)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
     painter.setBrush(QColor(color(theme_name, "accent")))
     painter.setPen(Qt.PenStyle.NoPen)
-    painter.drawRoundedRect(0, 0, 64, 64, 20, 20)
+    radius = round(size * 20 / 64)
+    painter.drawRoundedRect(0, 0, size, size, radius, radius)
     painter.setPen(QColor(color(theme_name, "on_accent")))
-    painter.setFont(QFont("Segoe UI", 27, QFont.Weight.Bold))
-    painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "M")
+    painter.setFont(QFont("Segoe UI", max(1, round(size * 27 / 64)), QFont.Weight.Bold))
+    painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, initial)
     painter.end()
-    return QIcon(pixmap)
+    return pixmap
+
+
+def app_icon(theme_name=DARK):
+    """The window and taskbar icon, drawn in the accent colour."""
+    return QIcon(app_mark(theme_name))
+
+
+def device_initial(identity):
+    """The single letter this device's avatar carries.
+
+    Taken from the identity so two devices on one screen can be told apart,
+    which a fixed mark cannot do. The identity is only known once the
+    runtime has started, so an unidentified device gets a question mark
+    rather than a blank, and it is never allowed to be an empty string,
+    which would draw an empty tile that looks like a missing image.
+    """
+    return (identity or "").strip()[:1].upper() or "?"
+
+
+def device_avatar(theme_name, identity, size=34):
+    """A circular avatar carrying this device's initial on the app's mark.
+
+    The sidebar used to set its text to " M " with a fixed width but no
+    height and a 14px radius, which drew a rounded rectangle of whatever
+    height the layout gave it rather than the circle it was aiming at. It
+    is painted at twice the size and scaled down instead, so the curve is
+    the real one and it stays crisp on a dense display.
+    """
+    widget = QLabel()
+    widget.setFixedSize(size, size)
+    widget.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    mark = app_mark(theme_name, device_initial(identity), size * 2)
+    mark.setDevicePixelRatio(2)
+    widget.setPixmap(mark)
+    widget.setAccessibleName(f"This device, {identity or 'not identified yet'}")
+    return widget
 
 
 class MainWindow(QMainWindow):
@@ -187,11 +226,23 @@ class MainWindow(QMainWindow):
         self.help_button.setToolTip("Project documentation")
         rail_layout.addWidget(self.help_button)
         shell.addWidget(rail)
-        sidebar, side = frame("sidebar")
+        sidebar, outer = frame("sidebar")
         sidebar.setFixedWidth(238)
         self.sidebar = sidebar
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        # The user panel has to run edge to edge, the way the sidebar it
+        # belongs to does. It used to be a child of a layout carrying 14px
+        # side margins, so its background stopped that far short on both
+        # sides and read as a panel clipped by the window rather than as a
+        # footer. Everything above it keeps those margins; the footer is
+        # separated by a hairline instead, as in the dark theme.
+        body = QWidget()
+        body.setObjectName("sidebarBody")
+        side = QVBoxLayout(body)
         side.setContentsMargins(14, 22, 14, 0)
         side.setSpacing(8)
+        outer.addWidget(body, 1)
         self.workspace_label = label("My workspace", "heading", True)
         side.addWidget(self.workspace_label)
         self.workspace_settings_button = action("Workspace settings", self.manage_workspace, name="ghost")
@@ -235,15 +286,11 @@ class MainWindow(QMainWindow):
         self.connection_status.setToolTip(
             "Whether this device is talking to its own relay. Unlocked keys are needed to send.")
         side.addWidget(self.connection_status)
-        side.addSpacing(14)
         profile, row = frame("profile", QHBoxLayout)
-        row.setContentsMargins(10, 16, 10, 16)
-        avatar = label(" M ")
+        row.setContentsMargins(12, 11, 12, 12)
+        row.setSpacing(10)
+        avatar = device_avatar(self.theme, self.identity)
         self.avatar = avatar
-        avatar.setFixedWidth(34)
-        avatar.setStyleSheet("background:" + color(self.theme, "accent")
-                             + "; border-radius:14px; padding:6px; font-weight:700;"
-                             + " color:" + color(self.theme, "on_accent") + ";")
         row.addWidget(avatar)
         copy = QVBoxLayout()
         copy.setSpacing(1)
@@ -258,7 +305,7 @@ class MainWindow(QMainWindow):
         copy.addWidget(self.profile_identity)
         copy.addWidget(label("This device", "muted"))
         row.addLayout(copy)
-        side.addWidget(profile)
+        outer.addWidget(profile)
         shell.addWidget(sidebar)
         body = QWidget()
         body_layout = QVBoxLayout(body)
@@ -317,6 +364,22 @@ class MainWindow(QMainWindow):
         # event, so the first paint never shows the welcome and the
         # statistics at the same time.
         self.update_overview_state()
+
+    def refresh_avatar(self):
+        """Repaint the device avatar from the theme and the current identity.
+
+        The avatar carries two things that both change under it: the accent
+        it is filled with follows the theme, and the initial it carries
+        follows the identity, which only arrives once the runtime starts.
+        Called from both places rather than at construction, since the
+        identity is empty until then.
+        """
+        if not hasattr(self, "avatar"):
+            return
+        mark = app_mark(self.theme, device_initial(self.identity),
+                        self.avatar.width() * 2)
+        mark.setDevicePixelRatio(2)
+        self.avatar.setPixmap(mark)
 
     def install_shortcuts(self):
         """Keyboard navigation, so the app is usable without a mouse."""
@@ -916,9 +979,7 @@ class MainWindow(QMainWindow):
         self.setWindowIcon(app_icon(name))
         self.style_toast()
         self.join_button.setStyleSheet("color:" + color(name, "success"))
-        self.avatar.setStyleSheet("background:" + color(name, "accent")
-                                  + "; border-radius:14px; padding:6px; font-weight:700;"
-                                  + " color:" + color(name, "on_accent") + ";")
+        self.refresh_avatar()
         for button, (_, key) in zip(self.nav_buttons, PAGES):
             button.setIcon(navigation_icon(key, color(name, "text")))
         for provider, logo in self.provider_logos.items():
@@ -1502,6 +1563,7 @@ class MainWindow(QMainWindow):
             self.invite_button.setEnabled(self.ready and not self.remote)
             if changed:
                 self.request_count = 0
+            self.refresh_avatar()
             self.render_agents()
             self.render_messages()
         elif event == "workspaces":

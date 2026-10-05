@@ -23,7 +23,8 @@ from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton  # noqa: E4
 
 from desktop_app import window as win  # noqa: E402
 from desktop_app.storage import ABSENT, REMOVED, Storage  # noqa: E402
-from desktop_app.theme import DARK, LIGHT, MIKU, THEME_CHOICES  # noqa: E402
+from desktop_app.theme import (DARK, LIGHT, MIKU, THEME_CHOICES, THEME_NAMES,
+                               THEMES)  # noqa: E402
 
 
 class MemoryVault:
@@ -210,6 +211,99 @@ def test_a_saved_conversation_also_puts_the_welcome_away(window) -> None:
     window.render_agents()
 
     assert window.welcome_card.isHidden(), "the welcome covered a real conversation"
+
+
+# --- the user panel ------------------------------------------------------
+
+
+def test_the_user_panel_reaches_the_edges_of_the_sidebar(window, qt_app) -> None:
+    """It used to be a child of a layout carrying 14px side margins.
+
+    So its background stopped that far short on both sides and read as a
+    panel clipped by the window rather than as a footer of the sidebar. It
+    now hangs off the sidebar frame itself, the width is the sidebar's
+    width, and the inset is inside it where the text needs it.
+    """
+    window.resize(1180, 760)
+    window.show()
+    qt_app.processEvents()
+    footer = window.avatar.parentWidget()
+
+    assert footer.parentWidget() is window.sidebar, (
+        "the panel is inside the padded body, so it inherits its margins "
+        "and cannot reach the edge")
+    assert footer.width() == window.sidebar.width(), (
+        f"the panel is {footer.width()}px against a {window.sidebar.width()}px sidebar")
+    left, right = footer.layout().contentsMargins().left(), footer.layout().contentsMargins().right()
+    assert left and right, "the panel's text has no inset, so it will touch the window edge"
+
+
+def test_the_avatar_is_a_painted_mark_and_not_a_letter(window) -> None:
+    """It used to be the text " M " on a fixed width with no fixed height.
+
+    With a 14px radius and a height the layout chose, that drew a rounded
+    rectangle of arbitrary height rather than the circle it was aiming at.
+    """
+    assert not window.avatar.text(), (
+        f"the avatar is still a text label, {window.avatar.text()!r}")
+    assert not window.avatar.pixmap().isNull(), "the avatar carries no painted mark"
+    assert window.avatar.width() == window.avatar.height(), (
+        f"the avatar is {window.avatar.width()}x{window.avatar.height()}, not square")
+
+
+def test_the_avatar_follows_the_identity_and_the_theme(window) -> None:
+    """The identity arrives after the window is built, and the theme changes later."""
+    window.identity = "device-77ac8845"
+    window.refresh_avatar()
+    before = window.avatar.pixmap().toImage()
+
+    window.apply_theme(LIGHT)
+    light = window.avatar.pixmap().toImage()
+    assert light != before, "the avatar ignored the theme change"
+
+    window.apply_theme(MIKU)
+    miku = window.avatar.pixmap().toImage()
+    assert miku != light, "the avatar kept the previous theme's accent"
+
+
+@pytest.mark.parametrize("identity,expected", [
+    ("device-77ac8845", "D"),
+    ("relay", "R"),
+    # The identity is only known once the runtime has started, and it can
+    # arrive with whitespace in it. Neither may draw an empty tile, which
+    # reads as a missing image rather than as a device not yet named.
+    ("", "?"),
+    ("   ", "?"),
+    (None, "?"),
+])
+def test_the_avatar_initial_is_never_blank(identity, expected) -> None:
+    """A fixed mark cannot tell two devices apart, so the initial comes
+    from the identity. Asserted on the letter rather than on pixels: this
+    platform installs no fonts, so Qt renders no text at all and two
+    different initials paint identically."""
+    assert win.device_initial(identity) == expected
+
+
+@pytest.mark.parametrize("name", THEME_NAMES)
+def test_the_user_panel_is_divided_by_a_border_in_every_theme(name) -> None:
+    """All three themes put the panel on the sidebar's own colour.
+
+    That is what makes it read as one surface, so the border is the only
+    thing dividing the footer from the list above it and it has to exist
+    wherever the colours match.
+    """
+    rule = next((line for line in THEMES[name].splitlines()
+                 if line.startswith("QFrame#profile")), "")
+    assert rule, f"{name} has no rule for the user panel at all"
+    assert "border-top" in rule, (
+        f"{name} puts the panel on the sidebar colour with nothing dividing it")
+
+    body = next((line for line in THEMES[name].splitlines()
+                 if "sidebarBody" in line), "")
+    assert "transparent" in body, (
+        f"{name} paints the padded body as a panel, so the footer is "
+        f"floating on a second surface")
+
 
 
 def test_the_device_identity_is_shown_on_the_profile_card(window, tmp_path) -> None:

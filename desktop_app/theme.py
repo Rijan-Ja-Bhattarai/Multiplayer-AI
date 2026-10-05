@@ -469,7 +469,8 @@ QMainWindow, QDialog { background: @@surface_base@@; }
 QFrame#rail { background: @@surface_rail@@; border: none; }
 QFrame#sidebar { background: @@surface_sidebar@@; border: none; }
 QFrame#topbar { background: @@surface_raised@@; border-bottom: 1px solid @@topbar_border@@; }
-QFrame#profile { background: @@surface_profile@@; border: none; }
+QFrame#profile { background: @@surface_profile@@; border: none; border-top: 1px solid @@border@@; }
+    QWidget#sidebarBody { background: transparent; }
 QFrame#card, QFrame#stat, QFrame#settings { background: @@surface@@; border: 1px solid @@border@@; border-radius: 12px; }
 QFrame#hero { background: @@surface_hero@@; border: 1px solid @@border_hero@@; border-radius: 16px; }
 QLabel { background: transparent; }
