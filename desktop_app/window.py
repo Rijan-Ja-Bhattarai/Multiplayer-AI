@@ -272,6 +272,12 @@ class MainWindow(QMainWindow):
         top_layout.addStretch()
         self.invite_button = action("Invite a device", self.invite_device)
         self.add_button = action("+  Connect a model", self.add_agent, True)
+        # The top bar carried no tooltips at all, so these two were the one
+        # part of the shell a new user could hover with nothing to learn.
+        self.invite_button.setToolTip(
+            "Create an invitation that another device can use to join this workspace")
+        self.add_button.setToolTip(
+            "Connect a model agent to this workspace")
         self.invite_button.setEnabled(False)
         self.add_button.setEnabled(False)
         top_layout.addWidget(self.invite_button)
@@ -379,6 +385,12 @@ class MainWindow(QMainWindow):
         self.welcome_connect = action("  +  Connect a model", self.add_agent, True)
         self.welcome_connect.setEnabled(False)
         self.welcome_join = action("  Join a workspace", self.add_workspace, name="ghost")
+        self.welcome_connect.setToolTip(
+            "Connect a model agent to this workspace")
+        # This opens a menu offering both routes rather than going straight
+        # to the join dialog, so the tooltip says so.
+        self.welcome_join.setToolTip(
+            "Create a new workspace, or join someone else's with an invitation")
         choices = QHBoxLayout()
         choices.setSpacing(10)
         choices.addWidget(self.welcome_connect)
@@ -433,8 +445,13 @@ class MainWindow(QMainWindow):
         Deliberately narrow: an online count of zero with agents present is
         a real statistic, so the statistics only go away when there are no
         agents, no conversations and nothing has happened yet.
+
+        The test is ``self.agents``, which always carries this device, and
+        so could never make this true. The welcome has to key off the
+        model agents a user can actually talk to, which is why it appeared
+        on a first run and then never again.
         """
-        empty = not self.model_agents() and not self.agents and not self.conversations
+        empty = not self.model_agents() and not self.conversations
         self.welcome_card.setVisible(empty)
         self.overview_content.setVisible(not empty)
 
@@ -470,8 +487,12 @@ class MainWindow(QMainWindow):
         self.chat_subtitle = label("Start a conversation with a connected device.", "muted")
         column.addWidget(self.chat_subtitle)
         self.share_conversation_button = action("Invite to conversation", self.invite_conversation)
+        self.share_conversation_button.setToolTip(
+            "Invite another device into this conversation")
         chat_actions = QHBoxLayout()
         self.chat_agent_count = action("0 agents", self.show_chat_agents, name="ghost")
+        self.chat_agent_count.setToolTip(
+            "Show the agents taking part in this conversation")
         chat_actions.addWidget(self.chat_agent_count)
         chat_actions.addWidget(self.share_conversation_button)
         chat_actions.addStretch()
@@ -495,10 +516,15 @@ class MainWindow(QMainWindow):
         column.addWidget(self.composer)
         footer = QHBoxLayout()
         self.attach_button = action("Attach images / PDFs", self.attach_files)
+        # The hint beside this button states the keys but not what the button
+        # itself accepts, and only agents with vision can read an image.
+        self.attach_button.setToolTip(
+            "Attach images or PDFs. An image is only read by an agent with vision enabled.")
         footer.addWidget(self.attach_button)
         footer.addWidget(label("Enter to send · Shift + Enter for a new line", "muted"))
         footer.addStretch()
         self.send_button = action("Send request  ↑", self.send_message, True)
+        self.send_button.setToolTip("Send this message to the selected agent")
         footer.addWidget(self.send_button)
         column.addLayout(footer)
         layout.addWidget(panel, 1)
@@ -1026,6 +1052,7 @@ class MainWindow(QMainWindow):
                 column.addSpacing(7)
                 talk = action("Open conversation  →", lambda checked=False, id=agent["id"]: self.select_agent(id))
                 talk.setEnabled(agent["online"])
+                talk.setToolTip(f"Start a conversation with {agent['id']}")
                 column.addWidget(talk)
                 if agent.get("profile"):
                     row = QHBoxLayout()
@@ -1064,8 +1091,11 @@ class MainWindow(QMainWindow):
                 if target == self.selected:
                     listing.setCurrentItem(item)
         # The list is blank until something is connected, which read as a
-        # hole in the sidebar rather than as an absence of anything.
-        self.chats_hint.setVisible(not self.sidebar_agents.count())
+        # hole in the sidebar rather than as an absence of anything. It was
+        # also never blank in practice, because this device is always one of
+        # its own entries, so the hint keyed off the count of rows never
+        # appeared. It now agrees with the welcome panel instead.
+        self.chats_hint.setVisible(not self.model_agents() and not self.conversations)
         self.stat_values[0].setText(str(len(models)))
         self.stat_values[1].setText(str(sum(agent["online"] for agent in models)))
         self.stat_values[2].setText(str(self.request_count))
@@ -1212,6 +1242,9 @@ class MainWindow(QMainWindow):
             row.addWidget(label(item["name"] + " · " + item["note"], "muted", True), 1)
             remove = action("Remove", lambda checked=False, position=index: self.remove_attachment(position), name="ghost")
             remove.setEnabled(not self.preparing_files)
+            # A column of identical "Remove" buttons is ambiguous, so each
+            # one names the file it drops.
+            remove.setToolTip(f"Remove {item['name']} from this message")
             row.addWidget(remove)
             self.attachment_rows.addLayout(row)
 

@@ -76,6 +76,61 @@ def test_every_nav_button_explains_its_page(window) -> None:
         "every page needs an entry, or a tooltip is about to be missing")
 
 
+def test_the_shell_controls_explain_themselves(window) -> None:
+    """The top bar was the one part of the shell a hover could not teach you.
+
+    Tooltips already covered the navigation buttons and the workspace
+    settings, but not the two buttons a new user is most likely to reach
+    for, nor the chat page's own controls. Each of these says what will
+    actually happen rather than repeating the label it sits beside.
+    """
+    chrome = {
+        "invite": window.invite_button,
+        "connect a model": window.add_button,
+        "welcome connect": window.welcome_connect,
+        "welcome join": window.welcome_join,
+        "share": window.share_conversation_button,
+        "agent count": window.chat_agent_count,
+        "attach": window.attach_button,
+        "send": window.send_button,
+    }
+    for name, button in chrome.items():
+        assert button.toolTip(), f"the {name} button has no tooltip"
+        assert button.toolTip() != button.text().strip(), (
+            f"the {name} tooltip only repeats its own label")
+
+
+def test_the_rows_built_on_demand_explain_themselves(window) -> None:
+    """Agent cards and attachments appear only once there is something to show.
+
+    Both are built after the window opens, so they cannot be covered by a
+    check of the fixed chrome. A row of identical "Remove" buttons is
+    ambiguous without the filename, and an agent card cannot say who it
+    opens without naming them.
+    """
+    window.agents = [{
+        "id": "local-llama", "online": True, "provider": "ollama",
+        "model": "llama3", "profile": {"vision": True},
+    }]
+    window.selected = "local-llama"
+    window.chats = {"local-llama": {"draft_attachments": [
+        {"name": "diagram.png", "note": "120 KB"}]}}
+    window.render_agents()
+    window.render_attachments()
+
+    talk = [b for b in window.findChildren(QPushButton)
+            if b.text().startswith("Open conversation")]
+    assert talk, "the agent card did not render its conversation button"
+    assert all(b.toolTip() for b in talk), "an agent card cannot say who it opens"
+    assert all("local-llama" in b.toolTip() for b in talk), (
+        "naming the agent is the point of the tooltip")
+
+    remove = [b for b in window.findChildren(QPushButton) if b.text() == "Remove"]
+    assert remove, "the attachment did not render its remove button"
+    assert all("diagram.png" in b.toolTip() for b in remove), (
+        "a column of identical Remove buttons is ambiguous")
+
+
 def test_the_sidebar_says_when_there_is_nothing_to_chat_to(window) -> None:
     """An empty list read as a hole rather than as an absence of anything."""
     window.agents = []
@@ -95,6 +150,66 @@ def test_the_sidebar_hint_goes_once_there_is_something(window) -> None:
     window.render_agents()
 
     assert window.chats_hint.isHidden()
+
+
+def test_the_sidebar_hint_ignores_this_device(window) -> None:
+    """The hint used to key off the row count, and this device is always a row.
+
+    On a first run the sidebar holds one entry, this device, which is
+    nothing a new user can talk to. Counting rows therefore hid the hint
+    precisely when it was needed. It now agrees with the welcome panel.
+    """
+    window.agents = [{"id": "device-abc123", "kind": "device", "online": True}]
+    window.conversations = {}
+    window.render_agents()
+
+    assert window.sidebar_agents.count() == 1, "this test needs the device listed"
+    assert not window.chats_hint.isHidden(), (
+        "the hint stayed hidden because this device is always a row in the list")
+
+
+def test_the_welcome_appears_although_this_device_is_listed(window) -> None:
+    """A first run always lists this device in the sidebar, and so it always did.
+
+    The welcome used to test the agent list for emptiness, which can never
+    hold because this device is one of its own entries. So the panel a new
+    user is meant to land on was hidden on a genuine first run and stayed
+    hidden afterwards. Only the model agents a user can actually talk to
+    should count.
+    """
+    window.agents = [{"id": "device-abc123", "kind": "device", "online": True}]
+    window.conversations = {}
+    window.render_agents()
+
+    assert not window.model_agents(), "a device is not a model agent"
+    assert not window.welcome_card.isHidden(), (
+        "the welcome stayed hidden on a first run, because this device is "
+        "always in the agent list it was testing for emptiness")
+
+
+def test_the_statistics_return_once_a_model_is_connected(window) -> None:
+    """The welcome has to get out of the way once there is something to count."""
+    window.agents = [
+        {"id": "device-abc123", "kind": "device", "online": True},
+        {"id": "local-llama", "kind": "model", "online": True,
+         "provider": "ollama", "model": "llama3"},
+    ]
+    window.conversations = {}
+    window.render_agents()
+
+    assert window.welcome_card.isHidden(), "the welcome stayed up over real statistics"
+    assert not window.overview_content.isHidden(), "the statistics were never restored"
+
+
+def test_a_saved_conversation_also_puts_the_welcome_away(window) -> None:
+    """Somebody with history to come back to is not a first run."""
+    window.agents = [{"id": "device-abc123", "kind": "device", "online": True}]
+    window.conversations = {"local-llama": {
+        "id": "local-llama", "title": "Notes on the parser",
+        "target": "local-llama", "members": ["device-abc123"]}}
+    window.render_agents()
+
+    assert window.welcome_card.isHidden(), "the welcome covered a real conversation"
 
 
 def test_the_device_identity_is_shown_on_the_profile_card(window, tmp_path) -> None:
