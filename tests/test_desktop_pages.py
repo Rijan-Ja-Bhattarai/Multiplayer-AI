@@ -65,6 +65,48 @@ def window(qt_app, storage):
     instance.network.wait(10000)
 
 
+# --- first run -----------------------------------------------------------
+
+
+def test_an_empty_workspace_shows_a_welcome_instead_of_three_zeroes(window) -> None:
+    """A first-run user should be told what to do, not shown three zeroes.
+
+    Three statistic cards all reading zero, and a large empty activity
+    list, say nothing about what the app is or what to press. The welcome
+    replaces all of it while the workspace holds nothing.
+    """
+    window.navigate(win.OVERVIEW_PAGE if hasattr(win, "OVERVIEW_PAGE") else 0)
+    window.render_agents()
+
+    assert not window.welcome_card.isHidden(), "an empty workspace needs the welcome"
+    assert window.overview_content.isHidden(), "zeroes are not worth showing at zero"
+    assert window.welcome_connect.text().strip().endswith("Connect a model")
+    assert window.welcome_join.text().strip().endswith("Join a workspace")
+
+
+def test_the_welcome_and_the_statistics_are_never_shown_together(window) -> None:
+    """They are alternatives, so neither may be left showing by a stale event."""
+    for agents in ([], [{"id": "model", "online": True, "provider": "ollama", "model": "m"}]):
+        window.agents = agents
+        window.render_agents()
+
+        assert bool(window.welcome_card.isHidden()) != bool(window.overview_content.isHidden()), (
+            f"exactly one of welcome and statistics must show with agents={agents}")
+
+
+def test_the_welcome_hides_once_a_model_is_connected(window) -> None:
+    window.agents = []
+    window.render_agents()
+    assert not window.welcome_card.isHidden()
+
+    window.agents = [{"id": "model", "online": True, "provider": "ollama", "model": "m"}]
+    window.render_agents()
+
+    assert window.welcome_card.isHidden()
+    assert not window.overview_content.isHidden()
+    assert window.stat_values[0].text() == "1", "the statistics still have to be right"
+
+
 # --- navigation ----------------------------------------------------------
 
 

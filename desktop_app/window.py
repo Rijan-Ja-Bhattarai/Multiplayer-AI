@@ -264,6 +264,10 @@ class MainWindow(QMainWindow):
         )
         self.update_theme_hint()
         self.navigate(0)
+        # Settle the welcome now rather than waiting for the first agents
+        # event, so the first paint never shows the welcome and the
+        # statistics at the same time.
+        self.update_overview_state()
 
     def install_shortcuts(self):
         """Keyboard navigation, so the app is usable without a mouse."""
@@ -298,9 +302,49 @@ class MainWindow(QMainWindow):
         return scroll, layout
 
     def overview_page(self):
-        """Build workspace statistics and model previews with a clickable agent count."""
+        """Build the workspace overview, with a first-run welcome in place of it.
+
+        A new user opening this page used to see three statistic cards all
+        reading zero and a large empty activity list. None of that tells
+        them anything, and the only action on offer was in the top bar.
+        So when the workspace holds nothing at all, the statistics are
+        replaced by a panel that says what the app is and offers the two
+        ways to get started.
+        """
         page, layout = self.scroll_page()
         layout.addWidget(label("Workspace overview", "title"))
+
+        self.welcome_card, welcome = frame("hero")
+        welcome.setContentsMargins(28, 26, 28, 28)
+        welcome.setSpacing(12)
+        welcome.addWidget(label("Nothing here yet", "heroTitle"))
+        welcome.addWidget(label(
+            "This workspace runs a private network on your own device. "
+            "Connect a model to start talking to it, or join someone "
+            "else's workspace with an invitation.", "muted", True))
+        welcome.addSpacing(6)
+        # Held on the window so it can be disabled until the runtime is
+        # ready, exactly as the top bar's own connect button is. Laid out in
+        # a row so they keep their natural width instead of stretching the
+        # full width of the card.
+        self.welcome_connect = action("  +  Connect a model", self.add_agent, True)
+        self.welcome_connect.setEnabled(False)
+        self.welcome_join = action("  Join a workspace", self.add_workspace, name="ghost")
+        choices = QHBoxLayout()
+        choices.setSpacing(10)
+        choices.addWidget(self.welcome_connect)
+        choices.addWidget(self.welcome_join)
+        choices.addStretch()
+        welcome.addLayout(choices)
+        layout.addWidget(self.welcome_card)
+
+        # Everything the welcome replaces, kept as one widget so it can be
+        # hidden as a unit rather than six pieces.
+        self.overview_content = QWidget()
+        body = QVBoxLayout(self.overview_content)
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(22)
+
         stats = QHBoxLayout()
         stats.setSpacing(16)
         self.stat_values = []
@@ -315,11 +359,11 @@ class MainWindow(QMainWindow):
             column.addWidget(label(subtitle, "muted"))
             self.stat_values.append(value)
             stats.addWidget(card, 1)
-        layout.addLayout(stats)
-        layout.addWidget(label("Your agents", "heading"))
+        body.addLayout(stats)
+        body.addWidget(label("Your agents", "heading"))
         self.overview_cards = QGridLayout()
         self.overview_cards.setSpacing(14)
-        layout.addLayout(self.overview_cards)
+        body.addLayout(self.overview_cards)
         activity_card, column = frame("card")
         column.setContentsMargins(20, 18, 20, 18)
         column.addWidget(label("Workspace activity", "heading"))
@@ -327,10 +371,23 @@ class MainWindow(QMainWindow):
         self.activity_list.setMinimumHeight(140)
         self.activity_list.setMaximumHeight(210)
         column.addWidget(self.activity_list)
-        layout.addWidget(activity_card)
-        layout.addWidget(label("Private keys stay on your device. Possibilities go everywhere.", "muted"))
+        body.addWidget(activity_card)
+        body.addWidget(label("Private keys stay on your device. Possibilities go everywhere.", "muted"))
+        body.addStretch()
+        layout.addWidget(self.overview_content)
         layout.addStretch()
         return page
+
+    def update_overview_state(self):
+        """Show the welcome only while there is genuinely nothing to show.
+
+        Deliberately narrow: an online count of zero with agents present is
+        a real statistic, so the statistics only go away when there are no
+        agents, no conversations and nothing has happened yet.
+        """
+        empty = not self.model_agents() and not self.agents and not self.conversations
+        self.welcome_card.setVisible(empty)
+        self.overview_content.setVisible(not empty)
 
     def agents_page(self):
         page, layout = self.scroll_page()
@@ -960,6 +1017,7 @@ class MainWindow(QMainWindow):
         self.stat_values[0].setText(str(len(models)))
         self.stat_values[1].setText(str(sum(agent["online"] for agent in models)))
         self.stat_values[2].setText(str(self.request_count))
+        self.update_overview_state()
         self.update_chat_controls()
         self.render_imported_models()
 
@@ -1302,6 +1360,7 @@ class MainWindow(QMainWindow):
             self.port = data["port"]
             self.progress.hide()
             self.add_button.setEnabled(True)
+            self.welcome_connect.setEnabled(True)
             self.invite_button.setEnabled(not self.remote)
             self.workspace_settings_button.setEnabled(True)
             self.update_chat_controls()
