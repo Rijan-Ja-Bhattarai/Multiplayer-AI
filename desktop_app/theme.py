@@ -121,8 +121,8 @@ _LIGHT = {
     "surface_sunken": "#eef0f3",
     "surface_rail": "#e3e5ea",
     "surface_sidebar": "#ecedf1",
-    "surface_raised": "#ffffff",
-    "surface_profile": "#e6e8ed",
+    "surface_raised": "#f2f4f7",
+    "surface_profile": "#ecedf1",
     "surface_hero": "#e6e8fb",
     "surface_hover": "#dfe2e8",
     "surface_row_hover": "#eceef2",
@@ -198,6 +198,14 @@ _LIGHT = {
 # and marks. The values below are derived from that split; every ratio is
 # verified by tests/test_theme_contrast.py, which is the only thing keeping
 # this theme honest.
+#
+# The neutrals were then rebuilt as a single eight-step ramp. As shipped
+# they sat inside one step of each other, which left the card the same
+# colour as the sidebar behind it, so cards cast no shadow at all, and left
+# muted text 0.73 of contrast below body, so the two read as one weight.
+# Contrast passing is not the same as a palette reading correctly, and this
+# theme had passed every ratio while looking flat. Steps are labelled n1 to
+# n8 beside the tokens so the ramp stays intact when a value is next moved.
 _MIKU = {
     # The supplied teal is light, so it carries the dark slate as its
     # label colour rather than white. That reaches 5.13:1, where white on
@@ -207,42 +215,42 @@ _MIKU = {
     "accent_press": "#2ebdb4",
     "accent_disabled": "#4f7f7b",
     "on_accent": "#374145",
-    "surface_base": "#414c50",
-    "surface": "#4b565a",
-    "surface_sunken": "#374145",
-    "surface_rail": "#374145",
-    "surface_sidebar": "#4b565a",
-    "surface_raised": "#414c50",
-    "surface_profile": "#3f4a4e",
+    "surface_base": "#353f42",              # n3
+    "surface": "#424c50",                   # n5  cards
+    "surface_sunken": "#313a3d",            # n2  recessed
+    "surface_rail": "#2b3437",              # n1
+    "surface_sidebar": "#3b4548",           # n4
+    "surface_raised": "#4b565a",            # n6  top bar, buttons
+    "surface_profile": "#3b4548",           # n4  footer matches the sidebar
     "surface_hero": "#2f4a4d",
-    "surface_hover": "#4a5459",
-    "surface_row_hover": "#4a5459",
-    "surface_active": "#566166",
-    "border": "#616d71",
-    "border_strong": "#566166",
-    "border_control": "#7d8883",
+    "surface_hover": "#535e63",             # n7
+    "surface_row_hover": "#535e63",         # n7
+    "surface_active": "#5c676c",            # n8
+    "border": "#556165",
+    "border_strong": "#616d71",
+    "border_control": "#6b777b",
     "border_hero": "#43707a",
-    "border_disabled": "#616d71",
-    "text": "#e2ddcc",
-    "text_strong": "#f4f1e6",
-    "text_muted": "#c7d1cd",
-    "text_nav": "#bcc5c1",
-    "text_list": "#c7d1cd",
+    "border_disabled": "#454f53",
+    "text": "#e6e1d1",
+    "text_strong": "#f7f4ea",
+    "text_muted": "#b9c3bf",
+    "text_nav": "#cfd6d2",
+    "text_list": "#e6e1d1",
     "text_hero": "#d9f3ef",
-    "text_disabled": "#8d9691",
-    "button": "#566166",
-    "button_hover": "#626e73",
-    "button_press": "#4a5459",
-    "button_disabled": "#4a5459",
+    "text_disabled": "#828b87",
+    "button": "#4b565a",
+    "button_hover": "#535e63",
+    "button_press": "#424c50",
+    "button_disabled": "#3b4548",
     "tooltip_bg": "#23292b",
     "tooltip_fg": "#e2ddcc",
-    "scrollbar_track": "#4b565a",
-    "scrollbar_thumb": "#2f3a3e",
+    "scrollbar_track": "#3b4548",
+    "scrollbar_thumb": "#5a6469",
     "danger_bg": "#4a2f3a",
     "success": "#55d1d0",
     # The supplied pink is 2.69:1 on these surfaces. This is the most
     # saturated tint of the same hue that still clears 4.5:1.
-    "error": "#ffb3cf",
+    "error": "#ffb0b0",
     "agent_title": "#87e5cf",
     "toast_bg": "#2f4a45",
     "toast_fg": "#cdeadb",
@@ -257,16 +265,16 @@ _MIKU = {
     "orbit_claude": "#ffb59b",
     "orbit_gemini": "#a8c6ff",
     "orbit_openai": "#8fe6cb",
-    "input_bg": "#374145",
-    "checkbox_bg": "#374145",
-    "checkbox_border": "#7d8883",
-    "combo_popup_bg": "#3f4a4e",
-    "menu_bg": "#374145",
+    "input_bg": "#313a3d",
+    "checkbox_bg": "#313a3d",
+    "checkbox_border": "#6b777b",
+    "combo_popup_bg": "#424c50",
+    "menu_bg": "#3b4548",
     "menu_item_border": "transparent",
-    "header_bg": "#374145",
-    "progress_track": "#374145",
-    "nav_checked_bg": "#566166",
-    "workspace_btn_bg": "#414c50",
+    "header_bg": "#353f42",
+    "progress_track": "#313a3d",
+    "nav_checked_bg": "#535e63",
+    "workspace_btn_bg": "#4b565a",
     "button_border": "transparent",
     "primary_border": "transparent",
     "primary_disabled_fg": "#a9c4c1",
@@ -280,8 +288,8 @@ _MIKU = {
     "nav_border": "transparent",
     "workspace_btn_border": "transparent",
     "ghost_border": "transparent",
-    "topbar_border": "#374145",
-    "table_border": "#616d71",
+    "topbar_border": "#556165",
+    "table_border": "#556165",
 }
 
 PALETTES = {"dark": _DARK, "light": _LIGHT, "miku": _MIKU}
