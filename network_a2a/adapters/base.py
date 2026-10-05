@@ -8,7 +8,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from ..content import MAX_MESSAGE_BYTES, MAX_TEXT_BYTES, images, text_content, validate_content
-from ..web_search import AUTO_SEARCH, SEARCH_EVIDENCE, SearchError, SearXNG, requested_query, validate_search_url
+from ..web_search import AUTO_SEARCH, SEARCH_EVIDENCE, SearchError, create_search, requested_query, validate_search_settings
 
 
 class ProviderError(Exception):
@@ -34,6 +34,8 @@ class ProviderConfig:
     web_search: str = "off"
     searxng_url: str = ""
     searxng_allow_insecure: bool = False
+    search_provider: str = "searxng"
+    search_api_key: str | None = field(default=None, repr=False)
 
     def __post_init__(self):
         if not isinstance(self.model, str) or not self.model.strip():
@@ -58,7 +60,7 @@ class ProviderConfig:
         if self.web_search not in ("off", "auto", "always"):
             raise ValueError("Choose Off, Automatic, or Always for web search")
         if self.web_search != "off":
-            validate_search_url(self.searxng_url, self.searxng_allow_insecure)
+            validate_search_settings(self.search_provider, self.searxng_url, self.search_api_key, self.searxng_allow_insecure)
 
 
 def parse_messages(payload):
@@ -170,9 +172,11 @@ class HTTPAdapter:
             if query is None:
                 return (*initial, [])
         try:
-            sources = await SearXNG(self.http, self.config.searxng_url, self.config.searxng_allow_insecure).search(query)
+            search = create_search(self.http, self.config.search_provider, url=self.config.searxng_url,
+                                   api_key=self.config.search_api_key, allow_insecure=self.config.searxng_allow_insecure)
+            sources = await search.search(query)
         except SearchError as exc:
-            raise ProviderError("web_search", str(exc)) from None
+            raise ProviderError(exc.code, str(exc)) from None
         evidence = SEARCH_EVIDENCE + "\n\n" + (json.dumps(sources, ensure_ascii=False) if sources else "No useful results were found. State this limitation.")
         text, usage, reason = await self.generate(messages, evidence)
         return text, usage, reason, sources

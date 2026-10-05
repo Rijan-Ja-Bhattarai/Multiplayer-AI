@@ -4,11 +4,12 @@ import os
 import platform
 import subprocess
 import sys
+from pathlib import Path
 from datetime import datetime
 
-from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt, QTimer, Slot
+from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QSize, Qt, QTimer, QUrl, Slot
 from PySide6.QtGui import (QGuiApplication, QIcon, QKeySequence, QPixmap, QPainter,
-                           QColor, QFont, QPalette, QShortcut)
+                           QColor, QDesktopServices, QFont, QPalette, QShortcut)
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QFrame,
     QGraphicsOpacityEffect, QGridLayout, QHBoxLayout, QInputDialog, QLineEdit,
     QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QProgressBar,
@@ -19,6 +20,7 @@ from network_a2a.content import MAX_MESSAGE_BYTES, content_summary, validate_con
 
 from .bridge import NetworkThread
 from .dialogs import AgentDialog, InviteDialog, JoinDialog
+from .icons import navigation_icon, provider_logo, provider_pixmap
 from .layout import minimum_size, sidebar_should_collapse, window_size
 from .markdown import MarkdownMessage
 from .resources import ResourceSampler
@@ -38,6 +40,7 @@ def clear_layout(layout):
     while layout.count():
         item = layout.takeAt(0)
         if item.widget():
+            item.widget().hide()
             item.widget().deleteLater()
         elif item.layout():
             clear_layout(item.layout())
@@ -48,12 +51,12 @@ def clear_layout(layout):
 # and nowhere else used to mean fixing the title list as well, which is
 # exactly the kind of duplication that goes stale.
 PAGES = (
-    ("◫   Overview", "overview"),
-    ("⌘   Agents", "agents"),
-    ("▤   Conversations", "conversations"),
-    ("◇   Providers", "providers"),
-    ("◴   Resources", "resources"),
-    ("⚙   Settings", "settings"),
+    ("Overview", "overview"),
+    ("Agents", "agents"),
+    ("Conversations", "conversations"),
+    ("Providers", "providers"),
+    ("Resources", "resources"),
+    ("Settings", "settings"),
 )
 PAGE_TITLES = tuple(f"#  {key}" for _, key in PAGES)
 RESOURCES_PAGE = 4
@@ -147,10 +150,6 @@ class MainWindow(QMainWindow):
         home.setToolTip("Your local workspace")
         home.clicked.connect(lambda: self.command("use_local"))
         rail_layout.addWidget(home)
-        local = WorkspaceButton("⌘")
-        local.setToolTip("Workspace overview")
-        local.clicked.connect(lambda: self.navigate(0))
-        rail_layout.addWidget(local)
         workspace_scroll = QScrollArea()
         workspace_scroll.setWidgetResizable(True)
         workspace_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -168,10 +167,10 @@ class MainWindow(QMainWindow):
         join.setToolTip("Create or join a workspace")
         join.clicked.connect(self.add_workspace)
         rail_layout.addWidget(join)
-        help_button = WorkspaceButton("?")
-        help_button.clicked.connect(lambda: self.notice("The app starts your local relay automatically. Connect a model in Providers, or join a team with an invitation."))
-        help_button.setToolTip("Quick help")
-        rail_layout.addWidget(help_button)
+        self.help_button = WorkspaceButton("?")
+        self.help_button.clicked.connect(self.open_documentation)
+        self.help_button.setToolTip("Project documentation")
+        rail_layout.addWidget(self.help_button)
         shell.addWidget(rail)
         sidebar, side = frame("sidebar")
         sidebar.setFixedWidth(238)
@@ -187,8 +186,10 @@ class MainWindow(QMainWindow):
         side.addSpacing(25)
         side.addWidget(label("WORKSPACE", "eyebrow"))
         self.nav_buttons = []
-        for index, (name, _key) in enumerate(PAGES):
+        for index, (name, key) in enumerate(PAGES):
             button = action(name, lambda checked=False, page=index: self.navigate(page), name="nav")
+            button.setIcon(navigation_icon(key, color(self.theme, "text")))
+            button.setIconSize(QSize(20, 20))
             button.setCheckable(True)
             self.nav_buttons.append(button)
             side.addWidget(button)
@@ -305,6 +306,8 @@ class MainWindow(QMainWindow):
             column.setContentsMargins(18, 15, 18, 15)
             column.addWidget(label(title, "muted"))
             value = action("0", self.show_workspace_agents, name="statValue") if index == 0 else label("0", "statValue")
+            if index == 0:
+                value.setFlat(True)
             column.addWidget(value)
             column.addWidget(label(subtitle, "muted"))
             self.stat_values.append(value)
@@ -404,16 +407,15 @@ class MainWindow(QMainWindow):
         layout.addWidget(label("Connect another model", "heading"))
         grid = QGridLayout()
         grid.setSpacing(16)
-        self.provider_glyphs = {}
+        self.provider_logos = {}
         providers = provider_names(self.theme)
         for index, provider in enumerate(providers):
             card, column = frame("card")
             column.setContentsMargins(21, 20, 21, 20)
             info = providers[provider]
-            glyph = label(info[2])
-            glyph.setStyleSheet(f"font-size:27px; color:{info[3]}; font-weight:650;")
-            self.provider_glyphs[provider] = glyph
-            column.addWidget(glyph)
+            logo = provider_logo(provider, self.theme)
+            self.provider_logos[provider] = logo
+            column.addWidget(logo)
             column.addWidget(label(info[0], "heading"))
             column.addWidget(label(info[1], "muted", True))
             column.addSpacing(10)
@@ -434,40 +436,48 @@ class MainWindow(QMainWindow):
         layout.addWidget(label("WHAT YOUR MACHINE IS DOING", "eyebrow"))
         layout.addWidget(label("Resources", "title"))
         layout.addWidget(label("Live readings from this device. Nothing is sent anywhere.", "muted", True))
+        layout.addWidget(label("Device totals include all programs and local model runtimes such as Ollama. Multiplayer AI's own usage is shown separately below. Models hosted by a provider use that provider's hardware.", "muted", True))
 
         self.resource_timer = QTimer(self)
         self.resource_timer.setInterval(2000)
         self.resource_timer.timeout.connect(self.refresh_resources)
 
-        def meter(title, subtitle):
+        def meter(key, title, subtitle):
             card, column = frame("stat")
             column.setContentsMargins(18, 15, 18, 15)
             column.addWidget(label(title, "muted"))
             reading = label("—", "statValue")
             column.addWidget(reading)
-            column.addWidget(label(subtitle, "muted"))
+            detail = label(subtitle, "muted", True)
+            self.resource_details[key] = detail
+            column.addWidget(detail)
             bar = QProgressBar()
             bar.setRange(0, 100)
+            bar.setTextVisible(False)
+            bar.setAccessibleName(title)
             column.addSpacing(6)
             column.addWidget(bar)
             layout.addWidget(card)
             return reading, bar
 
+        self.resource_details = {}
         self.resource_rows = {
-            "cpu": meter("Processor", "Total load across all cores"),
-            "memory": meter("Memory", "In use across the whole system"),
-            "disk": meter("Disk", "Used on the drive holding this app's data"),
+            "cpu": meter("cpu", "Processor · entire device", "Combined CPU load from all programs"),
+            "memory": meter("memory", "Memory (RAM) · entire device", "RAM used by all programs and the operating system"),
+            "disk": meter("disk", "Storage · app data drive", "Disk space used by all files on this drive; not disk activity"),
         }
 
-        layout.addWidget(label("Per-core load", "heading"))
+        layout.addWidget(label("CPU load per logical processor · all programs", "heading", True))
         self.core_bars = []
+        self.core_labels = []
         self.core_grid = QGridLayout()
         self.core_grid.setSpacing(10)
         layout.addLayout(self.core_grid)
 
         detail, column = frame("card")
         column.setContentsMargins(20, 18, 20, 18)
-        column.addWidget(label("This application", "heading"))
+        column.addWidget(label("Multiplayer AI · this app process", "heading"))
+        column.addWidget(label("Includes the desktop interface and its relay. Separate model processes, such as Ollama, are included in the device totals above.", "muted", True))
         self.app_detail = label("", "muted", True)
         self.app_detail.setWordWrap(True)
         column.addWidget(self.app_detail)
@@ -596,33 +606,51 @@ class MainWindow(QMainWindow):
         if memory:
             self.resource_rows["memory"][0].setText(f"{memory['percent']:.0f}%")
             self.resource_rows["memory"][1].setValue(int(memory["percent"]))
+            self.resource_details["memory"].setText(
+                f"{memory['used_human']} used of {memory['total_human']} RAM · {memory['available_human']} available · all programs and the operating system")
         else:
             self.resource_rows["memory"][0].setText("Unavailable")
             self.resource_rows["memory"][1].setValue(0)
+            self.resource_details["memory"].setText("System RAM usage is unavailable.")
 
         disk = reading["disk"]
         if disk:
             self.resource_rows["disk"][0].setText(f"{disk['percent']:.0f}%")
             self.resource_rows["disk"][1].setValue(int(disk["percent"]))
+            self.resource_details["disk"].setText(
+                f"{disk['used_human']} used of {disk['total_human']} · {disk['free_human']} free\n"
+                f"Drive containing {disk['path']} · all files on that drive, not disk activity")
         else:
             self.resource_rows["disk"][0].setText("Unavailable")
             self.resource_rows["disk"][1].setValue(0)
+            self.resource_details["disk"].setText("Storage usage is unavailable.")
 
         cores = reading["per_core"] or []
         while len(self.core_bars) < len(cores):
             bar = QProgressBar()
             bar.setRange(0, 100)
+            bar.setTextVisible(False)
+            index = len(self.core_bars)
+            caption = label(f"Logical CPU {index + 1}", "muted")
+            bar.setAccessibleName(f"Logical CPU {index + 1} load from all programs")
+            core = QWidget()
+            column = QVBoxLayout(core)
+            column.setContentsMargins(0, 0, 0, 0)
+            column.addWidget(caption)
+            column.addWidget(bar)
+            self.core_labels.append(caption)
             self.core_bars.append(bar)
-            self.core_grid.addWidget(bar, len(self.core_bars) // 2,
-                                     len(self.core_bars) % 2)
-        for bar, value in zip(self.core_bars, cores):
+            self.core_grid.addWidget(core, index // 2, index % 2)
+        for index, (caption, bar, value) in enumerate(zip(self.core_labels, self.core_bars, cores)):
+            caption.setText(f"Logical CPU {index + 1} · {value:.0f}%")
             bar.setValue(int(value))
 
         process = reading["process"]
         if process:
             self.app_detail.setText(
-                f"{process['memory_human']} resident · {process['cpu']:.0f}% of one "
-                f"core · {process['threads']} threads"
+                f"App RAM: {process['memory_human']} resident memory\n"
+                f"App CPU: {process['cpu']:.0f}% of one logical CPU (can exceed 100% across several CPUs)\n"
+                f"App threads: {process['threads']}"
             )
         else:
             self.app_detail.setText("Unavailable")
@@ -631,6 +659,11 @@ class MainWindow(QMainWindow):
             f"Uptime {reading['uptime']} · {reading['core_count']} logical cores · "
             f"preferences at {self.storage.directory}"
         )
+
+    def open_documentation(self):
+        path = Path(__file__).resolve().parents[1] / "docs.html"
+        if not path.is_file() or not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
+            self.notice("Could not open the documentation. Open docs.html from the app folder in your browser.", error=True)
 
     def _theme_choice_index(self):
         """Where the stored preference sits in the picker.
@@ -748,8 +781,10 @@ class MainWindow(QMainWindow):
         self.avatar.setStyleSheet("background:" + color(name, "accent")
                                   + "; border-radius:14px; padding:6px; font-weight:700;"
                                   + " color:" + color(name, "on_accent") + ";")
-        for provider, glyph in self.provider_glyphs.items():
-            glyph.setStyleSheet(f"font-size:27px; color:{provider_entry(name, provider)[3]}; font-weight:650;")
+        for button, (_, key) in zip(self.nav_buttons, PAGES):
+            button.setIcon(navigation_icon(key, color(name, "text")))
+        for provider, logo in self.provider_logos.items():
+            logo.setPixmap(provider_pixmap(provider, name))
         if hasattr(self, "theme_picker"):
             self.theme_picker.blockSignals(True)
             self.theme_picker.setCurrentIndex(self._theme_choice_index())
@@ -849,11 +884,14 @@ class MainWindow(QMainWindow):
             animation.start()
 
     def render_agents(self):
-        clear_layout(self.overview_cards)
-        clear_layout(self.agent_cards)
         models = self.model_agents()
         for grid, agents in ((self.overview_cards, models[:3]),
                              (self.agent_cards, [agent for agent in models if self.search.text().lower() in f"{agent['id']} {agent.get('model') or ''}".lower()])):
+            signature = (self.workspace_id, self.theme, json.dumps(agents, sort_keys=True))
+            if getattr(grid, "render_signature", None) == signature:
+                continue
+            grid.render_signature = signature
+            clear_layout(grid)
             if not agents:
                 card, column = frame("card")
                 column.addWidget(label("Your team is getting ready.", "heading"))
@@ -864,9 +902,7 @@ class MainWindow(QMainWindow):
                 column.setContentsMargins(18, 17, 18, 17)
                 top = QHBoxLayout()
                 info = provider_entry(self.theme, agent.get("provider"))
-                glyph = label(info[2])
-                glyph.setStyleSheet(f"color:{info[3]}; font-size:24px;")
-                top.addWidget(glyph)
+                top.addWidget(provider_logo(agent.get("provider"), self.theme, 28))
                 top.addStretch()
                 status = label("● Online" if agent["online"] else "● Offline", "online" if agent["online"] else "muted")
                 top.addWidget(status)

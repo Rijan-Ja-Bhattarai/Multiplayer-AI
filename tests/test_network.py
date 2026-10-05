@@ -17,6 +17,7 @@ from websockets.asyncio.client import connect
 from websockets.exceptions import InvalidStatus, ConnectionClosed
 
 from network_a2a.client import AgentClient
+from network_a2a.adapters import ProviderError
 from network_a2a.server import create_app
 
 
@@ -131,6 +132,19 @@ class NetworkTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.gather(self.runners[1], return_exceptions=True)
         with self.assertRaisesRegex(RuntimeError, "disconnected"):
             await request
+
+    async def test_search_errors_survive_the_relay_without_leaking_remote_details(self):
+        async def fail_search(payload, source):
+            raise ProviderError(payload, "SECRET remote response and credentials")
+        client = await self.start("a")
+        await self.start("b", fail_search)
+        for code, message in (("web_search_authentication", "Search API key"),
+                              ("web_search_rate_limit", "request limit"),
+                              ("web_search_connection", "internet connection"),
+                              ("web_search", "Test web search")):
+            with self.subTest(code=code), self.assertRaisesRegex(RuntimeError, message) as error:
+                await client.request("b", code)
+            self.assertNotIn("SECRET", str(error.exception))
 
     async def test_duplicate_identity_and_malformed_frame(self):
         await self.start("a")

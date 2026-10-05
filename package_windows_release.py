@@ -17,7 +17,7 @@ def main():
     with ZipFile(output, 'w', ZIP_DEFLATED, compresslevel=9) as archive:
         for path in files:
             archive.write(path, path.relative_to(bundle.parent))
-        for name in ('Install-MultiplayerAI.cmd', 'Install-MultiplayerAI.ps1', 'DESKTOP_GUIDE.md'):
+        for name in ('Install-MultiplayerAI.cmd', 'Install-MultiplayerAI.ps1', 'DESKTOP_GUIDE.md', 'docs.html'):
             archive.write(root / name, name)
     with ZipFile(output) as archive:
         failed = archive.testzip()

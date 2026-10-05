@@ -233,9 +233,10 @@ class DesktopRuntime:
             profile = self.storage.settings.get("remote_agent")
             if profile:
                 scoped.settings["remote_agent"] = profile
-                key = self.storage.vault.get("provider:" + profile["id"])
-                if key:
-                    scoped.vault.set("provider:" + profile["id"], key)
+                for prefix in ("provider:", "search:"):
+                    key = self.storage.vault.get(prefix + profile["id"])
+                    if key:
+                        scoped.vault.set(prefix + profile["id"], key)
             scoped.save()
             self.catalog["workspaces"].append(entry)
             self.active_workspace_id = entry["id"]
@@ -366,8 +367,8 @@ class DesktopRuntime:
     async def send_conversation(self, conversation_id, text):
         return await self.connected_engine().send_conversation(conversation_id, text)
 
-    async def save_agent(self, profile, key=None):
-        return await self.connected_engine().save_agent(profile, key)
+    async def save_agent(self, profile, key=None, search_key=None):
+        return await self.connected_engine().save_agent(profile, key, search_key)
 
     async def prepare_attachments(self, paths, vision=False):
         from .attachments import prepare_attachments
@@ -394,11 +395,13 @@ class DesktopRuntime:
         for identity in storage.settings.get("identities", {}):
             names.append("relay:" + identity)
             names.append("provider:" + identity)
+            names.append("search:" + identity)
         profile_ids = {profile["id"] for profile in storage.settings.get("agents", [])}
         if storage.settings.get("remote_agent"):
             profile_ids.add(storage.settings["remote_agent"]["id"])
         for identity in profile_ids:
             names.append("provider:" + identity)
+            names.append("search:" + identity)
         return list(dict.fromkeys(names))
 
     def _purge_workspace_data(self, entry, engine=None, owed=()):
@@ -475,6 +478,7 @@ class DesktopRuntime:
                         and not any(p["id"] == legacy["id"]
                                     for p in self.storage.settings.get("agents", []))):
                     names.append("provider:" + legacy["id"])
+                    names.append("search:" + legacy["id"])
         if not names:
             return []
         remaining = [name for name in names

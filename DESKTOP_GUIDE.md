@@ -33,6 +33,10 @@ credential store; it does not fall back to writing secrets to a plaintext file.
 
 ## What happens automatically
 
+Click **?** in the left rail to open the bundled documentation page in your
+browser. Choose the desktop, model-provider, networking, development, or roadmap
+guide for your use case. The guides work offline.
+
 On launch, the app:
 
 1. Creates or restores this device's private identity.
@@ -89,14 +93,31 @@ model, instructions, image support, or internet access. Models running on anothe
 device are edited on that device. Model names stay fixed so existing chats and
 invitations keep their identity.
 
-To enable internet access, select **Allow this model to search the web with
-SearXNG**, enter your SearXNG server URL, and choose **Automatic** or **Always**.
-Automatic mode lets the model request a search for current or uncertain facts;
+To enable internet access, select **Allow this model to search the web** and
+choose a **Search provider**. For the simplest setup, choose **Ollama web search**,
+create a key in [your Ollama account](https://ollama.com/settings/keys), and paste
+it into **Search API key**. You do not need to run a search server. This search
+service works with any connected model, including local Ollama models and models
+from other providers. The search key is stored separately from the model's key
+in your OS credential store; leave it blank when editing to keep the saved key.
+Ollama requires an account key even when your local model does not need one.
+See the [Ollama web search API](https://docs.ollama.com/capabilities/web-search)
+for account requirements and API details.
+
+Choose **Automatic** or **Always** for **Search mode**. Automatic mode lets the
+model request a search for current or uncertain facts;
 it cannot guarantee detection of everything absent from its training data.
 Always mode searches the question before each answer. The app supplies up to
 five result snippets and source links to the model. It does not fetch full pages.
-Use **Test web search** to check the endpoint before saving. Your server must
-enable JSON search in `settings.yml`, as described in the
+Use **Test web search** to check the service before saving. Missing setup fields,
+rejected keys, request limits, and connection problems include an explanation
+and a next step. A connection that returns no results is reported separately.
+
+If you already run a search server, choose **SearXNG**, enter its server address,
+and use **Test web search**. This address is separate from your model's API root;
+for example, a local SearXNG server might use `http://localhost:8888`, while
+Ollama uses `http://127.0.0.1:11434`. Existing SearXNG profiles keep their search
+settings. The SearXNG server must enable JSON search in `settings.yml`, as described in the
 [SearXNG Search API](https://docs.searxng.org/dev/search_api.html):
 
 ```yaml
@@ -106,8 +127,13 @@ search:
     - json
 ```
 
+Many public SearXNG servers disable JSON access. If a server blocks search, ask
+its owner to enable API access or choose Ollama web search.
+
 Internet access is off until you enable it for that model. Search queries go to
-your configured SearXNG server; provider API keys are sent only to the provider.
+your selected search service; the search key goes only to Ollama's search API,
+and model API keys go only to the model provider. The app supplies search snippets
+and links to the model; it does not give the model unrestricted internet access.
 
 ## Attach images and PDFs
 

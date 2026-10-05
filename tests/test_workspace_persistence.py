@@ -87,9 +87,11 @@ class WorkspacePersistenceTests(unittest.IsolatedAsyncioTestCase):
     async def test_member_removal_revokes_tokens_and_shared_history_access_permanently(self):
         invitation = await self.host.invite("guest", self.host.active_url, target=self.host.active_id)
         await self.guest_join(invitation)
+        self.host.engine.storage.vault.set("search:guest", "private-search-key")
         await self.host.remove_member("guest")
         self.assertNotIn("guest", self.host.credentials)
         self.assertNotIn("relay:guest", self.vault.values)
+        self.assertIsNone(self.host.engine.storage.vault.get("search:guest"))
         base = self.host.active_url.replace("ws://", "http://").removesuffix("/connect")
         headers = {"Authorization": "Bearer " + invitation["token"]}
         self.assertEqual((await self.host.http.get(base + "/agents", headers=headers)).status_code, 401)
@@ -154,10 +156,15 @@ class WorkspacePersistenceTests(unittest.IsolatedAsyncioTestCase):
         root_id = self.host.active_workspace_id
         self.host.engine.history_store.save("ui", "state", {"chats": {"saved": {"messages": [["user", "Keep this"]]}}})
         second = await self.host.create_workspace("Temporary")
+        deleted_vault = self.host.engine.storage.vault
+        self.host.engine.storage.settings["agents"] = [{"id": "search-model"}]
+        deleted_vault.set("search:search-model", "private-search-key")
+        self.host.engine.storage.save()
         store = self.host.engine.history_store
         store.save("ui", "state", {"chats": {"deleted": {"messages": [["user", "Delete this"]]}}})
         await self.host.delete_workspace()
         self.assertEqual(self.host.active_workspace_id, root_id)
+        self.assertIsNone(deleted_vault.get("search:search-model"))
         # The workspace's whole directory is removed, so its archive goes with
         # it rather than being emptied in place. The store object captured
         # above can no longer open its file, which is the point.
@@ -214,6 +221,7 @@ class WorkspacePersistenceTests(unittest.IsolatedAsyncioTestCase):
             "autostart": True, "relay": invitation["url"]})
         vault.set("remote-token", invitation["token"])
         vault.set("provider:legacy-guest", "legacy-api-key")
+        vault.set("search:legacy-guest", "legacy-search-key")
         storage.save()
         self.guest = DesktopRuntime(storage)
         await self.guest.start()
@@ -221,10 +229,13 @@ class WorkspacePersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.guest.remote)
         self.assertEqual(len(self.guest.catalog["workspaces"]), 2)
         self.assertEqual(self.guest.engine.storage.vault.get("provider:legacy-guest"), "legacy-api-key")
+        self.assertEqual(self.guest.engine.storage.vault.get("search:legacy-guest"), "legacy-search-key")
         self.assertNotIn(invitation["token"], self.guest.catalog_path.read_text())
         await self.guest.delete_workspace()
         self.assertIsNone(vault.get(remote_id + ":provider:legacy-guest"))
         self.assertIsNone(vault.get("provider:legacy-guest"))
+        self.assertIsNone(vault.get(remote_id + ":search:legacy-guest"))
+        self.assertIsNone(vault.get("search:legacy-guest"))
         self.assertIsNone(vault.get("remote-token"))
 
     async def test_a_legacy_root_token_that_will_not_delete_is_retried(self):
@@ -246,6 +257,7 @@ class WorkspacePersistenceTests(unittest.IsolatedAsyncioTestCase):
                                               "autostart": True, "relay": invitation["url"]})
         vault.set("remote-token", invitation["token"])
         vault.set("provider:legacy-guest", "legacy-api-key")
+        vault.set("search:legacy-guest", "legacy-search-key")
         storage.save()
         self.guest = DesktopRuntime(storage)
         await self.guest.start()
@@ -269,12 +281,13 @@ class WorkspacePersistenceTests(unittest.IsolatedAsyncioTestCase):
         records = self.guest.storage.read_pending_cleanup()
         self.assertEqual([r["id"] for r in records], [remote_id])
         self.assertEqual(sorted(records[0]["root_credentials"]),
-                         ["provider:legacy-guest", "remote-token"],
+                         ["provider:legacy-guest", "remote-token", "search:legacy-guest"],
                          "the root names must be recorded separately")
         self.assertEqual(records[0]["credentials"], [],
                          "the workspace's own credentials were deleted")
         self.assertEqual(vault.get("remote-token"), invitation["token"])
         self.assertEqual(vault.get("provider:legacy-guest"), "legacy-api-key")
+        self.assertEqual(vault.get("search:legacy-guest"), "legacy-search-key")
         self.assertIsNone(self.guest.storage.settings.get("remote"),
                           "the description that named them is already gone")
 
@@ -285,6 +298,7 @@ class WorkspacePersistenceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(vault.get("remote-token"))
         self.assertIsNone(vault.get("provider:legacy-guest"))
+        self.assertIsNone(vault.get("search:legacy-guest"))
         self.assertEqual(self.guest.storage.read_pending_cleanup(), [])
         self.assertNotIn(remote_id + ":remote-token", vault.values,
                          "the retry must not look behind the workspace prefix")
@@ -293,6 +307,7 @@ class WorkspacePersistenceTests(unittest.IsolatedAsyncioTestCase):
         """The notice promises a retry, so there must be something to retry."""
         invitation = await self.host.invite("guest", self.host.active_url, target=self.host.active_id)
         await self.guest_join(invitation)
+        self.vault.set("search:guest", "private-search-key")
         original = self.vault.delete
 
         def locked(name):
@@ -307,7 +322,7 @@ class WorkspacePersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([(r["type"], r["source"], r["workspace"]) for r in records],
                          [("credentials", "member", None)])
         self.assertEqual(sorted(records[0]["credentials"]),
-                         ["provider:guest", "relay:guest"])
+                         ["provider:guest", "relay:guest", "search:guest"])
         self.assertIn("relay:guest", self.vault.values)
 
         await self.guest.close()
@@ -317,6 +332,7 @@ class WorkspacePersistenceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn("relay:guest", self.vault.values)
         self.assertNotIn("provider:guest", self.vault.values)
+        self.assertNotIn("search:guest", self.vault.values)
         self.assertEqual(self.host.storage.read_pending_cleanup(), [])
 
     async def test_an_owed_token_record_does_not_remove_a_live_workspace(self):

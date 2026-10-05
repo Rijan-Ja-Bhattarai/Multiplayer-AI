@@ -302,8 +302,8 @@ QPushButton#workspace { background: #000000; border-radius: 16px; font-size: 20p
 QPushButton#workspace:hover, QPushButton#workspace:checked { background: #000000; border-color: #ffffff; color: #ffffff; }
 QPushButton#ghost { background: #000000; color: #ffffff; padding: 7px 10px; border-color: transparent; }
 QPushButton#ghost:hover { border-color: #ffffff; }
-QPushButton#statValue { text-align: left; padding: 0; border: none; }
-QPushButton#statValue:hover { text-decoration: underline; }
+QPushButton#statValue { background: transparent; text-align: left; padding: 0; border: none; }
+QPushButton#statValue:hover, QPushButton#statValue:pressed, QPushButton#statValue:focus { background: transparent; border: none; text-decoration: none; }
 QPushButton#danger { background: #000000; color: #ffffff; }
 QLineEdit, QPlainTextEdit, QComboBox { background: #000000; color: #ffffff; border: 1px solid #555555; border-radius: 7px; padding: 10px; selection-background-color: #ffffff; selection-color: #000000; }
 QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus { border: 1px solid #ffffff; }
@@ -350,8 +350,8 @@ QLabel#heading { font-size: 19px; font-weight: 650; color: #111214; }
 QLabel#muted { color: #5c6069; }
 QLabel#eyebrow { color: #4c56d8; font-size: 10px; font-weight: 650; }
 QLabel#statValue { font-size: 30px; color: #111214; font-weight: 650; }
-QPushButton#statValue { font-size: 30px; color: #111214; font-weight: 650; text-align: left; padding: 0; border: none; }
-QPushButton#statValue:hover { text-decoration: underline; }
+QPushButton#statValue { background: transparent; font-size: 30px; color: #111214; font-weight: 650; text-align: left; padding: 0; border: none; }
+QPushButton#statValue:hover, QPushButton#statValue:pressed, QPushButton#statValue:focus { background: transparent; border: none; text-decoration: none; }
 QLabel#online { color: #1e7d43; }
 QPushButton { background: #e2e4ea; border: 0; border-radius: 7px; padding: 10px 16px; color: #1f2124; font-weight: 550; }
 QPushButton:hover { background: #d5d8e0; color: #111214; }
@@ -415,8 +415,8 @@ QLabel#heading { font-size: 19px; font-weight: 650; color: #f4f1e6; }
 QLabel#muted { color: #c7d1cd; }
 QLabel#eyebrow { color: #55d1d0; font-size: 10px; font-weight: 650; }
 QLabel#statValue { font-size: 30px; color: #f4f1e6; font-weight: 650; }
-QPushButton#statValue { font-size: 30px; color: #f4f1e6; font-weight: 650; text-align: left; padding: 0; border: none; }
-QPushButton#statValue:hover { text-decoration: underline; }
+QPushButton#statValue { background: transparent; font-size: 30px; color: #f4f1e6; font-weight: 650; text-align: left; padding: 0; border: none; }
+QPushButton#statValue:hover, QPushButton#statValue:pressed, QPushButton#statValue:focus { background: transparent; border: none; text-decoration: none; }
 QLabel#online { color: #55d1d0; }
 QPushButton { background: #566166; border: 0; border-radius: 7px; padding: 10px 16px; color: #e2ddcc; font-weight: 550; }
 QPushButton:hover { background: #626e73; color: #f4f1e6; }

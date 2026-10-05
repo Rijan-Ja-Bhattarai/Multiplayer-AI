@@ -80,11 +80,11 @@ UNAVAILABLE = "unavailable"
 GONE = (REMOVED, ABSENT)
 
 # The only credential names this app mints: the bare legacy invitation
-# token, and one provider or relay entry per agent id. Agent ids, profile
+# token, and provider, search or relay entries per agent id. Agent ids, profile
 # ids and member names are all validated as [A-Za-z0-9_-]{1,64} when they
 # are accepted, so matching that shape here cannot orphan an entry the
 # code created.
-CREDENTIAL_NAME = re.compile(r"(?:remote-token|(?:relay|provider):[A-Za-z0-9_-]{1,64})")
+CREDENTIAL_NAME = re.compile(r"(?:remote-token|(?:relay|provider|search):[A-Za-z0-9_-]{1,64})")
 
 # Bounds a hand-edited or corrupt ledger from turning one launch into an
 # unbounded number of credential-store round trips.
