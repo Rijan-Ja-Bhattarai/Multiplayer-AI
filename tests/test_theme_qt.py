@@ -112,12 +112,13 @@ def test_apply_theme_replaces_the_stylesheet(window) -> None:
     assert window.styleSheet() == stylesheet(DARK)
 
 
-def test_apply_theme_recolours_provider_glyphs(window) -> None:
+def test_apply_theme_switches_provider_logos(window) -> None:
     """Provider controls must remain readable when switching to light."""
-    dark = window.provider_glyphs["openai"].styleSheet()
+    dark = window.provider_logos["openai"].pixmap().toImage()
     window.apply_theme(LIGHT)
-    assert window.provider_glyphs["openai"].styleSheet() != dark
-    assert provider_entry(LIGHT, "openai")[3] in window.provider_glyphs["openai"].styleSheet()
+    light = window.provider_logos["openai"].pixmap().toImage()
+    assert light != dark
+    assert not light.isNull()
 
 
 def test_apply_theme_recolours_hand_styled_widgets(window) -> None:
@@ -158,7 +159,12 @@ def test_model_controls_use_the_stored_theme_on_first_paint(
 
     instance = MainWindow(storage)
     try:
-        assert provider_entry(name, "openai")[3] in instance.provider_glyphs["openai"].styleSheet()
+        image = instance.provider_logos["openai"].pixmap().toImage()
+        pixels = [image.pixelColor(x, y) for x in range(image.width()) for y in range(image.height())
+                  if image.pixelColor(x, y).alpha() > 128]
+        assert pixels, "The real logo must be visible on first paint"
+        brightness = sum(pixel.lightness() for pixel in pixels) / len(pixels)
+        assert (brightness > 128) == (name != LIGHT), "Use a contrasting brand mark for each surface"
         assert instance.palette().color(QPalette.ColorRole.PlaceholderText).name() == color(name, "text_muted")
         assert not instance.findChildren(OrbitArt)
     finally:

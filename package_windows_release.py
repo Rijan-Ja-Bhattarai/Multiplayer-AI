@@ -5,6 +5,7 @@ import argparse
 
 
 def main():
+    """Build the Windows release archive from the executable bundle and project guides."""
     root = Path(__file__).resolve().parent
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--bundle', type=Path, default=root / 'dist' / 'MultiplayerAI')
@@ -17,7 +18,7 @@ def main():
     with ZipFile(output, 'w', ZIP_DEFLATED, compresslevel=9) as archive:
         for path in files:
             archive.write(path, path.relative_to(bundle.parent))
-        for name in ('Install-MultiplayerAI.cmd', 'Install-MultiplayerAI.ps1', 'DESKTOP_GUIDE.md'):
+        for name in ('Install-MultiplayerAI.cmd', 'Install-MultiplayerAI.ps1', 'DESKTOP_GUIDE.md', 'docs.html'):
             archive.write(root / name, name)
     with ZipFile(output) as archive:
         failed = archive.testzip()

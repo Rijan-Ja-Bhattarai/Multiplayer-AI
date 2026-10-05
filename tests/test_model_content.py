@@ -8,7 +8,7 @@ import httpx
 from network_a2a.adapters import ProviderConfig, ProviderError, create_adapter
 from network_a2a.content import MAX_MESSAGE_BYTES, content_summary, validate_content
 from network_a2a.persistence import model_context
-from network_a2a.web_search import SearXNG, SearchError, validate_search_url
+from network_a2a.web_search import OllamaSearch, SearXNG, SearchError, validate_search_url
 
 
 IMAGE = {"type": "image", "name": "diagram.png", "mime_type": "image/png",
@@ -137,13 +137,85 @@ class ModelContentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(error.exception.code, "web_search")
 
     async def test_search_failure_bodies_are_not_exposed(self):
+        """Verify search failures never expose the remote response body."""
         async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(500, text="SECRET"))) as http:
             with self.assertRaises(SearchError) as error:
                 await SearXNG(http, "https://search.example").search("test")
         self.assertNotIn("SECRET", str(error.exception))
 
+    async def test_hosted_search_works_with_other_model_providers_and_separate_keys(self):
+        """Verify hosted search works across providers without mixing credentials or attachments."""
+        calls = []
+        def transport(request):
+            """Simulate model and search endpoints while checking their separate requests and keys."""
+            calls.append(request)
+            if request.url.host == "ollama.com":
+                self.assertEqual(str(request.url), "https://ollama.com/api/web_search")
+                self.assertEqual(request.method, "POST")
+                self.assertEqual(request.headers["authorization"], "Bearer search-only-key")
+                self.assertEqual(json.loads(request.content), {"query": "latest public facts", "max_results": 5})
+                return httpx.Response(200, json={"results": [
+                    {"title": "Official facts", "url": "https://source.example/facts", "content": "Fresh evidence"}]})
+            self.assertEqual(request.headers["authorization"], "Bearer private-key")
+            self.assertNotIn("search-only-key", request.content.decode())
+            reply = '{"web_search_query":"latest public facts"}' if len(calls) == 1 else "Answer from search"
+            return httpx.Response(200, json={"choices": [{"message": {"content": reply}}]})
+        config = self.config(web_search="auto", search_provider="ollama", search_api_key="search-only-key")
+        self.assertNotIn("search-only-key", repr(config))
+        async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as http:
+            result = await create_adapter(config, http)({"messages": [{"role": "user", "content": CONTENT[:2]}]}, "peer")
+        self.assertEqual([r.url.host for r in calls], ["provider.example", "ollama.com", "provider.example"])
+        self.assertIn("https://source.example/facts", result["text"])
+        self.assertNotIn("Revenue", calls[1].content.decode())
+
+    async def test_hosted_search_errors_are_actionable_and_do_not_expose_bodies(self):
+        """Verify safe actionable errors for authentication, rate limits, outages, and redirects."""
+        for status, code, message in ((401, "web_search_authentication", "API key"),
+                                      (403, "web_search_authentication", "API key"),
+                                      (429, "web_search_rate_limit", "request limit"),
+                                      (503, "web_search", "unavailable"),
+                                      (302, "web_search", "unavailable")):
+            calls = []
+            def transport(request):
+                """Return a failing search response containing a secret and an untrusted redirect."""
+                calls.append(request)
+                return httpx.Response(status, text="SECRET", headers={"location": "https://other.example/"})
+            with self.subTest(status=status):
+                async with httpx.AsyncClient(transport=httpx.MockTransport(transport), follow_redirects=True) as http:
+                    with self.assertRaises(SearchError) as error:
+                        await OllamaSearch(http, "search-key").search("test")
+                self.assertEqual(error.exception.code, code)
+                self.assertIn(message, str(error.exception))
+                self.assertNotIn("SECRET", str(error.exception))
+                self.assertEqual(len(calls), 1)
+
+    async def test_search_results_are_bounded_and_reject_malformed_links(self):
+        """Verify result limits, safe URLs, text sanitation, and response size limits."""
+        results = [{"url": url} for url in ("file:///private", "https://key:secret@source.example", "https://[", "https://source.example:bad")]
+        results += [{"title": "<b>Source &amp; facts</b>", "url": f"https://source.example/{i}", "content": "x" * 3000} for i in range(8)]
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200, json={"results": results}))) as http:
+            sources = await OllamaSearch(http, "search-key").search("test")
+        self.assertEqual(len(sources), 5)
+        self.assertEqual(sources[0]["title"], "Source & facts")
+        self.assertEqual(len(sources[0]["snippet"]), 1600)
+        for content in (b"<html>SECRET</html>", b"x" * 1048577):
+            with self.subTest(size=len(content)):
+                async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200, content=content))) as http:
+                    with self.assertRaises(SearchError) as error:
+                        await OllamaSearch(http, "search-key").search("test")
+                self.assertNotIn("SECRET", str(error.exception))
+
+    def test_hosted_search_requires_a_separate_search_key_only_when_enabled(self):
+        """Verify a hosted search key is required only when web search is enabled."""
+        with self.assertRaisesRegex(ValueError, "Search API key"):
+            self.config(web_search="auto", search_provider="ollama")
+        self.config(search_provider="ollama")
+        with self.assertRaisesRegex(ValueError, "search provider"):
+            self.config(web_search="always", search_provider="unknown")
+
     def test_search_endpoint_validation(self):
-        for url in ("http://remote.example", "file:///private", "https://key:secret@search.example", "https://search.example?q=secret", ""):
+        """Verify malformed and unsafe search URLs fail while permitted local URLs normalize."""
+        for url in ("http://remote.example", "file:///private", "https://key:secret@search.example", "https://search.example?q=secret", "https://[", "https://search.example:bad", ""):
             with self.subTest(url=url), self.assertRaises(ValueError):
                 validate_search_url(url)
         self.assertEqual(validate_search_url("http://localhost:8888/search/"), "http://localhost:8888/search")

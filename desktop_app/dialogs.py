@@ -1,9 +1,10 @@
 import json
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QCheckBox, QComboBox, QDialog, QFormLayout, QHBoxLayout, QLineEdit, QPlainTextEdit, QScrollArea, QVBoxLayout, QWidget
 
 from network_a2a.adapters import PROVIDERS
+from network_a2a.web_search import validate_search_settings, validate_search_url
 
 from .theme import PROVIDER_NAMES, color
 from .lan import lan_addresses
@@ -23,6 +24,7 @@ def _style_error(widget, window):
 
 class AgentDialog(QDialog):
     def __init__(self, window, provider="ollama", profile=None):
+        """Build the model connection form, restoring saved provider and search settings."""
         super().__init__(window)
         self.window = window
         self.profile = profile
@@ -35,6 +37,7 @@ class AgentDialog(QDialog):
         self.layout.addWidget(label("Edit model" if profile else "Connect a model", "title"))
         self.layout.addWidget(label("Your model runs on this device. Its key stays in your OS credential store.", "muted", True))
         scroll = QScrollArea()
+        self.scroll = scroll
         scroll.setWidgetResizable(True)
         body = QWidget()
         body_layout = QVBoxLayout(body)
@@ -79,24 +82,42 @@ class AgentDialog(QDialog):
         body_layout.addWidget(self.vision)
         body_layout.addWidget(label("Select a vision-capable model to understand images and scanned PDFs. Text PDFs work with any model.", "muted", True))
         body_layout.addWidget(label("Internet access", "heading"))
-        self.internet = QCheckBox("Allow this model to search the web with SearXNG")
+        self.internet = QCheckBox("Allow this model to search the web")
         body_layout.addWidget(self.internet)
+        self.search_settings = QWidget()
+        search_layout = QVBoxLayout(self.search_settings)
+        search_layout.setContentsMargins(0, 0, 0, 0)
         search_form = QFormLayout()
+        self.search_form = search_form
+        self.search_provider = QComboBox()
+        self.search_provider.addItem("Ollama web search · no server setup", "ollama")
+        self.search_provider.addItem("SearXNG · use your own server", "searxng")
         self.search_mode = QComboBox()
         self.search_mode.addItem("Automatic · when the model needs outside information", "auto")
         self.search_mode.addItem("Always · search for every question", "always")
         self.search_url = QLineEdit()
-        self.search_url.setPlaceholderText("https://your-searxng-server.example.com")
+        self.search_url.setPlaceholderText("https://your-server.example.com or http://localhost:8888")
+        self.search_key = QLineEdit()
+        self.search_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.search_key.setPlaceholderText("Ollama account key · leave blank to keep a saved search key")
+        search_form.addRow("Search provider", self.search_provider)
         search_form.addRow("Search mode", self.search_mode)
+        search_form.addRow("Search API key", self.search_key)
         search_form.addRow("SearXNG server", self.search_url)
-        body_layout.addLayout(search_form)
+        search_layout.addLayout(search_form)
         self.search_insecure = QCheckBox("Allow SearXNG over HTTP on a trusted LAN")
-        body_layout.addWidget(self.search_insecure)
+        search_layout.addWidget(self.search_insecure)
+        self.search_help = label("", "muted", True)
+        self.search_help.setTextFormat(Qt.TextFormat.RichText)
+        self.search_help.setOpenExternalLinks(True)
+        search_layout.addWidget(self.search_help)
         self.search_test = action("Test web search", self.test_search)
-        body_layout.addWidget(self.search_test)
+        self.search_testing = False
+        search_layout.addWidget(self.search_test)
         self.search_status = label("", "muted", True)
-        body_layout.addWidget(self.search_status)
-        body_layout.addWidget(label("Automatic search asks the model to search when it needs current or uncertain facts. Your SearXNG server must allow JSON results. Search results and source links are included in its answer.", "muted", True))
+        search_layout.addWidget(self.search_status)
+        search_layout.addWidget(label("Automatic mode lets the model request a search for current or uncertain facts. Some models may miss when a search is needed; choose Always to search before every answer. Queries go to the search provider you select, and source links are included in the answer.", "muted", True))
+        body_layout.addWidget(self.search_settings)
         self.error = label("", "muted", True)
         self.error.setStyleSheet("color: #f38a8e;")
         self.layout.addWidget(self.error)
@@ -107,6 +128,10 @@ class AgentDialog(QDialog):
         self.layout.addLayout(row)
         self.provider.currentIndexChanged.connect(self.change_provider)
         self.internet.toggled.connect(self.change_internet)
+        self.search_provider.currentIndexChanged.connect(self.change_internet)
+        for signal in (self.search_url.textChanged, self.search_key.textChanged, self.search_insecure.toggled,
+                       self.search_provider.currentIndexChanged, self.internet.toggled):
+            signal.connect(lambda *args: self.search_status.setText(""))
         self.change_provider()
         if profile:
             self.name.setText(profile["id"])
@@ -117,6 +142,7 @@ class AgentDialog(QDialog):
             self.autostart.setChecked(profile.get("autostart", True))
             self.insecure.setChecked(profile.get("allow_insecure", False))
             self.vision.setChecked(profile.get("vision", False))
+            self.search_provider.setCurrentIndex(max(0, self.search_provider.findData(profile.get("search_provider", "searxng"))))
             self.internet.setChecked(profile.get("web_search", "off") != "off")
             self.search_mode.setCurrentIndex(max(0, self.search_mode.findData(profile.get("web_search", "auto"))))
             self.search_url.setText(profile.get("searxng_url", ""))
@@ -139,6 +165,7 @@ class AgentDialog(QDialog):
         self.key.setPlaceholderText("Optional for local Ollama" if not spec.key_required else "API key · leave blank to keep a saved key")
 
     def find_models(self):
+        """Fetch the selected provider's model list without blocking the dialog."""
         self.models_button.setEnabled(False)
         selected = self.model.currentText()
         def success(models):
@@ -159,40 +186,114 @@ class AgentDialog(QDialog):
                             self.profile["id"] if self.profile else None, success=success, failure=fail)
 
     def change_internet(self):
-        for widget in (self.search_mode, self.search_url, self.search_insecure, self.search_test):
-            widget.setEnabled(self.internet.isChecked())
+        """Show the selected search provider's fields and update test availability."""
+        enabled = self.internet.isChecked()
+        hosted = self.search_provider.currentData() == "ollama"
+        self.search_settings.setVisible(enabled)
+        self.search_form.setRowVisible(self.search_key, hosted)
+        self.search_form.setRowVisible(self.search_url, not hosted)
+        self.search_insecure.setVisible(not hosted)
+        self.search_test.setEnabled(enabled and not self.search_testing)
+        self.search_help.setText(
+            f'Get a key from <a href="https://ollama.com/settings/keys" style="color: {color(self.window.theme, "accent")}">your Ollama account</a> and paste it into Search API key. '
+            'It works with any connected model, including local Ollama. The key stays in your OS credential store.'
+            if hosted else
+            'SearXNG needs a running search server; it is separate from your model\'s API root. '
+            'Enter its address above. The server owner must enable JSON search results. '
+            'Choose Ollama web search if you do not have a server.')
+
+    def focus_search(self):
+        """Focus the relevant search credential or URL and keep it visible after layout."""
+        widget = self.search_key if self.search_provider.currentData() == "ollama" else self.search_url
+        self.scroll.ensureWidgetVisible(widget)
+        widget.setFocus()
+        # Showing the error can resize the viewport after this call.
+        # Scroll again once Qt has laid out the visible settings and error.
+        def reveal():
+            """Scroll the visible search field into view after Qt applies the new layout."""
+            if self.isVisible() and widget.isVisible():
+                self.scroll.ensureWidgetVisible(widget, 0, 24)
+        QTimer.singleShot(0, reveal)
+
+    def search_state(self):
+        """Return a settings snapshot used to discard stale search test responses."""
+        return (self.internet.isChecked(), self.search_provider.currentData(), self.search_url.text().strip(),
+                self.search_key.text().strip(), self.search_insecure.isChecked())
+
+    def validate_search(self):
+        """Return whether search settings are valid, displaying and focusing any error."""
+        if not self.internet.isChecked():
+            return True
+        try:
+            if self.search_provider.currentData() == "searxng":
+                validate_search_url(self.search_url.text(), self.search_insecure.isChecked())
+            elif self.search_key.text().strip() or not self.profile:
+                validate_search_settings("ollama", api_key=self.search_key.text().strip())
+        except ValueError as exc:
+            self.error.setText(str(exc))
+            self.search_status.setText(str(exc))
+            self.focus_search()
+            return False
+        return True
 
     def test_search(self):
-        self.search_test.setEnabled(False)
-        self.search_status.setText("Testing SearXNG…")
+        """Test the configured search service and report results for the current settings."""
+        self.error.setText("")
+        if not self.validate_search():
+            return
+        self.search_testing = True
+        self.change_internet()
+        state = self.search_state()
+        self.search_status.setText("Testing web search…")
         def success(count):
+            """Restore test controls and show the result only if settings have not changed."""
             if self.isVisible():
+                self.search_testing = False
                 self.change_internet()
-                self.search_status.setText(f"SearXNG is reachable · {count} results returned")
+                if self.search_state() == state:
+                    self.search_status.setText(f"Web search is reachable · {count} results returned" if count else
+                                               "Connected to the search service, but no results were returned. Try again before relying on web search.")
         def failure(message):
+            """Restore test controls and focus an error only for unchanged search settings."""
             if self.isVisible():
+                self.search_testing = False
                 self.change_internet()
-                self.search_status.setText(message)
+                if self.search_state() == state:
+                    self.search_status.setText(message)
+                    self.focus_search()
         self.window.command("test_web_search", self.search_url.text().strip(), self.search_insecure.isChecked(),
+                            self.search_provider.currentData(), self.search_key.text().strip() or None,
+                            self.profile["id"] if self.profile else None,
                             success=success, failure=failure)
 
     def save(self):
+        """Validate and save the model profile with separate model and search credentials."""
         self.error.setText("")
+        if not self.validate_search():
+            return
         profile = {"id": self.name.text().strip(), "provider": self.provider.currentData(),
                    "model": self.model.currentText().strip(), "base_url": self.base.text().strip(),
                    "system_prompt": self.system.toPlainText().strip(), "autostart": self.autostart.isChecked(),
                    "allow_insecure": self.insecure.isChecked(), "vision": self.vision.isChecked(),
                    "web_search": self.search_mode.currentData() if self.internet.isChecked() else "off",
+                   "search_provider": self.search_provider.currentData(),
                    "searxng_url": self.search_url.text().strip(), "searxng_allow_insecure": self.search_insecure.isChecked()}
         self.save_button.setEnabled(False)
         def success(result):
+            """Clear credential fields and close the dialog after a successful save."""
             self.key.clear()
+            self.search_key.clear()
             self.accept()
         def failure(message):
+            """Display the save error and focus search settings when they caused the failure."""
             if self.isVisible():
                 self.error.setText(message)
                 self.save_button.setEnabled(True)
-        self.window.command("save_agent", profile, self.key.text() or None, success=success, failure=failure)
+                if self.internet.isChecked() and ("search" in message.lower() or "searxng" in message.lower()):
+                    self.focus_search()
+        search_key = (self.search_key.text().strip() or None) if self.search_provider.currentData() == "ollama" else None
+        self.window.command("save_agent", profile, self.key.text() or None, search_key,
+                            success=success, failure=failure)
 
 
 class JoinDialog(QDialog):

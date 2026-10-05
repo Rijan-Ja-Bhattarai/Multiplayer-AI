@@ -219,6 +219,7 @@ class DesktopRuntime:
             self.emit("offline", "Workspace is offline. Your saved history is still available.")
 
     async def start(self):
+        """Retry credential cleanup, migrate saved connections, and activate the workspace."""
         # Before anything connects: a deletion interrupted on a previous run
         # may still owe credential deletions, and those are worth finishing
         # before the app starts a relay or reads a token.
@@ -233,9 +234,10 @@ class DesktopRuntime:
             profile = self.storage.settings.get("remote_agent")
             if profile:
                 scoped.settings["remote_agent"] = profile
-                key = self.storage.vault.get("provider:" + profile["id"])
-                if key:
-                    scoped.vault.set("provider:" + profile["id"], key)
+                for prefix in ("provider:", "search:"):
+                    key = self.storage.vault.get(prefix + profile["id"])
+                    if key:
+                        scoped.vault.set(prefix + profile["id"], key)
             scoped.save()
             self.catalog["workspaces"].append(entry)
             self.active_workspace_id = entry["id"]
@@ -364,12 +366,15 @@ class DesktopRuntime:
         return await self.connected_engine().send(target, payload)
 
     async def send_conversation(self, conversation_id, text):
+        """Send text through the currently connected workspace engine."""
         return await self.connected_engine().send_conversation(conversation_id, text)
 
-    async def save_agent(self, profile, key=None):
-        return await self.connected_engine().save_agent(profile, key)
+    async def save_agent(self, profile, key=None, search_key=None):
+        """Delegate profile and separate credential updates to the connected engine."""
+        return await self.connected_engine().save_agent(profile, key, search_key)
 
     async def prepare_attachments(self, paths, vision=False):
+        """Prepare model attachments in a worker thread to keep the UI responsive."""
         from .attachments import prepare_attachments
         return await asyncio.to_thread(prepare_attachments, paths, vision)
 
@@ -391,14 +396,17 @@ class DesktopRuntime:
         directory the deletion is about to remove.
         """
         names = ["remote-token"]
+        names.extend(storage.agent_save_credential_names())
         for identity in storage.settings.get("identities", {}):
             names.append("relay:" + identity)
             names.append("provider:" + identity)
+            names.append("search:" + identity)
         profile_ids = {profile["id"] for profile in storage.settings.get("agents", [])}
         if storage.settings.get("remote_agent"):
             profile_ids.add(storage.settings["remote_agent"]["id"])
         for identity in profile_ids:
             names.append("provider:" + identity)
+            names.append("search:" + identity)
         return list(dict.fromkeys(names))
 
     def _purge_workspace_data(self, entry, engine=None, owed=()):
@@ -423,6 +431,9 @@ class DesktopRuntime:
         """
         storage = engine.storage if engine is not None else self.scoped_storage(entry)
         names = self.storage._owed(owed[0], "credentials") if owed else self._credential_names_for(storage)
+        # The deletion ledger now owns these names. Remove the save journal first
+        # so recovery cannot restore credentials after this workspace is deleted.
+        storage.discard_agent_save()
         # Only the explicit UNAVAILABLE marker counts as a failure, so a vault
         # that does not speak in these terms is treated as having done the
         # work rather than as stranding a secret.
@@ -437,7 +448,7 @@ class DesktopRuntime:
             # Only the local workspace's own keys and its chat archive are
             # cleared; the root directory itself must survive.
             for key in ("identities", "device_id", "agents", "remote", "remote_agent",
-                        "share_lan", "relay_port", "workspace_name", "workspace_id"):
+                        "share_lan", "relay_port", "workspace_name", "workspace_id", "agent_save_revision"):
                 storage.settings.pop(key, None)
             storage.save()
             HistoryStore(storage.directory).clear()
@@ -475,6 +486,7 @@ class DesktopRuntime:
                         and not any(p["id"] == legacy["id"]
                                     for p in self.storage.settings.get("agents", []))):
                     names.append("provider:" + legacy["id"])
+                    names.append("search:" + legacy["id"])
         if not names:
             return []
         remaining = [name for name in names

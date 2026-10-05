@@ -16,6 +16,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from .conversations import Conversations
 from .content import MAX_FRAME_BYTES
+from .web_search import SEARCH_ERRORS
 
 
 MAX_BYTES = MAX_FRAME_BYTES
@@ -134,6 +135,7 @@ class Relay:
             self.pending.pop(request_id, None)
 
     async def websocket(self, socket):
+        """Authenticate an agent socket and relay validated messages with safe error responses."""
         agent = self.authenticate(socket.headers.get("authorization", ""))
         if not agent:
             await socket.close(code=1008)
@@ -191,8 +193,8 @@ class Relay:
                                 safe_codes = ("authentication", "rate_limit", "http_error", "timeout", "connection",
                                               "invalid_input", "invalid_response", "no_text", "web_search")
                                 detail = f"Remote provider error: {code}" if isinstance(code, str) and code in safe_codes else "Remote agent failed"
-                                if code == "web_search":
-                                    detail = "Web search failed. Check the SearXNG URL and use Test web search in the model's settings."
+                                if isinstance(code, str) and code in SEARCH_ERRORS:
+                                    detail = SEARCH_ERRORS[code]
                                 entry[2].set_exception(ConnectionError(detail))
                             else:
                                 entry[2].set_result(frame.get("payload"))

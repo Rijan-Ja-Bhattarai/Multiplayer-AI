@@ -17,7 +17,7 @@ from network_a2a.client import AgentClient, direct_relay_connection
 from network_a2a.server import Relay, create_app
 from network_a2a.persistence import HistoryStore
 from network_a2a.content import MAX_FRAME_BYTES, content_summary
-from network_a2a.web_search import SearXNG
+from network_a2a.web_search import create_search
 
 from .storage import UNAVAILABLE
 
@@ -57,6 +57,8 @@ class WorkspaceRuntime:
         self.mutation = asyncio.Lock()
 
     async def start(self):
+        """Recover unfinished model saves before loading credentials or starting the relay."""
+        self.storage.recover_agent_save()
         self.http = httpx.AsyncClient(timeout=65, follow_redirects=False)
         self.direct_http = httpx.AsyncClient(timeout=65, follow_redirects=False, trust_env=False)
         self.credentials = self.storage.credentials() or {}
@@ -384,6 +386,7 @@ class WorkspaceRuntime:
                 self.emit("conversation_joined", conversation_id)
 
     async def _remove_runner(self, agent_id):
+        """Disconnect and cancel an agent runner, then wait for its task to finish."""
         entry = self.runners.pop(agent_id, None)
         if entry:
             client, task = entry
@@ -398,15 +401,18 @@ class WorkspaceRuntime:
                     await client.socket.close()
             await asyncio.sleep(.1)
 
-    def _config(self, profile, key):
+    def _config(self, profile, key, search_key=None):
+        """Build validated provider settings from a profile and its separate vault keys."""
         spec = PROVIDERS[profile["provider"]]
         return ProviderConfig(provider=profile["provider"], model=profile["model"], base_url=profile.get("base_url") or spec.base_url,
                               api_key=key, system_prompt=profile.get("system_prompt"), allow_insecure=profile.get("allow_insecure", False),
                               vision=profile.get("vision", False), web_search=profile.get("web_search", "off"),
-                              searxng_url=profile.get("searxng_url", ""), searxng_allow_insecure=profile.get("searxng_allow_insecure", False))
+                              searxng_url=profile.get("searxng_url", ""), searxng_allow_insecure=profile.get("searxng_allow_insecure", False),
+                              search_provider=profile.get("search_provider", "searxng"), search_api_key=search_key)
 
     @staticmethod
     def public_profile(profile, running=True):
+        """Return model metadata suitable for sharing without credentials or endpoints."""
         return {"provider": profile["provider"], "model": profile["model"], "vision": profile.get("vision", False), "running": running}
 
     async def publish_profile(self, profile, running=True):
@@ -426,15 +432,19 @@ class WorkspaceRuntime:
                 self.emit("notice", "Your model connected, but its details could not be published to the workspace.")
 
     async def _launch_profile(self, profile, allow_insecure=False):
+        """Load vault credentials and replace the profile's running model client."""
         key = self.storage.vault.get("provider:" + profile["id"])
-        adapter = create_adapter(self._config(profile, key), self.http)
+        search_key = self.storage.vault.get("search:" + profile["id"]) if profile.get("search_provider") == "ollama" and profile.get("web_search", "off") != "off" else None
+        adapter = create_adapter(self._config(profile, key, search_key), self.http)
         token = self.active_token if self.remote else self.credentials[profile["id"]]["token"]
         await self._remove_runner(profile["id"])
         await self._attach(profile["id"], token, adapter, allow_insecure)
         await self.publish_profile(profile)
 
-    async def save_agent(self, profile, key=None):
+    async def save_agent(self, profile, key=None, search_key=None):
+        """Validate and transactionally persist a model and its keys before restarting it."""
         async with self.mutation:
+            self.storage.recover_agent_save()
             agent_id = profile["id"]
             if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", agent_id):
                 raise ValueError("Agent names need 1–64 letters, numbers, underscores, or hyphens")
@@ -443,21 +453,20 @@ class WorkspaceRuntime:
             if not self.remote and agent_id == self.active_id:
                 raise ValueError("Choose a different name for your AI agent; the device identity stays available")
             saved_key = key if key else self.storage.vault.get("provider:" + agent_id)
-            create_adapter(self._config(profile, saved_key), self.http)  # validate before mutating storage
-            if key:
-                self.storage.vault.set("provider:" + agent_id, key)
+            saved_search_key = search_key or (self.storage.vault.get("search:" + agent_id) if profile.get("search_provider") == "ollama" and profile.get("web_search", "off") != "off" else None)
+            create_adapter(self._config(profile, saved_key, saved_search_key), self.http)  # validate before mutating storage
+            updated = self.credentials
             if not self.remote:
                 if agent_id not in self.credentials:
                     updated = {**self.credentials, agent_id: {"token": secrets.token_urlsafe(32), "group": "workspace"}}
                     Relay(updated)
-                    self.storage.save_credentials(updated)
-                    self.credentials = updated
-                    self.app.state.relay.credentials = updated
-                profiles = [p for p in self.storage.settings.get("agents", []) if p["id"] != agent_id]
-                self.storage.settings["agents"] = [*profiles, dict(profile)]
-            else:
-                self.storage.settings["remote_agent"] = {**profile, "relay": self.active_url}
-            self.storage.save()
+            saved = {**profile, "relay": self.active_url} if self.remote else profile
+            finalized = self.storage.save_agent_profile(saved, updated, key, search_key, self.remote)
+            if not self.remote:
+                self.credentials = updated
+                self.app.state.relay.credentials = updated
+            if not finalized:
+                self.emit("notice", "The model was saved, but its saved credentials need another check. Unlock your credential store and restart the app to finish it.")
             await self._launch_profile(profile, self.storage.settings.get("remote", {}).get("allow_insecure", False))
             self.emit("activity", {"title": f"{agent_id} connected", "detail": f"{profile['provider']} · {profile['model']}"})
             await self.refresh()
@@ -584,6 +593,7 @@ class WorkspaceRuntime:
         return [item["name"] for item in response.json()["models"]]
 
     async def provider_models(self, provider, base_url, key=None, allow_insecure=False, agent_id=None):
+        """List provider models, reusing a saved key only for its configured endpoint."""
         if key is None and agent_id:
             profile = self.storage.settings.get("remote_agent") if self.remote else next(
                 (profile for profile in self.storage.settings.get("agents", []) if profile["id"] == agent_id), None)
@@ -598,11 +608,16 @@ class WorkspaceRuntime:
         payload = response.json()
         return [item["name"] for item in payload["models"]] if provider == "ollama" else [item["id"] for item in payload["data"]]
 
-    async def test_web_search(self, url, allow_insecure=False):
-        results = await SearXNG(self.http, url, allow_insecure).search("SearXNG")
+    async def test_web_search(self, url="", allow_insecure=False, provider="searxng", key=None, agent_id=None):
+        """Return a probe result count, reusing the saved hosted search key if needed."""
+        if not key and agent_id and provider == "ollama":
+            key = self.storage.vault.get("search:" + agent_id)
+        search = create_search(self.http, provider, url=url, api_key=key, allow_insecure=allow_insecure)
+        results = await search.search("web search")
         return len(results)
 
     async def invite(self, agent_id, public_url, lan=False, conversation_id=None, target=None, messages=None):
+        """Create an invitation for a new device identity in the locally owned workspace."""
         async with self.mutation:
             if self.remote:
                 raise ValueError("Only this workspace's host can create invitations")
@@ -643,7 +658,9 @@ class WorkspaceRuntime:
             return invitation
 
     async def remove_member(self, member):
+        """Revoke a member's access and clean up its runner, history, and credentials."""
         async with self.mutation:
+            self.storage.recover_agent_save()
             if self.remote:
                 raise ValueError("Only the workspace owner can remove members")
             if member == self.active_id:
@@ -667,7 +684,7 @@ class WorkspaceRuntime:
             # than reporting a clean removal, and record the names so a later
             # launch can finish the job rather than only telling the user to
             # try again.
-            undeleted = [name for name in ("relay:" + member, "provider:" + member)
+            undeleted = [name for name in ("relay:" + member, "provider:" + member, "search:" + member)
                          if self.storage.vault.delete(name) == UNAVAILABLE]
             self.emit("activity", {"title": "Member removed", "detail": member})
             if undeleted:

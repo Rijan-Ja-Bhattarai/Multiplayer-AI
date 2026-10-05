@@ -9,7 +9,8 @@ conda_binaries = [(str(path), '.') for path in library.glob('*.dll')
                   if path.name.lower().startswith(('libbz2', 'libmpdec', 'libcrypto', 'libssl', 'ffi', 'zlib', 'sqlite3'))]
 
 analysis = Analysis(
-    ['desktop_launcher.py'], pathex=['.'], binaries=conda_binaries, datas=[],
+    ['desktop_launcher.py'], pathex=['.'], binaries=conda_binaries,
+    datas=[('desktop_app/assets', 'desktop_app/assets'), ('docs.html', '.')],
     hiddenimports=collect_submodules('uvicorn') + collect_submodules('websockets') +
                   ['keyring.backends.Windows', 'keyring.backends.macOS', 'keyring.backends.SecretService'],
     hookspath=[], hooksconfig={}, runtime_hooks=[], excludes=['tkinter', 'PyQt5', 'PyQt6', 'PySide2'],

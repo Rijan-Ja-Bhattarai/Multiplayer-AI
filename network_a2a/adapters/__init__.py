@@ -35,7 +35,9 @@ PROVIDERS = {
 
 def load_config(provider, model=None, base_url=None, api_key_env=None, system_prompt=None,
                 max_tokens=1024, timeout=55, concurrency=4, allow_insecure=False, environ=None,
-                vision=False, web_search="off", searxng_url="", searxng_allow_insecure=False):
+                vision=False, web_search="off", searxng_url="", searxng_allow_insecure=False,
+                search_provider="searxng", search_api_key_env="OLLAMA_SEARCH_API_KEY"):
+    """Load provider and search credentials from the environment into validated settings."""
     env = os.environ if environ is None else environ
     if provider not in PROVIDERS:
         raise ValueError(f"Unknown provider: {provider}")
@@ -50,10 +52,12 @@ def load_config(provider, model=None, base_url=None, api_key_env=None, system_pr
     return ProviderConfig(provider=provider, model=model or env.get("A2A_MODEL"), base_url=base_url,
                           api_key=key, system_prompt=system_prompt if system_prompt is not None else env.get("A2A_SYSTEM_PROMPT"),
                           max_tokens=max_tokens, timeout=timeout, concurrency=concurrency, allow_insecure=allow_insecure,
-                          vision=vision, web_search=web_search, searxng_url=searxng_url, searxng_allow_insecure=searxng_allow_insecure)
+                          vision=vision, web_search=web_search, searxng_url=searxng_url, searxng_allow_insecure=searxng_allow_insecure,
+                          search_provider=search_provider, search_api_key=env.get(search_api_key_env) or None)
 
 
 def create_adapter(config, http):
+    """Validate provider availability and credentials before constructing its HTTP adapter."""
     if config.provider not in PROVIDERS:
         raise ValueError(f"Unknown provider: {config.provider}")
     spec = PROVIDERS[config.provider]

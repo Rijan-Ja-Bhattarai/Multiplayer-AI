@@ -17,6 +17,7 @@ from websockets.asyncio.client import connect
 from websockets.exceptions import InvalidStatus, ConnectionClosed
 
 from network_a2a.client import AgentClient
+from network_a2a.adapters import ProviderError
 from network_a2a.server import create_app
 
 
@@ -117,6 +118,7 @@ class NetworkTests(unittest.IsolatedAsyncioTestCase):
             await a.request("d", {})
 
     async def test_offline_timeout_and_disconnect(self):
+        """Verify requests fail when agents are offline, time out, or disconnect."""
         a = await self.start("a")
         with self.assertRaisesRegex(RuntimeError, "offline"):
             await a.request("b", {})
@@ -132,7 +134,23 @@ class NetworkTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "disconnected"):
             await request
 
+    async def test_search_errors_survive_the_relay_without_leaking_remote_details(self):
+        """Verify the relay preserves actionable search errors while hiding remote secrets."""
+        async def fail_search(payload, source):
+            """Raise the requested provider error with secret details to test relay sanitation."""
+            raise ProviderError(payload, "SECRET remote response and credentials")
+        client = await self.start("a")
+        await self.start("b", fail_search)
+        for code, message in (("web_search_authentication", "Search API key"),
+                              ("web_search_rate_limit", "request limit"),
+                              ("web_search_connection", "internet connection"),
+                              ("web_search", "Test web search")):
+            with self.subTest(code=code), self.assertRaisesRegex(RuntimeError, message) as error:
+                await client.request("b", code)
+            self.assertNotIn("SECRET", str(error.exception))
+
     async def test_duplicate_identity_and_malformed_frame(self):
+        """Verify duplicate identities and malformed socket frames are rejected."""
         await self.start("a")
         async with connect(self.ws_url, additional_headers=self.headers("a")) as duplicate:
             with self.assertRaises(ConnectionClosed):
