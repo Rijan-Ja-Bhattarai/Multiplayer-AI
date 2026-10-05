@@ -24,7 +24,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton  # noqa: E4
 from desktop_app import window as win  # noqa: E402
 from desktop_app.storage import ABSENT, REMOVED, Storage  # noqa: E402
 from desktop_app.theme import (DARK, LIGHT, MIKU, THEME_CHOICES, THEME_NAMES,
-                               THEMES)  # noqa: E402
+                               THEMES, color)  # noqa: E402
 
 
 class MemoryVault:
@@ -211,6 +211,85 @@ def test_a_saved_conversation_also_puts_the_welcome_away(window) -> None:
     window.render_agents()
 
     assert window.welcome_card.isHidden(), "the welcome covered a real conversation"
+
+
+# --- the welcome illustration -------------------------------------------
+
+
+def test_the_welcome_actually_carries_the_orbit_illustration(window, qt_app) -> None:
+    """The orbit was painted for this panel and never mounted.
+
+    It has its own unit test, which passed throughout while the widget sat
+    in the module unused, so nothing about it ever reached the screen. The
+    assertion has to be against the built window, not against the widget.
+    """
+    window.resize(1180, 760)
+    window.show()
+    qt_app.processEvents()
+    art = window.welcome_art
+
+    assert art in window.welcome_card.findChildren(win.OrbitArt), (
+        "the orbit illustration is not in the welcome panel, so the first "
+        "thing a new user sees has no motion in it")
+    assert not art.isHidden(), "the orbit illustration is on a hidden page"
+    assert art.width() >= 200 and art.height() >= 180, (
+        f"the orbit was given {art.width()}x{art.height()}, too small to read")
+    assert art.width() <= window.welcome_card.width(), (
+        "the orbit is wider than the card holding it")
+
+
+def test_the_orbit_repaints_for_the_new_theme(window, qt_app) -> None:
+    """It paints from the palette rather than being styled, so it has to be
+    told when the theme changes or it keeps the colours it was built with.
+
+    Asserted on the tile in the middle rather than by comparing whole
+    images: the chips orbit, so two grabs taken a moment apart always
+    differ and would make this pass whatever the theme did.
+    """
+    art = window.welcome_art
+    art.resize(260, 240)
+    art.set_moving(False)
+
+    def tile() -> str:
+        image = art.grab().toImage()
+        return image.pixelColor(image.width() // 2, image.height() // 2).name()
+
+    window.apply_theme(DARK)
+    qt_app.processEvents()
+    assert tile() == color(DARK, "accent"), "the orbit is not painted in the theme's accent"
+
+    window.apply_theme(LIGHT)
+    qt_app.processEvents()
+    assert tile() == color(LIGHT, "accent"), (
+        "the orbit kept the previous theme's colours")
+
+
+def test_the_orbit_holds_still_when_motion_is_reduced(window) -> None:
+    """The setting already covered the page fade; it has to reach this too."""
+    window.motion_changed(True)
+    assert not window.welcome_art.moving, (
+        "the orbit keeps turning with reduce-motion on")
+    window.motion_changed(False)
+    assert window.welcome_art.moving, (
+        "turning reduce-motion off did not restart the orbit")
+
+
+def test_the_orbit_respects_the_stored_motion_setting(qt_app, storage) -> None:
+    """The setting is read when the panel is built, not only when toggled.
+
+    Somebody who turned animations off in a previous session should not
+    get a moving illustration for the length of this one.
+    """
+    storage.settings["reduce_motion"] = True
+    from desktop_app.window import MainWindow
+
+    instance = MainWindow(storage)
+    try:
+        assert not instance.welcome_art.moving, (
+            "the orbit started moving despite the stored reduce-motion setting")
+    finally:
+        instance.network.shutdown()
+        instance.network.wait(10000)
 
 
 # --- the user panel ------------------------------------------------------

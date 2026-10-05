@@ -26,7 +26,7 @@ from .markdown import MarkdownMessage
 from .resources import ResourceSampler
 from .theme import (DARK, LIGHT, THEME_CHOICES, color, provider_entry, provider_names,
                     resolve_theme, stylesheet, system_theme)
-from .widgets import Composer, WorkspaceButton, action, label
+from .widgets import Composer, OrbitArt, WorkspaceButton, action, label
 
 
 def frame(name, layout_type=QVBoxLayout):
@@ -433,14 +433,27 @@ class MainWindow(QMainWindow):
         layout.addWidget(label("Workspace overview", "title"))
 
         self.welcome_card, welcome = frame("hero")
-        welcome.setContentsMargins(28, 26, 28, 28)
+        welcome.setContentsMargins(28, 26, 20, 26)
         welcome.setSpacing(12)
-        welcome.addWidget(label("Nothing here yet", "heroTitle"))
-        welcome.addWidget(label(
+        # The orbit illustration was painted for this panel and never
+        # mounted, so the first thing a new user saw had no motion in it at
+        # all. Text and actions stay on the left; the art takes the right
+        # and is allowed to shrink before the words are.
+        hero_row = QHBoxLayout()
+        hero_row.setSpacing(18)
+        hero_words = QVBoxLayout()
+        hero_words.setSpacing(10)
+        hero_row.addLayout(hero_words, 1)
+        self.welcome_art = OrbitArt(theme=self.theme)
+        self.welcome_art.set_moving(not self.storage.settings.get("reduce_motion"))
+        hero_row.addWidget(self.welcome_art, 0)
+        welcome.addLayout(hero_row)
+        hero_words.addWidget(label("Nothing here yet", "heroTitle"))
+        hero_words.addWidget(label(
             "This workspace runs a private network on your own device. "
             "Connect a model to start talking to it, or join someone "
             "else's workspace with an invitation.", "muted", True))
-        welcome.addSpacing(6)
+        hero_words.addSpacing(6)
         # Held on the window so it can be disabled until the runtime is
         # ready, exactly as the top bar's own connect button is. Laid out in
         # a row so they keep their natural width instead of stretching the
@@ -459,7 +472,7 @@ class MainWindow(QMainWindow):
         choices.addWidget(self.welcome_connect)
         choices.addWidget(self.welcome_join)
         choices.addStretch()
-        welcome.addLayout(choices)
+        hero_words.addLayout(choices)
         layout.addWidget(self.welcome_card)
 
         # Everything the welcome replaces, kept as one widget so it can be
@@ -980,6 +993,8 @@ class MainWindow(QMainWindow):
         self.style_toast()
         self.join_button.setStyleSheet("color:" + color(name, "success"))
         self.refresh_avatar()
+        if hasattr(self, "welcome_art"):
+            self.welcome_art.set_theme(name)
         for button, (_, key) in zip(self.nav_buttons, PAGES):
             button.setIcon(navigation_icon(key, color(name, "text")))
         for provider, logo in self.provider_logos.items():
@@ -1007,6 +1022,8 @@ class MainWindow(QMainWindow):
             effect = self.stack.currentWidget().graphicsEffect()
             if effect:
                 effect.setOpacity(1.0)
+        if hasattr(self, "welcome_art"):
+            self.welcome_art.set_moving(not reduced)
 
     def is_model_agent(self, agent):
         return bool(agent.get("kind") == "model" or agent.get("provider") or agent.get("model") or any(

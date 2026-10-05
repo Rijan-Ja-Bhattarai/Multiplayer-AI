@@ -1,6 +1,7 @@
 import math
 
-from PySide6.QtCore import Property, QEasingCurve, QPropertyAnimation, Qt, Signal
+from PySide6.QtCore import (Property, QAbstractAnimation, QEasingCurve,
+                            QPropertyAnimation, Qt, Signal)
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import QLabel, QPushButton, QPlainTextEdit, QWidget
 
@@ -47,7 +48,7 @@ class OrbitArt(QWidget):
     _CHIPS = (("Ollama", "O", "orbit_ollama"), ("Claude", "✳", "orbit_claude"),
               ("Gemini", "✦", "orbit_gemini"), ("OpenAI", "◎", "orbit_openai"))
 
-    def __init__(self, parent=None, theme=DARK):
+    def __init__(self, parent=None, theme=DARK, moving=True):
         super().__init__(parent)
         self.setMinimumSize(260, 240)
         self._phase = 0.0
@@ -57,12 +58,30 @@ class OrbitArt(QWidget):
         self.animation.setEndValue(math.tau)
         self.animation.setDuration(24000)
         self.animation.setLoopCount(-1)
-        self.animation.start()
+        if moving:
+            self.animation.start()
 
     def set_theme(self, name):
         """Adopt another theme and repaint with its colours."""
         self._theme = name
         self.update()
+
+    def set_moving(self, moving):
+        """Hold the orbit still, or let it turn again.
+
+        Paused rather than stopped, which would snap the chips back to
+        their start value. A held illustration is still a whole one, since
+        the chips are placed by index rather than by where they ended up.
+        """
+        if moving:
+            if self.animation.state() != QAbstractAnimation.State.Running:
+                self.animation.start()
+        else:
+            self.animation.pause()
+
+    @property
+    def moving(self):
+        return self.animation.state() == QAbstractAnimation.State.Running
 
     def get_phase(self):
         return self._phase

@@ -125,15 +125,14 @@ def test_apply_theme_recolours_hand_styled_widgets(window) -> None:
     """Widgets carrying their own stylesheet pick up the new colours.
 
     These outrank the application stylesheet and would otherwise keep the
-    dark-theme values after a switch.
+    dark-theme values after a switch. The avatar used to be one of them;
+    it is painted now, so it is covered by its own test instead.
     """
     window.apply_theme(LIGHT)
-    light_avatar = window.avatar.styleSheet()
     light_toast = window.toast.styleSheet()
 
     window.apply_theme(DARK)
 
-    assert window.avatar.styleSheet() != light_avatar
     assert window.toast.styleSheet() != light_toast
 
 
@@ -166,7 +165,15 @@ def test_model_controls_use_the_stored_theme_on_first_paint(
         brightness = sum(pixel.lightness() for pixel in pixels) / len(pixels)
         assert (brightness > 128) == (name != LIGHT), "Use a contrasting brand mark for each surface"
         assert instance.palette().color(QPalette.ColorRole.PlaceholderText).name() == color(name, "text_muted")
-        assert not instance.findChildren(OrbitArt)
+        # The orbit is hand-painted, so the stylesheet never reaches it and
+        # apply_theme() does not run during startup. It used to be asserted
+        # absent, which is how it stayed unmounted for so long: a later
+        # commit replaced the hero panel it lived in and the assertion was
+        # written to match what was left rather than to what was meant.
+        assert instance.findChildren(OrbitArt), "the orbit art is not in the window"
+        assert instance.welcome_art._theme == name, (
+            "the orbit art was built with the wrong palette, so the welcome "
+            "panel shows another theme's colours until the theme is switched")
     finally:
         instance.network.shutdown()
         instance.network.wait(10000)
