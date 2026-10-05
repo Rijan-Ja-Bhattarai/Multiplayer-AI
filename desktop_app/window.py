@@ -324,11 +324,17 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+R"), self).activated.connect(self.refresh_resources)
 
     def apply_sidebar_density(self):
-        """Hide the agent sidebar on a window too narrow to carry it."""
+        """Hide the agent sidebar on a window too narrow to carry it.
+
+        The chat page carries its own agent list as well as the one in the
+        sidebar, and with nothing connected both were empty 200px columns
+        either side of the conversation. Each is hidden when it has nothing
+        in it, so the room is left until there is something to pick.
+        """
         collapse = sidebar_should_collapse(self.width(), self.primary_screen_size())
         self.sidebar.setVisible(not collapse)
         if getattr(self, "chat_agents", None) is not None:
-            self.chat_agents.setVisible(not collapse)
+            self.chat_agents.setVisible(not collapse and self.chat_agents.count() > 0)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1161,8 +1167,20 @@ class MainWindow(QMainWindow):
         clear_layout(self.messages)
         chat = self.chats.get(self.selected, {})
         if not chat.get("messages"):
-            self.messages.addWidget(label("#  This is the beginning of your collaboration.", "heading", True))
-            self.messages.addWidget(label("Ask a question, explore an idea, or simply say hello.", "muted", True))
+            # Two different empty states. Saying "the beginning of your
+            # collaboration" while the title above still reads "Choose an
+            # agent" told a first-run user they had already started one.
+            if self.selected:
+                self.messages.addWidget(
+                    label("#  This is the beginning of your collaboration.", "heading", True))
+                self.messages.addWidget(
+                    label("Ask a question, explore an idea, or simply say hello.", "muted", True))
+            else:
+                self.messages.addWidget(
+                    label("#  No conversation open", "heading", True))
+                self.messages.addWidget(
+                    label("Pick a conversation or an agent on the left, or connect a "
+                          "model from Providers to start one.", "muted", True))
         for role, text in chat.get("messages", []):
             bubble, column = frame("card")
             column.setContentsMargins(17, 13, 17, 13)

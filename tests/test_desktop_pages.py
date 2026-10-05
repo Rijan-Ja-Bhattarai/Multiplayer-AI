@@ -178,6 +178,62 @@ def test_an_empty_workspace_shows_a_welcome_instead_of_three_zeroes(window) -> N
     assert window.welcome_join.text().strip().endswith("Join a workspace")
 
 
+def texts(layout):
+    """Every label's text in a layout, flattened."""
+    found = []
+    for index in range(layout.count()):
+        item = layout.itemAt(index)
+        if item.widget() is not None and hasattr(item.widget(), "text"):
+            found.append(item.widget().text())
+        elif item.layout() is not None:
+            found.extend(texts(item.layout()))
+    return found
+
+
+def test_the_chat_does_not_claim_a_collaboration_that_has_not_started(window) -> None:
+    """It said 'the beginning of your collaboration' with nothing chosen.
+
+    The title directly above read 'Choose an agent', so the two told a
+    first-run user opposite things about whether they had started.
+    """
+    window.selected = ""
+    window.chats = {}
+    window.render_messages()
+
+    said = " ".join(texts(window.messages))
+    assert "No conversation open" in said
+    assert "beginning of your collaboration" not in said
+
+    window.selected = "agent-1"
+    window.render_messages()
+
+    assert "beginning of your collaboration" in " ".join(texts(window.messages)), (
+        "an opened conversation with no messages yet is still a beginning")
+
+
+def test_the_chat_hides_its_own_agent_list_while_it_is_empty(window) -> None:
+    """Two empty 200px columns either side of an empty conversation.
+
+    The sidebar already carries the same list, so the copy on the chat page
+    was width nobody could use until something was connected.
+    """
+    window.agents = []
+    window.conversations = {}
+    # Wide enough that the narrow-window rule is not what is hiding it, so
+    # this tests the empty-list rule rather than the collapse rule.
+    window.resize(1400, 900)
+    window.render_agents()
+    window.apply_sidebar_density()
+
+    assert window.chat_agents.isHidden()
+
+    window.agents = [{"id": "model", "online": True, "provider": "ollama", "model": "m"}]
+    window.render_agents()
+    window.apply_sidebar_density()
+
+    assert not window.chat_agents.isHidden(), "a populated list has to be reachable"
+
+
 def test_the_welcome_and_the_statistics_are_never_shown_together(window) -> None:
     """They are alternatives, so neither may be left showing by a stale event."""
     for agents in ([], [{"id": "model", "online": True, "provider": "ollama", "model": "m"}]):
