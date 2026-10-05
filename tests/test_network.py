@@ -118,6 +118,7 @@ class NetworkTests(unittest.IsolatedAsyncioTestCase):
             await a.request("d", {})
 
     async def test_offline_timeout_and_disconnect(self):
+        """Verify requests fail when agents are offline, time out, or disconnect."""
         a = await self.start("a")
         with self.assertRaisesRegex(RuntimeError, "offline"):
             await a.request("b", {})
@@ -134,7 +135,9 @@ class NetworkTests(unittest.IsolatedAsyncioTestCase):
             await request
 
     async def test_search_errors_survive_the_relay_without_leaking_remote_details(self):
+        """Verify the relay preserves actionable search errors while hiding remote secrets."""
         async def fail_search(payload, source):
+            """Raise the requested provider error with secret details to test relay sanitation."""
             raise ProviderError(payload, "SECRET remote response and credentials")
         client = await self.start("a")
         await self.start("b", fail_search)
@@ -147,6 +150,7 @@ class NetworkTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("SECRET", str(error.exception))
 
     async def test_duplicate_identity_and_malformed_frame(self):
+        """Verify duplicate identities and malformed socket frames are rejected."""
         await self.start("a")
         async with connect(self.ws_url, additional_headers=self.headers("a")) as duplicate:
             with self.assertRaises(ConnectionClosed):

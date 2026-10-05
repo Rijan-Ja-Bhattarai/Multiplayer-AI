@@ -137,14 +137,17 @@ class ModelContentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(error.exception.code, "web_search")
 
     async def test_search_failure_bodies_are_not_exposed(self):
+        """Verify search failures never expose the remote response body."""
         async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(500, text="SECRET"))) as http:
             with self.assertRaises(SearchError) as error:
                 await SearXNG(http, "https://search.example").search("test")
         self.assertNotIn("SECRET", str(error.exception))
 
     async def test_hosted_search_works_with_other_model_providers_and_separate_keys(self):
+        """Verify hosted search works across providers without mixing credentials or attachments."""
         calls = []
         def transport(request):
+            """Simulate model and search endpoints while checking their separate requests and keys."""
             calls.append(request)
             if request.url.host == "ollama.com":
                 self.assertEqual(str(request.url), "https://ollama.com/api/web_search")
@@ -166,6 +169,7 @@ class ModelContentTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Revenue", calls[1].content.decode())
 
     async def test_hosted_search_errors_are_actionable_and_do_not_expose_bodies(self):
+        """Verify safe actionable errors for authentication, rate limits, outages, and redirects."""
         for status, code, message in ((401, "web_search_authentication", "API key"),
                                       (403, "web_search_authentication", "API key"),
                                       (429, "web_search_rate_limit", "request limit"),
@@ -173,6 +177,7 @@ class ModelContentTests(unittest.IsolatedAsyncioTestCase):
                                       (302, "web_search", "unavailable")):
             calls = []
             def transport(request):
+                """Return a failing search response containing a secret and an untrusted redirect."""
                 calls.append(request)
                 return httpx.Response(status, text="SECRET", headers={"location": "https://other.example/"})
             with self.subTest(status=status):
@@ -185,6 +190,7 @@ class ModelContentTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(calls), 1)
 
     async def test_search_results_are_bounded_and_reject_malformed_links(self):
+        """Verify result limits, safe URLs, text sanitation, and response size limits."""
         results = [{"url": url} for url in ("file:///private", "https://key:secret@source.example", "https://[", "https://source.example:bad")]
         results += [{"title": "<b>Source &amp; facts</b>", "url": f"https://source.example/{i}", "content": "x" * 3000} for i in range(8)]
         async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200, json={"results": results}))) as http:
@@ -200,6 +206,7 @@ class ModelContentTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("SECRET", str(error.exception))
 
     def test_hosted_search_requires_a_separate_search_key_only_when_enabled(self):
+        """Verify a hosted search key is required only when web search is enabled."""
         with self.assertRaisesRegex(ValueError, "Search API key"):
             self.config(web_search="auto", search_provider="ollama")
         self.config(search_provider="ollama")
@@ -207,6 +214,7 @@ class ModelContentTests(unittest.IsolatedAsyncioTestCase):
             self.config(web_search="always", search_provider="unknown")
 
     def test_search_endpoint_validation(self):
+        """Verify malformed and unsafe search URLs fail while permitted local URLs normalize."""
         for url in ("http://remote.example", "file:///private", "https://key:secret@search.example", "https://search.example?q=secret", "https://[", "https://search.example:bad", ""):
             with self.subTest(url=url), self.assertRaises(ValueError):
                 validate_search_url(url)

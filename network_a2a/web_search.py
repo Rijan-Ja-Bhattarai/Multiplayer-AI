@@ -8,6 +8,7 @@ import httpx
 
 
 def validate_search_url(url, allow_insecure=False):
+    """Validate a credential-free SearXNG address and return its normalized search URL."""
     if not isinstance(url, str) or not url.strip():
         raise ValueError("Enter your SearXNG server address, or choose Ollama web search to search without running a server.")
     url = url.strip()
@@ -25,6 +26,7 @@ def validate_search_url(url, allow_insecure=False):
 
 class SearchError(Exception):
     def __init__(self, message, code="web_search"):
+        """Attach a relay-safe error code to a user-facing search failure message."""
         self.code = code
         super().__init__(message)
 
@@ -39,6 +41,7 @@ SEARCH_ERRORS = {
 
 
 def validate_search_settings(provider, url="", api_key=None, allow_insecure=False):
+    """Reject unknown search providers or missing provider-specific connection settings."""
     if provider == "searxng":
         validate_search_url(url, allow_insecure)
     elif provider == "ollama":
@@ -49,6 +52,7 @@ def validate_search_settings(provider, url="", api_key=None, allow_insecure=Fals
 
 
 async def _search(http, name, method, url, query, **options):
+    """Fetch bounded search JSON without redirects and return up to five sanitized results."""
     if not isinstance(query, str) or not query.strip() or len(query) > 500:
         raise SearchError("Use a search query with 1–500 characters")
     try:
@@ -88,6 +92,7 @@ async def _search(http, name, method, url, query, **options):
         if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password:
             continue
         def plain(value, limit):
+            """Strip markup, decode entities, and truncate a string to the supplied character limit."""
             return html.unescape(re.sub(r"<[^>]*>", "", value))[:limit] if isinstance(value, str) else ""
         results.append({"title": plain(item.get("title"), 200) or url, "url": url,
                         "snippet": plain(item.get("content"), 1600)})
@@ -98,27 +103,32 @@ async def _search(http, name, method, url, query, **options):
 
 class SearXNG:
     def __init__(self, http, url, allow_insecure=False):
+        """Retain the HTTP client and validate the configured SearXNG endpoint."""
         self.http = http
         self.url = validate_search_url(url, allow_insecure)
 
     async def search(self, query):
+        """Search the configured SearXNG server for bounded general-purpose JSON results."""
         return await _search(self.http, "SearXNG", "GET", self.url, query,
                              params={"q": query, "format": "json", "categories": "general"})
 
 
 class OllamaSearch:
     def __init__(self, http, api_key):
+        """Validate the dedicated hosted search key and retain the shared HTTP client."""
         validate_search_settings("ollama", api_key=api_key)
         self.http = http
         self.api_key = api_key
 
     async def search(self, query):
+        """Query Ollama's hosted search endpoint with its dedicated API key."""
         return await _search(self.http, "Ollama", "POST", "https://ollama.com/api/web_search", query,
                              headers={"Authorization": "Bearer " + self.api_key},
                              json={"query": query, "max_results": 5})
 
 
 def create_search(http, provider="searxng", *, url="", api_key=None, allow_insecure=False):
+    """Validate settings and construct the selected search service using the shared client."""
     validate_search_settings(provider, url, api_key, allow_insecure)
     return OllamaSearch(http, api_key) if provider == "ollama" else SearXNG(http, url, allow_insecure)
 

@@ -5,6 +5,7 @@ import argparse
 
 
 def main():
+    """Build the Windows release archive from the executable bundle and project guides."""
     root = Path(__file__).resolve().parent
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--bundle', type=Path, default=root / 'dist' / 'MultiplayerAI')

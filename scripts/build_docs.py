@@ -20,11 +20,13 @@ GUIDES = (
 
 
 def render_guide(key, filename):
+    """Convert a Markdown guide to HTML with unique anchors and bundled guide links."""
     document = QTextDocument()
     document.setMarkdown(ROOT.joinpath(filename).read_text(encoding="utf-8"))
     body = re.search(r"<body[^>]*>(.*)</body>", document.toHtml(), re.S).group(1)
 
     def heading(match):
+        """Add a guide-prefixed slug to an HTML heading for stable internal navigation."""
         level, attributes, content = match.groups()
         text = html.unescape(re.sub(r"<[^>]+>", "", content)).lower()
         slug = re.sub(r"[^\w\s-]", "", text).strip().replace(" ", "-")
@@ -33,6 +35,7 @@ def render_guide(key, filename):
     body = re.sub(r"<h([1-6])([^>]*)>(.*?)</h\1>", heading, body, flags=re.S)
 
     def link(match):
+        """Rewrite Markdown guide and local fragment links to their bundled HTML anchors."""
         target = html.unescape(match.group(1))
         if target.startswith("#"):
             return f'href="#{key}-{target[1:]}"'
@@ -46,6 +49,7 @@ def render_guide(key, filename):
 
 
 def main():
+    """Build the offline documentation hub from all five project Markdown guides."""
     app = QApplication.instance() or QApplication([])
     cards = "".join(f'<a class="card" href="#{key}"><h2>{title}</h2><p>{description}</p></a>' for key, title, _, description in GUIDES)
     guides = "".join(f'<section class="guide" id="{key}"><a class="back" href="#start">Back to documentation</a>{render_guide(key, filename)}</section>'

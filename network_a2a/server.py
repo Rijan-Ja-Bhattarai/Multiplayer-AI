@@ -135,6 +135,7 @@ class Relay:
             self.pending.pop(request_id, None)
 
     async def websocket(self, socket):
+        """Authenticate an agent socket and relay validated messages with safe error responses."""
         agent = self.authenticate(socket.headers.get("authorization", ""))
         if not agent:
             await socket.close(code=1008)

@@ -37,6 +37,7 @@ def frame(name, layout_type=QVBoxLayout):
 
 
 def clear_layout(layout):
+    """Hide and schedule removal of layout widgets, recursively clearing child layouts."""
     while layout.count():
         item = layout.takeAt(0)
         if item.widget():
@@ -137,6 +138,7 @@ class MainWindow(QMainWindow):
         self.network.start()
 
     def build_ui(self):
+        """Build the workspace rail, navigation, pages, and application status controls."""
         root = QWidget()
         self.setCentralWidget(root)
         shell = QHBoxLayout(root)
@@ -296,6 +298,7 @@ class MainWindow(QMainWindow):
         return scroll, layout
 
     def overview_page(self):
+        """Build workspace statistics and model previews with a clickable agent count."""
         page, layout = self.scroll_page()
         layout.addWidget(label("Workspace overview", "title"))
         stats = QHBoxLayout()
@@ -396,6 +399,7 @@ class MainWindow(QMainWindow):
         return page
 
     def providers_page(self):
+        """Build imported model controls and provider connection cards with brand logos."""
         page, layout = self.scroll_page()
         layout.addWidget(label("CHOOSE YOUR INTELLIGENCE", "eyebrow"))
         layout.addWidget(label("Models", "title"))
@@ -443,6 +447,7 @@ class MainWindow(QMainWindow):
         self.resource_timer.timeout.connect(self.refresh_resources)
 
         def meter(key, title, subtitle):
+            """Add a labeled usage card and return its reading label and progress bar."""
             card, column = frame("stat")
             column.setContentsMargins(18, 15, 18, 15)
             column.addWidget(label(title, "muted"))
@@ -661,6 +666,7 @@ class MainWindow(QMainWindow):
         )
 
     def open_documentation(self):
+        """Open the bundled offline guide in the browser, reporting unavailable files."""
         path = Path(__file__).resolve().parents[1] / "docs.html"
         if not path.is_file() or not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
             self.notice("Could not open the documentation. Open docs.html from the app folder in your browser.", error=True)
@@ -860,6 +866,7 @@ class MainWindow(QMainWindow):
             self.imported_model_rows.addWidget(card)
 
     def navigate(self, index):
+        """Select a page, update navigation, and sample resources only while visible."""
         self.stack.setCurrentIndex(index)
         for number, button in enumerate(self.nav_buttons):
             button.setChecked(number == index)
@@ -884,6 +891,7 @@ class MainWindow(QMainWindow):
             animation.start()
 
     def render_agents(self):
+        """Refresh model listings while retaining unchanged cards and scroll positions."""
         models = self.model_agents()
         for grid, agents in ((self.overview_cards, models[:3]),
                              (self.agent_cards, [agent for agent in models if self.search.text().lower() in f"{agent['id']} {agent.get('model') or ''}".lower()])):

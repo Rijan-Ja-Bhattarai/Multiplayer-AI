@@ -358,6 +358,7 @@ class WorkspaceUITests(unittest.TestCase):
             self.assertEqual(captured, [["saved-model"]])
 
     def test_edit_model_saves_and_uses_searxng_settings(self):
+        """Verify legacy profiles retain SearXNG and edited settings drive actual searches."""
         calls, searches = [], []
         async def model(request):
             body = await request.json()
@@ -365,6 +366,7 @@ class WorkspaceUITests(unittest.TestCase):
             text = '{"web_search_query":"current public facts"}' if "optional web search tool" in body["messages"][0]["content"] else "A verified answer"
             return JSONResponse({"choices": [{"message": {"content": text}}]})
         async def search(request):
+            """Record SearXNG query parameters and return a cited source for the UI test."""
             searches.append(dict(request.query_params))
             return JSONResponse({"results": [{"title": "Public facts", "url": "https://source.example/current", "content": "Evidence today"}]})
         self.configure_model(model)
@@ -405,13 +407,16 @@ class WorkspaceUITests(unittest.TestCase):
         self.assertIn("https://source.example/current", self.host.chats["saved-model"]["messages"][-1][1])
 
     def test_hosted_search_key_is_saved_separately_and_reused_after_restart(self):
+        """Verify hosted search credentials stay in the vault and work after app restart."""
         calls, searches = [], []
         async def model(request):
+            """Record model prompts and request search evidence before returning an answer."""
             body = await request.json()
             calls.append(body)
             text = '{"web_search_query":"latest public facts"}' if "optional web search tool" in body["messages"][0]["content"] else "An answer with sources"
             return JSONResponse({"choices": [{"message": {"content": text}}]})
         async def search(service, query):
+            """Record the search key and query while supplying evidence for the model answer."""
             searches.append((service.api_key, query))
             return [{"title": "Fresh facts", "url": "https://source.example/new", "snippet": "Current evidence"}]
         self.configure_model(model)
@@ -454,6 +459,7 @@ class WorkspaceUITests(unittest.TestCase):
         self.assertIn("https://source.example/new", self.host.chats["saved-model"]["messages"][-1][1])
 
     def test_new_search_setup_defaults_to_hosted_and_explains_missing_key(self):
+        """Verify new connections default to hosted search and focus a missing key error."""
         dialog = AgentDialog(self.host)
         dialog.show()
         self.assertFalse(dialog.search_settings.isVisible())
@@ -467,6 +473,7 @@ class WorkspaceUITests(unittest.TestCase):
         dialog.close()
 
     def test_periodic_agent_refresh_keeps_overview_at_the_user_scroll_position(self):
+        """Verify polling preserves cards and scroll position while actual state changes render."""
         self.configure_model(self.echo_model)
         self.host.navigate(0)
         self.host.resize(self.host.width(), self.host.minimumHeight())
@@ -490,6 +497,7 @@ class WorkspaceUITests(unittest.TestCase):
         self.assertEqual(self.host.stat_values[1].text(), "0")
 
     def test_help_opens_bundled_documentation_in_the_browser(self):
+        """Verify the help button opens the bundled page containing the core project guides."""
         with patch("desktop_app.window.QDesktopServices.openUrl", return_value=True) as opened:
             self.host.help_button.click()
         opened.assert_called_once()
@@ -501,8 +509,10 @@ class WorkspaceUITests(unittest.TestCase):
         self.assertIn('id="providers"', page)
 
     def test_uploaded_image_and_pdf_reach_model_and_survive_restart(self):
+        """Verify uploaded model attachments and their conversation history survive restart."""
         calls = []
         async def model(request):
+            """Record attachment-bearing model requests and return a successful response."""
             calls.append(await request.json())
             return JSONResponse({"choices": [{"message": {"content": "Files understood"}}]})
         self.configure_model(model, vision=True)

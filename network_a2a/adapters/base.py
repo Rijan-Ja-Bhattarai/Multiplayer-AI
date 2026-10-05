@@ -38,6 +38,7 @@ class ProviderConfig:
     search_api_key: str | None = field(default=None, repr=False)
 
     def __post_init__(self):
+        """Reject invalid model, endpoint, limits, and enabled web search settings."""
         if not isinstance(self.model, str) or not self.model.strip():
             raise ValueError("Choose a model with --model or A2A_MODEL")
         if not isinstance(self.base_url, str):
@@ -162,6 +163,7 @@ class HTTPAdapter:
         return result
 
     async def generate_with_search(self, messages):
+        """Generate an answer with optional bounded web evidence and return source links."""
         mode = self.config.web_search
         if mode == "off":
             return (*await self.generate(messages), [])

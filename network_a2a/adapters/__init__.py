@@ -37,6 +37,7 @@ def load_config(provider, model=None, base_url=None, api_key_env=None, system_pr
                 max_tokens=1024, timeout=55, concurrency=4, allow_insecure=False, environ=None,
                 vision=False, web_search="off", searxng_url="", searxng_allow_insecure=False,
                 search_provider="searxng", search_api_key_env="OLLAMA_SEARCH_API_KEY"):
+    """Load provider and search credentials from the environment into validated settings."""
     env = os.environ if environ is None else environ
     if provider not in PROVIDERS:
         raise ValueError(f"Unknown provider: {provider}")
@@ -56,6 +57,7 @@ def load_config(provider, model=None, base_url=None, api_key_env=None, system_pr
 
 
 def create_adapter(config, http):
+    """Validate provider availability and credentials before constructing its HTTP adapter."""
     if config.provider not in PROVIDERS:
         raise ValueError(f"Unknown provider: {config.provider}")
     spec = PROVIDERS[config.provider]

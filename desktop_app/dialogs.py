@@ -24,6 +24,7 @@ def _style_error(widget, window):
 
 class AgentDialog(QDialog):
     def __init__(self, window, provider="ollama", profile=None):
+        """Build the model connection form, restoring saved provider and search settings."""
         super().__init__(window)
         self.window = window
         self.profile = profile
@@ -164,6 +165,7 @@ class AgentDialog(QDialog):
         self.key.setPlaceholderText("Optional for local Ollama" if not spec.key_required else "API key · leave blank to keep a saved key")
 
     def find_models(self):
+        """Fetch the selected provider's model list without blocking the dialog."""
         self.models_button.setEnabled(False)
         selected = self.model.currentText()
         def success(models):
@@ -184,6 +186,7 @@ class AgentDialog(QDialog):
                             self.profile["id"] if self.profile else None, success=success, failure=fail)
 
     def change_internet(self):
+        """Show the selected search provider's fields and update test availability."""
         enabled = self.internet.isChecked()
         hosted = self.search_provider.currentData() == "ollama"
         self.search_settings.setVisible(enabled)
@@ -200,21 +203,25 @@ class AgentDialog(QDialog):
             'Choose Ollama web search if you do not have a server.')
 
     def focus_search(self):
+        """Focus the relevant search credential or URL and keep it visible after layout."""
         widget = self.search_key if self.search_provider.currentData() == "ollama" else self.search_url
         self.scroll.ensureWidgetVisible(widget)
         widget.setFocus()
         # Showing the error can resize the viewport after this call.
         # Scroll again once Qt has laid out the visible settings and error.
         def reveal():
+            """Scroll the visible search field into view after Qt applies the new layout."""
             if self.isVisible() and widget.isVisible():
                 self.scroll.ensureWidgetVisible(widget, 0, 24)
         QTimer.singleShot(0, reveal)
 
     def search_state(self):
+        """Return a settings snapshot used to discard stale search test responses."""
         return (self.internet.isChecked(), self.search_provider.currentData(), self.search_url.text().strip(),
                 self.search_key.text().strip(), self.search_insecure.isChecked())
 
     def validate_search(self):
+        """Return whether search settings are valid, displaying and focusing any error."""
         if not self.internet.isChecked():
             return True
         try:
@@ -230,6 +237,7 @@ class AgentDialog(QDialog):
         return True
 
     def test_search(self):
+        """Test the configured search service and report results for the current settings."""
         self.error.setText("")
         if not self.validate_search():
             return
@@ -238,6 +246,7 @@ class AgentDialog(QDialog):
         state = self.search_state()
         self.search_status.setText("Testing web search…")
         def success(count):
+            """Restore test controls and show the result only if settings have not changed."""
             if self.isVisible():
                 self.search_testing = False
                 self.change_internet()
@@ -245,6 +254,7 @@ class AgentDialog(QDialog):
                     self.search_status.setText(f"Web search is reachable · {count} results returned" if count else
                                                "Connected to the search service, but no results were returned. Try again before relying on web search.")
         def failure(message):
+            """Restore test controls and focus an error only for unchanged search settings."""
             if self.isVisible():
                 self.search_testing = False
                 self.change_internet()
@@ -257,6 +267,7 @@ class AgentDialog(QDialog):
                             success=success, failure=failure)
 
     def save(self):
+        """Validate and save the model profile with separate model and search credentials."""
         self.error.setText("")
         if not self.validate_search():
             return
@@ -269,10 +280,12 @@ class AgentDialog(QDialog):
                    "searxng_url": self.search_url.text().strip(), "searxng_allow_insecure": self.search_insecure.isChecked()}
         self.save_button.setEnabled(False)
         def success(result):
+            """Clear credential fields and close the dialog after a successful save."""
             self.key.clear()
             self.search_key.clear()
             self.accept()
         def failure(message):
+            """Display the save error and focus search settings when they caused the failure."""
             if self.isVisible():
                 self.error.setText(message)
                 self.save_button.setEnabled(True)

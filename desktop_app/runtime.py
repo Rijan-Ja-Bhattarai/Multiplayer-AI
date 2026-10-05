@@ -219,6 +219,7 @@ class DesktopRuntime:
             self.emit("offline", "Workspace is offline. Your saved history is still available.")
 
     async def start(self):
+        """Retry credential cleanup, migrate saved connections, and activate the workspace."""
         # Before anything connects: a deletion interrupted on a previous run
         # may still owe credential deletions, and those are worth finishing
         # before the app starts a relay or reads a token.
@@ -365,12 +366,15 @@ class DesktopRuntime:
         return await self.connected_engine().send(target, payload)
 
     async def send_conversation(self, conversation_id, text):
+        """Send text through the currently connected workspace engine."""
         return await self.connected_engine().send_conversation(conversation_id, text)
 
     async def save_agent(self, profile, key=None, search_key=None):
+        """Delegate profile and separate credential updates to the connected engine."""
         return await self.connected_engine().save_agent(profile, key, search_key)
 
     async def prepare_attachments(self, paths, vision=False):
+        """Prepare model attachments in a worker thread to keep the UI responsive."""
         from .attachments import prepare_attachments
         return await asyncio.to_thread(prepare_attachments, paths, vision)
 

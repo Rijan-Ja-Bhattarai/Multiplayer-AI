@@ -13,6 +13,7 @@ BRANDS = frozenset(("ollama", "bionic", "openai", "anthropic", "gemini", "groq",
 
 
 def navigation_icon(name, ink):
+    """Draw a navigation symbol with consistent strokes in the supplied ink color."""
     pixmap = QPixmap(48, 48)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
@@ -22,6 +23,7 @@ def navigation_icon(name, ink):
     painter.setBrush(Qt.BrushStyle.NoBrush)
 
     def line(*points):
+        """Draw a connected path through the supplied icon coordinates."""
         path = QPainterPath(QPointF(*points[0]))
         for point in points[1:]:
             path.lineTo(*point)
@@ -56,6 +58,7 @@ def navigation_icon(name, ink):
 
 
 def provider_pixmap(provider, theme, size=36):
+    """Return a scaled brand mark for the theme, falling back to a connection symbol."""
     path = (ASSETS / "bionic.png" if provider == "bionic" else
             ASSETS / ("light" if theme == LIGHT else "dark") / f"{provider}.png") if provider in BRANDS else None
     # Custom deployments have no single brand; show a matching connection icon.
@@ -66,6 +69,7 @@ def provider_pixmap(provider, theme, size=36):
 
 
 def provider_logo(provider, theme, size=36):
+    """Build a fixed-size, accessible label displaying the provider brand mark."""
     widget = QLabel()
     widget.setFixedSize(size, size)
     widget.setAlignment(Qt.AlignmentFlag.AlignCenter)

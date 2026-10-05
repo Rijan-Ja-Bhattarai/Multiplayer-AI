@@ -85,6 +85,7 @@ class WorkspacePersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Works while owner views another workspace", saved["messages"][0][1])
 
     async def test_member_removal_revokes_tokens_and_shared_history_access_permanently(self):
+        """Verify member removal revokes access and deletes the member's stored search key."""
         invitation = await self.host.invite("guest", self.host.active_url, target=self.host.active_id)
         await self.guest_join(invitation)
         self.host.engine.storage.vault.set("search:guest", "private-search-key")
@@ -153,6 +154,7 @@ class WorkspacePersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.guest.remote)
 
     async def test_deletion_clears_only_selected_workspace_and_last_workspace_has_replacement(self):
+        """Verify workspace deletion removes its credentials and preserves other workspace data."""
         root_id = self.host.active_workspace_id
         self.host.engine.history_store.save("ui", "state", {"chats": {"saved": {"messages": [["user", "Keep this"]]}}})
         second = await self.host.create_workspace("Temporary")
@@ -213,6 +215,7 @@ class WorkspacePersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("guest", self.host.credentials)
 
     async def test_legacy_remote_connection_and_provider_migrate_into_the_workspace_catalog(self):
+        """Verify legacy connections and both model and search keys migrate into scoped storage."""
         invitation = await self.host.invite("legacy-guest", self.host.active_url)
         vault = MemoryVault()
         storage = Storage(Path(self.directory.name) / "guest", vault)
@@ -311,6 +314,7 @@ class WorkspacePersistenceTests(unittest.IsolatedAsyncioTestCase):
         original = self.vault.delete
 
         def locked(name):
+            """Simulate a locked credential store that cannot complete a deletion."""
             return UNAVAILABLE
         self.vault.delete = locked
         try:

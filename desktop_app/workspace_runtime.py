@@ -384,6 +384,7 @@ class WorkspaceRuntime:
                 self.emit("conversation_joined", conversation_id)
 
     async def _remove_runner(self, agent_id):
+        """Disconnect and cancel an agent runner, then wait for its task to finish."""
         entry = self.runners.pop(agent_id, None)
         if entry:
             client, task = entry
@@ -399,6 +400,7 @@ class WorkspaceRuntime:
             await asyncio.sleep(.1)
 
     def _config(self, profile, key, search_key=None):
+        """Build validated provider settings from a profile and its separate vault keys."""
         spec = PROVIDERS[profile["provider"]]
         return ProviderConfig(provider=profile["provider"], model=profile["model"], base_url=profile.get("base_url") or spec.base_url,
                               api_key=key, system_prompt=profile.get("system_prompt"), allow_insecure=profile.get("allow_insecure", False),
@@ -408,6 +410,7 @@ class WorkspaceRuntime:
 
     @staticmethod
     def public_profile(profile, running=True):
+        """Return model metadata suitable for sharing without credentials or endpoints."""
         return {"provider": profile["provider"], "model": profile["model"], "vision": profile.get("vision", False), "running": running}
 
     async def publish_profile(self, profile, running=True):
@@ -427,6 +430,7 @@ class WorkspaceRuntime:
                 self.emit("notice", "Your model connected, but its details could not be published to the workspace.")
 
     async def _launch_profile(self, profile, allow_insecure=False):
+        """Load vault credentials and replace the profile's running model client."""
         key = self.storage.vault.get("provider:" + profile["id"])
         search_key = self.storage.vault.get("search:" + profile["id"]) if profile.get("search_provider") == "ollama" and profile.get("web_search", "off") != "off" else None
         adapter = create_adapter(self._config(profile, key, search_key), self.http)
@@ -436,6 +440,7 @@ class WorkspaceRuntime:
         await self.publish_profile(profile)
 
     async def save_agent(self, profile, key=None, search_key=None):
+        """Validate, persist, and restart a model while storing its keys in the vault."""
         async with self.mutation:
             agent_id = profile["id"]
             if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", agent_id):
@@ -589,6 +594,7 @@ class WorkspaceRuntime:
         return [item["name"] for item in response.json()["models"]]
 
     async def provider_models(self, provider, base_url, key=None, allow_insecure=False, agent_id=None):
+        """List provider models, reusing a saved key only for its configured endpoint."""
         if key is None and agent_id:
             profile = self.storage.settings.get("remote_agent") if self.remote else next(
                 (profile for profile in self.storage.settings.get("agents", []) if profile["id"] == agent_id), None)
@@ -604,6 +610,7 @@ class WorkspaceRuntime:
         return [item["name"] for item in payload["models"]] if provider == "ollama" else [item["id"] for item in payload["data"]]
 
     async def test_web_search(self, url="", allow_insecure=False, provider="searxng", key=None, agent_id=None):
+        """Return a probe result count, reusing the saved hosted search key if needed."""
         if not key and agent_id and provider == "ollama":
             key = self.storage.vault.get("search:" + agent_id)
         search = create_search(self.http, provider, url=url, api_key=key, allow_insecure=allow_insecure)
@@ -611,6 +618,7 @@ class WorkspaceRuntime:
         return len(results)
 
     async def invite(self, agent_id, public_url, lan=False, conversation_id=None, target=None, messages=None):
+        """Create an invitation for a new device identity in the locally owned workspace."""
         async with self.mutation:
             if self.remote:
                 raise ValueError("Only this workspace's host can create invitations")
@@ -651,6 +659,7 @@ class WorkspaceRuntime:
             return invitation
 
     async def remove_member(self, member):
+        """Revoke a member's access and clean up its runner, history, and credentials."""
         async with self.mutation:
             if self.remote:
                 raise ValueError("Only the workspace owner can remove members")
