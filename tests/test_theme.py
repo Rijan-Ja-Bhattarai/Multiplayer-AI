@@ -49,17 +49,28 @@ def test_all_palettes_define_the_same_tokens() -> None:
 
 
 def test_palette_values_are_hex_colours() -> None:
-    """Every token is a #rrggbb value, since Qt accepts no other form here."""
+    """Every token is a #rrggbb value, or the keyword ``transparent``.
+
+    ``transparent`` is allowed for one reason: the stylesheet is generated
+    from these tokens and always writes ``1px solid``, so a theme that
+    wants no border states that by taking the keyword rather than being
+    given a rule of its own. That is what keeps a single template serving
+    three themes without a conditional in it.
+    """
     for name, tokens in theme.PALETTES.items():
         for token, value in tokens.items():
-            assert re.fullmatch(r"#[0-9a-fA-F]{6}", value), f"{name}.{token}={value}"
+            assert value == "transparent" or re.fullmatch(r"#[0-9a-fA-F]{6}", value), (
+                f"{name}.{token}={value}")
 
 
 def test_all_themes_cover_the_same_widgets() -> None:
     """Every theme styles every widget the reference theme does.
 
     This is the check that catches a new widget being added and themed in
-    only some of the stylesheets.
+    only some of the stylesheets. It used to catch the opposite failure too,
+    back when each sheet was written by hand: dark was missing the button
+    hover and pressed fills and every primary button state, and because the
+    check only asked about selectors rather than rules, it stayed silent.
     """
     reference = selectors(theme.THEMES[theme.DARK])
     assert reference, "selector extraction found nothing in the reference theme"
@@ -70,6 +81,131 @@ def test_all_themes_cover_the_same_widgets() -> None:
         extra = found - reference
         assert not missing, f"{name} theme does not style {sorted(missing)}"
         assert not extra, f"{name} theme styles unknown widgets {sorted(extra)}"
+
+
+def test_every_theme_gives_every_rule_the_same_properties() -> None:
+    """A rule must set the same properties in all three themes.
+
+    The sheets are generated from one template now, so this holds by
+    construction. It is kept because it is the property that matters and it
+    costs one pass, and because it would have caught the hand-written
+    sheets diverging in shape: dark declared ``QPushButton#primary`` with
+    no background, while light and miku declared a fill plus hover,
+    pressed and disabled rules.
+
+    It checks themes against each other, not against a required set: a rule
+    deleted from the template disappears from all three at once and this
+    would still pass. ``test_every_theme_declares_the_interaction_states``
+    covers that half.
+    """
+
+    def properties(sheet: str):
+        found = {}
+        for line in sheet.splitlines():
+            line = line.strip()
+            if not line.endswith("}") or "{" not in line:
+                continue
+            selector, _, body = line.partition("{")
+            names = [part.partition(":")[0].strip()
+                     for part in body.rstrip("}").split(";") if part.strip()]
+            found[selector.strip()] = frozenset(names)
+        return found
+
+    reference = properties(theme.THEMES[theme.DARK])
+    for name in theme.THEME_NAMES:
+        found = properties(theme.THEMES[name])
+        for selector, expected in reference.items():
+            assert found.get(selector) == expected, (
+                f"{name} {selector} sets {sorted(found.get(selector, ()))} "
+                f"but dark sets {sorted(expected)}")
+
+
+def test_every_theme_declares_the_interaction_states() -> None:
+    """Every state a control needs must exist in every theme.
+
+    Dark shipped for years with no button hover fill, no button pressed
+    fill, and no hover, pressed or disabled rule for its primary button at
+    all, because nothing asserted they were there: the parity check only
+    compared themes with each other, and a rule absent from all three looks
+    perfectly consistent. So the states are named explicitly here.
+    """
+    required = (
+        "QPushButton:hover",
+        "QPushButton:pressed",
+        "QPushButton:disabled",
+        "QPushButton#primary",
+        "QPushButton#primary:hover",
+        "QPushButton#primary:pressed",
+        "QPushButton#primary:disabled",
+        "QPushButton#nav:hover",
+        "QPushButton#nav:checked",
+        "QPushButton#ghost:hover",
+        "QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus",
+        "QListWidget::item:selected",
+        "QListWidget::item:hover",
+        "QMenu::item:selected",
+    )
+    for name in theme.THEME_NAMES:
+        sheet = theme.THEMES[name]
+        for selector in required:
+            assert f"{selector} {{" in sheet, f"{name} has no rule for {selector}"
+
+
+def test_a_hovered_button_changes_appearance() -> None:
+    """A hover has to be visible, not merely declared.
+
+    A rule that sets a background identical to the resting one leaves the
+    control looking dead under the cursor, which is what dark's
+    ``QPushButton:hover`` did: it moved only the border colour.
+    """
+    def fill(sheet: str, selector: str):
+        for line in sheet.splitlines():
+            line = line.strip()
+            if not line.startswith(selector + " {"):
+                continue
+            for part in line.rstrip("}").split("{", 1)[1].split(";"):
+                key, _, value = part.partition(":")
+                if key.strip() == "background":
+                    return value.strip().lower()
+        return None
+
+    for name in theme.THEME_NAMES:
+        sheet = theme.THEMES[name]
+        resting = fill(sheet, "QPushButton")
+        hovered = fill(sheet, "QPushButton:hover")
+        assert hovered is not None, f"{name} sets no hover background"
+        assert hovered != resting, (
+            f"{name} hovers a button from {resting} to {hovered}, which is no change")
+
+
+def test_no_stylesheet_contains_a_hard_coded_colour() -> None:
+    """Every colour in a sheet has to come from a palette.
+
+    A hex typed straight into the template is a colour that no palette can
+    change, which is the drift this arrangement exists to prevent.
+    """
+    values = {value.lower() for tokens in theme.PALETTES.values()
+              for value in tokens.values()}
+    for name in theme.THEME_NAMES:
+        sheet = theme.THEMES[name].lower()
+        for literal in set(re.findall(r"#[0-9a-f]{6}", sheet)):
+            assert literal in values, f"{name} sheet hard-codes {literal}"
+
+
+def test_a_token_the_sheet_needs_cannot_go_missing() -> None:
+    """Reading a token the palette lacks must raise rather than fall back.
+
+    ``color()`` already behaves this way for hand-painted widgets; the
+    generated sheet has to as well, or a renamed token would quietly render
+    with the wrong colour instead of stopping the build.
+    """
+    for name in theme.THEME_NAMES:
+        broken = dict(theme.PALETTES[name])
+        broken["surface_base"] = "#123456"
+        del broken["border"]
+
+        with pytest.raises(KeyError):
+            theme._stylesheet(broken)
 
 
 @pytest.mark.parametrize(
