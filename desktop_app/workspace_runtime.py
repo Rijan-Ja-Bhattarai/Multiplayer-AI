@@ -57,6 +57,8 @@ class WorkspaceRuntime:
         self.mutation = asyncio.Lock()
 
     async def start(self):
+        """Recover unfinished model saves before loading credentials or starting the relay."""
+        self.storage.recover_agent_save()
         self.http = httpx.AsyncClient(timeout=65, follow_redirects=False)
         self.direct_http = httpx.AsyncClient(timeout=65, follow_redirects=False, trust_env=False)
         self.credentials = self.storage.credentials() or {}
@@ -440,8 +442,9 @@ class WorkspaceRuntime:
         await self.publish_profile(profile)
 
     async def save_agent(self, profile, key=None, search_key=None):
-        """Validate, persist, and restart a model while storing its keys in the vault."""
+        """Validate and transactionally persist a model and its keys before restarting it."""
         async with self.mutation:
+            self.storage.recover_agent_save()
             agent_id = profile["id"]
             if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", agent_id):
                 raise ValueError("Agent names need 1–64 letters, numbers, underscores, or hyphens")
@@ -452,22 +455,18 @@ class WorkspaceRuntime:
             saved_key = key if key else self.storage.vault.get("provider:" + agent_id)
             saved_search_key = search_key or (self.storage.vault.get("search:" + agent_id) if profile.get("search_provider") == "ollama" and profile.get("web_search", "off") != "off" else None)
             create_adapter(self._config(profile, saved_key, saved_search_key), self.http)  # validate before mutating storage
-            if key:
-                self.storage.vault.set("provider:" + agent_id, key)
-            if search_key and profile.get("search_provider") == "ollama":
-                self.storage.vault.set("search:" + agent_id, search_key)
+            updated = self.credentials
             if not self.remote:
                 if agent_id not in self.credentials:
                     updated = {**self.credentials, agent_id: {"token": secrets.token_urlsafe(32), "group": "workspace"}}
                     Relay(updated)
-                    self.storage.save_credentials(updated)
-                    self.credentials = updated
-                    self.app.state.relay.credentials = updated
-                profiles = [p for p in self.storage.settings.get("agents", []) if p["id"] != agent_id]
-                self.storage.settings["agents"] = [*profiles, dict(profile)]
-            else:
-                self.storage.settings["remote_agent"] = {**profile, "relay": self.active_url}
-            self.storage.save()
+            saved = {**profile, "relay": self.active_url} if self.remote else profile
+            finalized = self.storage.save_agent_profile(saved, updated, key, search_key, self.remote)
+            if not self.remote:
+                self.credentials = updated
+                self.app.state.relay.credentials = updated
+            if not finalized:
+                self.emit("notice", "The model was saved, but its saved credentials need another check. Unlock your credential store and restart the app to finish it.")
             await self._launch_profile(profile, self.storage.settings.get("remote", {}).get("allow_insecure", False))
             self.emit("activity", {"title": f"{agent_id} connected", "detail": f"{profile['provider']} · {profile['model']}"})
             await self.refresh()
@@ -661,6 +660,7 @@ class WorkspaceRuntime:
     async def remove_member(self, member):
         """Revoke a member's access and clean up its runner, history, and credentials."""
         async with self.mutation:
+            self.storage.recover_agent_save()
             if self.remote:
                 raise ValueError("Only the workspace owner can remove members")
             if member == self.active_id:

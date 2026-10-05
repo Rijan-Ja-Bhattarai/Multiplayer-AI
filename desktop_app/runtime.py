@@ -396,6 +396,7 @@ class DesktopRuntime:
         directory the deletion is about to remove.
         """
         names = ["remote-token"]
+        names.extend(storage.agent_save_credential_names())
         for identity in storage.settings.get("identities", {}):
             names.append("relay:" + identity)
             names.append("provider:" + identity)
@@ -430,6 +431,9 @@ class DesktopRuntime:
         """
         storage = engine.storage if engine is not None else self.scoped_storage(entry)
         names = self.storage._owed(owed[0], "credentials") if owed else self._credential_names_for(storage)
+        # The deletion ledger now owns these names. Remove the save journal first
+        # so recovery cannot restore credentials after this workspace is deleted.
+        storage.discard_agent_save()
         # Only the explicit UNAVAILABLE marker counts as a failure, so a vault
         # that does not speak in these terms is treated as having done the
         # work rather than as stranding a secret.
@@ -444,7 +448,7 @@ class DesktopRuntime:
             # Only the local workspace's own keys and its chat archive are
             # cleared; the root directory itself must survive.
             for key in ("identities", "device_id", "agents", "remote", "remote_agent",
-                        "share_lan", "relay_port", "workspace_name", "workspace_id"):
+                        "share_lan", "relay_port", "workspace_name", "workspace_id", "agent_save_revision"):
                 storage.settings.pop(key, None)
             storage.save()
             HistoryStore(storage.directory).clear()

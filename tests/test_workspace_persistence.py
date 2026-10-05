@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from desktop_app.runtime import DesktopRuntime
 from desktop_app.storage import UNAVAILABLE, Storage
@@ -28,6 +29,64 @@ class WorkspacePersistenceTests(unittest.IsolatedAsyncioTestCase):
         if "model" not in runtime.credentials:
             await runtime.invite("model", runtime.active_url)
         await runtime._attach("model", runtime.credentials["model"]["token"], handler)
+
+    async def test_workspace_deletion_discovers_keys_from_an_unfinished_agent_save(self):
+        """Deleting root and scoped workspaces cleans search keys with no committed profile."""
+        for scoped in (False, True):
+            with self.subTest(scoped=scoped):
+                if scoped:
+                    await self.host.create_workspace("Unfinished model")
+                engine = self.host.engine
+                vault = engine.storage.vault
+                original = vault.set
+                profile = {"id": "unfinished", "provider": "bionic", "model": "test-model",
+                           "base_url": "https://model.example/v1", "search_provider": "ollama",
+                           "web_search": "auto", "autostart": False}
+
+                def reject_relay(name, value):
+                    """Fail relay creation after the new search credential has been stored."""
+                    if name == "relay:unfinished":
+                        raise RuntimeError("Relay creation failed")
+                    original(name, value)
+
+                with patch.object(vault, "set", reject_relay), patch.object(vault, "delete", return_value=UNAVAILABLE):
+                    with self.assertRaisesRegex(RuntimeError, "recovery is pending"):
+                        await self.host.save_agent(profile, "model-key", "search-key")
+                self.assertNotIn("unfinished", engine.credentials)
+                self.assertNotIn("unfinished", engine.app.state.relay.credentials)
+                self.assertNotIn("unfinished", engine.storage.settings["identities"])
+                self.assertFalse(any(p["id"] == "unfinished" for p in engine.storage.settings.get("agents", [])))
+                names = engine.storage.agent_save_credential_names()
+                self.assertEqual(vault.get("search:unfinished"), "search-key")
+                await self.host.delete_workspace()
+                self.assertFalse(engine.storage.agent_save_path.exists())
+                for name in names:
+                    self.assertIsNone(vault.get(name))
+                self.assertEqual(self.host.storage.read_pending_cleanup(), [])
+
+    async def test_failed_model_creation_recovers_before_workspace_restart(self):
+        """Restart removes journal-owned search keys without inventing a model identity."""
+        engine = self.host.engine
+        original = engine.storage.vault.set
+
+        def reject_relay(name, value):
+            """Allow API-key writes and fail the new model's relay token creation."""
+            if name == "relay:unfinished":
+                raise RuntimeError("Relay creation failed")
+            original(name, value)
+
+        profile = {"id": "unfinished", "provider": "bionic", "model": "test-model",
+                   "base_url": "https://model.example/v1", "search_provider": "ollama", "web_search": "auto"}
+        with patch.object(engine.storage.vault, "set", reject_relay), patch.object(
+                engine.storage.vault, "delete", return_value=UNAVAILABLE):
+            with self.assertRaisesRegex(RuntimeError, "recovery is pending"):
+                await self.host.save_agent(profile, "model-key", "search-key")
+        await self.host.close()
+        self.host = DesktopRuntime(Storage(Path(self.directory.name) / "host", self.vault))
+        await self.host.start()
+        self.assertIsNone(self.host.engine.storage.vault.get("search:unfinished"))
+        self.assertNotIn("unfinished", self.host.credentials)
+        self.assertFalse(self.host.engine.storage.agent_save_path.exists())
 
     async def guest_join(self, invitation):
         self.guest = DesktopRuntime(Storage(Path(self.directory.name) / "guest", MemoryVault()))

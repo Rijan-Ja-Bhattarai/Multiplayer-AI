@@ -4,6 +4,7 @@ import os
 import re
 import threading
 from pathlib import Path
+from uuid import uuid4
 
 
 def default_data_directory():
@@ -80,11 +81,11 @@ UNAVAILABLE = "unavailable"
 GONE = (REMOVED, ABSENT)
 
 # The only credential names this app mints: the bare legacy invitation
-# token, and provider, search or relay entries per agent id. Agent ids, profile
-# ids and member names are all validated as [A-Za-z0-9_-]{1,64} when they
+# token, provider/search/relay entries per agent id, and save backups per revision.
+# Agent ids, profile ids and member names are validated as [A-Za-z0-9_-]{1,64} when they
 # are accepted, so matching that shape here cannot orphan an entry the
 # code created.
-CREDENTIAL_NAME = re.compile(r"(?:remote-token|(?:relay|provider|search):[A-Za-z0-9_-]{1,64})")
+CREDENTIAL_NAME = re.compile(r"(?:remote-token|(?:relay|provider|search):[A-Za-z0-9_-]{1,64}|agent-save:[0-9a-f]{32})")
 
 # Bounds a hand-edited or corrupt ledger from turning one launch into an
 # unbounded number of credential-store round trips.
@@ -198,8 +199,161 @@ class Storage:
         return self.root.directory / "pending-deletions.json"
 
     def save(self):
+        """Atomically persist preferences and report whether durability was confirmed."""
         with self.lock:
-            write_json_durably(self.path, json.dumps(self.settings, indent=2))
+            return write_json_durably(self.path, json.dumps(self.settings, indent=2))
+
+    @property
+    def agent_save_path(self):
+        """Nonsecret ownership journal for an unfinished model credential update."""
+        return self.directory / "agent-save.json"
+
+    def read_agent_save(self):
+        """Read a validated save journal, refusing recovery from malformed metadata."""
+        if not self.agent_save_path.exists():
+            return None
+        try:
+            record = json.loads(self.agent_save_path.read_text(encoding="utf-8"))
+            agent = record["agent"]
+            revision = record["revision"]
+            names = record["credentials"]
+            if (not isinstance(agent, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", agent)
+                    or not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{32}", revision)
+                    or record["backup"] != "agent-save:" + revision
+                    or record["state"] not in ("prepared", "updating", "finished")
+                    or not isinstance(names, list) or len(names) != len(set(names))
+                    or not set(names) <= {prefix + agent for prefix in ("provider:", "search:", "relay:")}):
+                raise ValueError()
+        except (OSError, ValueError, KeyError, TypeError):
+            raise RuntimeError("Could not read the pending model save. Its credentials have not been changed.") from None
+        return record
+
+    def agent_save_credential_names(self):
+        """List journal-owned credentials even when no saved profile or identity exists."""
+        record = self.read_agent_save()
+        return [*record["credentials"], record["backup"]] if record else []
+
+    def discard_agent_save(self):
+        """Remove a completed journal after another durable record owns any backup."""
+        if self.agent_save_path.exists():
+            self.agent_save_path.unlink()
+            _fsync_directory(self.directory)
+
+    def _finish_agent_save(self, record):
+        """Mark recovery complete before transferring backup removal to the cleanup ledger."""
+        finished = dict(record, state="finished")
+        if not write_json_durably(self.agent_save_path, json.dumps(finished)):
+            raise RuntimeError("Could not confirm the model save recovery on disk. Restart to retry.")
+        source = "agent-save:" + record["revision"]
+        if self.record_owed_credentials([record["backup"]], source) is False:
+            raise RuntimeError("Could not confirm pending credential cleanup on disk. Restart to retry.")
+        self.discard_agent_save()
+        remaining = [record["backup"]] if self.vault.delete(record["backup"]) == UNAVAILABLE else []
+        self.root.replace_owed_credentials(self.vault_scope, source, remaining)
+
+    def recover_agent_save(self):
+        """Restore unfinished key writes before startup, keeping locked backups for retry."""
+        with self.lock:
+            record = self.read_agent_save()
+            if not record:
+                return
+            committed = self.settings.get("agent_save_revision") == record["revision"]
+            if record["state"] != "finished" and not committed:
+                raw = self.vault.get(record["backup"])
+                # Only the prepared state can lack a backup: canonical writes start
+                # after the updating state and its backup are durably established.
+                if raw is None and record["state"] == "updating":
+                    raise RuntimeError("The pending model save is missing its credential backup. Its model has not been started.")
+                if raw is not None:
+                    try:
+                        old = json.loads(raw)
+                        if (not isinstance(old, dict) or set(old) != set(record["credentials"])
+                                or any(value is not None and not isinstance(value, str) for value in old.values())):
+                            raise ValueError()
+                    except (ValueError, TypeError):
+                        raise RuntimeError("Could not read the model credential backup. Unlock your credential store and restart.") from None
+                    for name, value in old.items():
+                        if value is None:
+                            if self.vault.delete(name) == UNAVAILABLE:
+                                raise RuntimeError("Could not undo the model save. Unlock your credential store and restart.")
+                        else:
+                            self.vault.set(name, value)
+            self._finish_agent_save(record)
+
+    def save_agent_profile(self, profile, credentials, key=None, search_key=None, remote=False):
+        """Commit a profile and its keys together, journaling ownership before any vault write.
+
+        The old keys stay in a single vaulted backup until atomic settings persistence
+        commits the revision. An interrupted update rolls back on the next launch;
+        committed updates retain the new keys. Neither the journal nor settings holds
+        secrets, and failed backup deletion is handed to the existing cleanup ledger.
+        Return whether recovery metadata was finalized; False leaves a durable retry
+        record without undoing the already committed profile and credential pair.
+        """
+        with self.lock:
+            self.recover_agent_save()
+            agent = profile["id"]
+            updates = {}
+            if key:
+                updates["provider:" + agent] = key
+            if search_key and profile.get("search_provider") == "ollama":
+                updates["search:" + agent] = search_key
+            if not remote and agent not in self.settings.get("identities", {}):
+                updates["relay:" + agent] = credentials[agent]["token"]
+            previous = self.settings
+            updated = dict(previous)
+            if remote:
+                updated["remote_agent"] = dict(profile)
+            else:
+                profiles = [p for p in previous.get("agents", []) if p["id"] != agent]
+                updated["agents"] = [*profiles, dict(profile)]
+                updated["identities"] = {identity: config["group"] for identity, config in credentials.items()}
+            if not updates:
+                self.settings = updated
+                try:
+                    durable = self.save()
+                except BaseException:
+                    self.settings = previous
+                    raise
+                return durable is not False
+            old = {name: self.vault.get(name) for name in updates}
+            revision = uuid4().hex
+            record = {"agent": agent, "revision": revision, "credentials": list(updates),
+                      "backup": "agent-save:" + revision, "state": "prepared"}
+            if not write_json_durably(self.agent_save_path, json.dumps(record)):
+                raise RuntimeError("Could not confirm the model save journal on disk. No credentials were written.")
+            committed = False
+            try:
+                self.vault.set(record["backup"], json.dumps(old))
+                record["state"] = "updating"
+                if not write_json_durably(self.agent_save_path, json.dumps(record)):
+                    raise RuntimeError("Could not confirm the credential backup on disk. No model keys were changed.")
+                for name, value in updates.items():
+                    self.vault.set(name, value)
+                updated["agent_save_revision"] = revision
+                self.settings = updated
+                durable = self.save()
+                committed = True
+                if durable is False:
+                    # Keep the backup: after a power loss the revision on disk decides
+                    # whether recovery retains the new keys or restores the old ones.
+                    return False
+            except BaseException:
+                if not committed:
+                    self.settings = previous
+                    try:
+                        self.recover_agent_save()
+                    except Exception:
+                        raise RuntimeError("The model save failed and credential recovery is pending. Unlock your credential store and restart.") from None
+                raise
+            try:
+                self._finish_agent_save(record)
+            except Exception:
+                # Settings already committed. Reporting this as a failed save would
+                # leave the live relay using its old credential map despite new disk
+                # ownership. Recovery retains the committed keys and retries cleanup.
+                return False
+            return True
 
     def credentials(self):
         """Tokens for every saved identity.
@@ -279,6 +433,8 @@ class Storage:
         return removed, undeleted
 
     def save_credentials(self, credentials):
+        """Recover pending model writes before persisting relay credentials and ownership."""
+        self.recover_agent_save()
         for agent_id, config in credentials.items():
             self.vault.set("relay:" + agent_id, config["token"])
         self.settings["identities"] = {agent_id: config["group"] for agent_id, config in credentials.items()}
@@ -365,7 +521,7 @@ class Storage:
 
     def write_pending_cleanup(self, records):
         """Written before the change it describes, and after each attempt."""
-        write_json_durably(self.ledger_path, json.dumps(records, indent=2))
+        return write_json_durably(self.ledger_path, json.dumps(records, indent=2))
 
     def record_workspace_deletion(self, entry, credentials, root_credentials=(), data_owed=False):
         """Record a workspace's removal before anything is destroyed.
@@ -431,7 +587,7 @@ class Storage:
                     kept = True
                     updated.append(dict(record, credentials=union))
             records = updated
-        self.write_pending_cleanup(records)
+        return self.write_pending_cleanup(records)
 
     def replace_owed_credentials(self, scope, source, credentials):
         """Narrow an existing record to what is still owed, or drop it."""
