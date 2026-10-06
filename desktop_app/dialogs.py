@@ -307,6 +307,14 @@ def parse_invitation(text):
     invitation. When the page opened the dialog instead of doing the work
     itself, the fields on the page were decoration and the rules had two
     homes; a rule stated once cannot disagree with itself.
+
+    Every field is checked here rather than subscripted. A missing one raised
+    KeyError, which the page rendered as ``str(exc)``, so a reader who pasted
+    an invitation without a url was told ``'url'``. A wrongly typed one was
+    worse: the page put the int into a QLineEdit and the reader saw a PySide6
+    signature dump. ``allow_insecure`` had the quietest failure of the three,
+    because ``bool("false")`` is True, so a paste saying ``"allow_insecure":
+    "false"`` turned a wss:// requirement into a permitted ws:// one.
     """
     try:
         data = json.loads(text)
@@ -316,15 +324,29 @@ def parse_invitation(text):
             "and version fields.") from exc
     if not isinstance(data, dict):
         raise ValueError("Paste the invitation object beginning with { and ending with }")
-    if data.get("version") != 1:
+    # isinstance rather than != 1, because True == 1 and a paste saying
+    # "version": true was accepted as version one.
+    version = data.get("version")
+    if not isinstance(version, int) or isinstance(version, bool) or version != 1:
         raise ValueError("Unsupported invitation version")
+
+    url = data.get("url")
+    if not isinstance(url, str) or not url.strip():
+        raise ValueError("This invitation has no relay address in it")
+    token = data.get("token")
+    if not isinstance(token, str) or not token.strip():
+        raise ValueError("This invitation has no device token in it")
+
+    allow_insecure = data.get("allow_insecure", False)
+    if not isinstance(allow_insecure, bool):
+        raise ValueError("The invitation's allow_insecure field must be true or false")
+
     conversation_id = data.get("conversation_id")
     if conversation_id is not None and (not isinstance(conversation_id, str)
                                         or not conversation_id.startswith("conversation-")
                                         or not conversation_id.removeprefix("conversation-").isalnum()):
         raise ValueError("Use the complete shared conversation invitation")
-    return (data["url"], data["token"], bool(data.get("allow_insecure")),
-            conversation_id)
+    return (url, token, allow_insecure, conversation_id)
 
 
 class JoinDialog(QDialog):

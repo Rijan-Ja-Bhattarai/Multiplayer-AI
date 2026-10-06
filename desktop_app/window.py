@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QFileDialog,
 from network_a2a.persistence import HistoryStore, model_context
 from network_a2a.content import MAX_MESSAGE_BYTES, content_summary, validate_content
 from network_a2a.adapters import PROVIDERS
+from network_a2a.web_search import validate_search_settings
 
 from .bridge import NetworkThread
 from .dialogs import InviteDialog, parse_invitation
@@ -1966,35 +1967,37 @@ class MainWindow(QMainWindow):
                 self.model_search_insecure.isChecked())
 
     def validate_model_search(self):
-        """Refuse an incomplete search setup, saying what is missing."""
+        """Check the search settings with the runtime's own rules.
+
+        The rules live in network_a2a.web_search and are used by the adapter
+        when the model is actually built, so they are asked here rather than
+        restated. Restating them had already drifted in seven places: loopback
+        http was refused here while the runtime exempts localhost, and port
+        validity, embedded credentials, query strings and fragments were not
+        checked at all. The loopback case matters most, because
+        ``http://localhost:8888`` is the field's own placeholder and the
+        example the runtime's own error message gives.
+
+        One thing is deliberately not delegated. A blank key on a profile that
+        already has one means keep the saved key, which is what the field
+        promises and what the runtime does when it falls back to the vault.
+        The validator cannot know that, and the dialog this replaced had the
+        carve-out, so it is kept here.
+        """
         if not self.model_internet.isChecked():
             return True
-        if self.model_search_provider.currentData() == "ollama":
-            if not self.model_search_key.text().strip() and self.model_search_mode.currentData() != "off":
-                self.focus_model_search()
-                self.set_card_message(
-                    self.model_error_line,
-                    "Ollama web search needs an account key in Search API key.")
-                return False
+        provider = self.model_search_provider.currentData()
+        key = self.model_search_key.text().strip() or None
+        if provider == "ollama" and key is None and self.model_profile_id:
             return True
-        url = self.model_search_url.text().strip()
-        if not url:
+        try:
+            validate_search_settings(provider, self.model_search_url.text().strip(),
+                                     key, self.model_search_insecure.isChecked())
+        except ValueError as exc:
+            # The runtime's own sentence, so the page and the adapter cannot
+            # disagree about what is wrong with a search address.
+            self.set_card_message(self.model_error_line, str(exc))
             self.focus_model_search()
-            self.set_card_message(
-                self.model_error_line,
-                "SearXNG needs the address of your search server.")
-            return False
-        if not url.startswith(("https://", "http://")):
-            self.focus_model_search()
-            self.set_card_message(
-                self.model_error_line, "The SearXNG address must start with http:// or https://")
-            return False
-        if url.startswith("http://") and not self.model_search_insecure.isChecked():
-            self.focus_model_search()
-            self.set_card_message(
-                self.model_error_line,
-                "That SearXNG address is plain HTTP. Tick the trusted-LAN box "
-                "to allow it, or use https://")
             return False
         return True
 

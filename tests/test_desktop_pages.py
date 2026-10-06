@@ -1200,11 +1200,41 @@ def test_a_search_failure_points_at_the_search_settings(window) -> None:
     window.save_model()
 
     assert not callbacks, "a save was attempted with no search key"
-    assert "account key" in window.model_error_line.message.text(), (
+    assert "Search API key" in window.model_error_line.message.text(), (
         f"the page says {window.model_error_line.message.text()!r}")
 
 
-def test_a_plain_http_searxng_is_refused_without_the_lan_box(window) -> None:
+def test_a_lan_http_searxng_is_refused_without_the_lan_box(window) -> None:
+    """A LAN address over plain HTTP is what the trusted-LAN box governs.
+
+    This used to use ``http://localhost:8888``, which pinned a rule the
+    runtime contradicts: network_a2a.web_search exempts loopback from the
+    HTTPS requirement, so localhost is legal with or without the box. It is
+    also the field's own placeholder and the example in the runtime's error
+    message, so the test was refusing the most ordinary local address.
+    """
+    window.ready = True
+    window.add_agent("ollama")
+    window.model_internet.setChecked(True)
+    window.model_search_provider.setCurrentIndex(
+        window.model_search_provider.findData("searxng"))
+    window.model_search_url.setText("http://192.168.1.5:8888")
+    window.model_search_insecure.setChecked(False)
+
+    sent = []
+    window.command = lambda name, *args, **kwargs: sent.append(name)
+    window.save_model()
+
+    assert not sent, "a save was attempted over plain HTTP to a LAN host"
+    assert "HTTP" in window.model_error_line.message.text()
+
+    window.model_search_insecure.setChecked(True)
+    window.save_model()
+    assert sent == ["save_agent"], "it was still refused after the box was ticked"
+
+
+def test_a_loopback_http_searxng_needs_no_lan_box(window) -> None:
+    """The runtime exempts localhost, so the page must not refuse it."""
     window.ready = True
     window.add_agent("ollama")
     window.model_internet.setChecked(True)
@@ -1217,12 +1247,75 @@ def test_a_plain_http_searxng_is_refused_without_the_lan_box(window) -> None:
     window.command = lambda name, *args, **kwargs: sent.append(name)
     window.save_model()
 
-    assert not sent, "a save was attempted over plain HTTP"
-    assert "HTTP" in window.model_error_line.message.text()
+    assert sent == ["save_agent"], (
+        "a local SearXNG on loopback was refused: "
+        f"{window.model_error_line.message.text()!r}")
 
-    window.model_search_insecure.setChecked(True)
+
+@pytest.mark.parametrize("url, because", [
+    ("https://user:pw@search.example.com", "login details"),
+    ("http://search.example.com?format=json", "a query string"),
+    ("http://search.example.com#top", "a fragment"),
+    ("http://search.example.com:99999", "an impossible port"),
+    ("http://", "no host at all"),
+])
+def test_a_searxng_address_the_runtime_would_refuse(window, url, because) -> None:
+    """The page asks the runtime, so it cannot drift from it any more."""
+    window.ready = True
+    window.add_agent("ollama")
+    window.model_internet.setChecked(True)
+    window.model_search_provider.setCurrentIndex(
+        window.model_search_provider.findData("searxng"))
+    window.model_search_url.setText(url)
+
+    sent = []
+    window.command = lambda name, *args, **kwargs: sent.append(name)
     window.save_model()
-    assert sent == ["save_agent"], "it was still refused after the box was ticked"
+
+    assert not sent, f"a save was attempted with {because} in the address"
+    assert window.model_error_line.message.text(), (
+        f"{because} was refused with nothing said about it")
+
+
+def test_a_blank_search_key_is_allowed_when_editing_a_saved_profile(window) -> None:
+    """The field promises to keep a saved key, so it has to.
+
+    The dialog this replaced had the carve-out; dropping it made it impossible
+    to save any edit of a profile that uses Ollama web search, because the key
+    lives in the vault and is never read back into the field.
+    """
+    window.ready = True
+    window.edit_agent({"id": "llama-agent", "provider": "ollama",
+                       "profile": {"id": "llama-agent", "model": "llama3.2",
+                                   "web_search": "always",
+                                   "search_provider": "ollama"}})
+    window.model_search_key.clear()
+    assert not window.model_search_key.text(), "the saved key is not readable, by design"
+
+    sent = []
+    window.command = lambda name, *args, **kwargs: sent.append(name)
+    window.save_model()
+
+    assert sent == ["save_agent"], (
+        "an edit could not be saved without re-pasting a key the user cannot "
+        f"see: {window.model_error_line.message.text()!r}")
+
+
+def test_a_blank_search_key_is_still_refused_for_a_new_model(window) -> None:
+    """There is no saved key to keep, so a new model still needs one."""
+    window.ready = True
+    window.add_agent("ollama")
+    window.model_internet.setChecked(True)
+    window.model_search_provider.setCurrentIndex(
+        window.model_search_provider.findData("ollama"))
+    window.model_search_key.clear()
+
+    sent = []
+    window.command = lambda name, *args, **kwargs: sent.append(name)
+    window.save_model()
+
+    assert not sent, "a new model was saved with web search and no key"
+    assert window.model_error_line.message.text()
 
 
 def test_a_model_message_survives_the_agents_poll(window, qt_app) -> None:
@@ -1583,6 +1676,63 @@ def test_connecting_a_model_after_editing_cannot_overwrite_it(window) -> None:
     assert sent and sent[0]["id"] == "ollama-agent", (
         f"the new agent would be saved as {sent[0]['id']!r}, which is the "
         "model that was just edited")
+
+
+@pytest.mark.parametrize("paste, expected", [
+    # Missing fields. These used to raise KeyError, which the page rendered
+    # as str(exc), so a reader was shown the bare word 'url'.
+    ('{"version": 1, "token": "tttttttttttttttttttttttttttttttttttt"}', "no relay address"),
+    ('{"version": 1, "url": "wss://relay.example.com/connect"}', "no device token"),
+    # Wrong types. These used to be put straight into a QLineEdit, so the
+    # reader saw a PySide6 signature dump instead of a sentence.
+    ('{"version": 1, "url": 123, "token": "y"}', "no relay address"),
+    ('{"version": 1, "url": null, "token": "y"}', "no relay address"),
+    ('{"version": 1, "url": "wss://x", "token": 456}', "no device token"),
+    ('{"version": 1, "url": "wss://x", "token": ""}', "no device token"),
+    # True == 1, so this was accepted as version one.
+    ('{"version": true, "url": "wss://x", "token": "y"}', "Unsupported invitation version"),
+    # bool("false") is True, so this quietly downgraded a wss:// requirement.
+    ('{"version": 1, "url": "wss://x", "token": "y", "allow_insecure": "false"}',
+     "must be true or false"),
+])
+def test_an_unusable_invitation_field_is_explained(window, paste, expected) -> None:
+    """Every way a paste can be wrong has a sentence, not a Python repr.
+
+    The reader is looking at a card, and the page renders whatever the
+    exception says. So a missing key arriving as KeyError showed them 'url',
+    and a wrongly typed one showed them a PySide6 type signature.
+    """
+    window.ready = True
+    sent = []
+    window.command = lambda name, *args, **kwargs: sent.append((name, args))
+    window.workspace_invitation.setPlainText(paste)
+
+    window.join_workspace()
+
+    assert not sent, "a join was attempted with an unusable invitation"
+    message = window.workspace_join_line.message.text()
+    assert expected in message, f"the page says {message!r}"
+    assert "PySide6" not in message, f"a Qt error leaked into the card: {message!r}"
+    assert not message.startswith("'"), f"a Python repr reached the card: {message!r}"
+    assert window.workspace_join_button.text() == "Join workspace"
+
+
+def test_a_valid_invitation_still_returns_the_same_four_values() -> None:
+    """The stricter reading must not change what a good invitation gives."""
+    from desktop_app.dialogs import parse_invitation
+
+    assert parse_invitation(json.dumps({
+        "version": 1, "url": "wss://relay.example.com/connect",
+        "token": "t" * 40, "allow_insecure": True,
+        "conversation_id": "conversation-abc123"})) == (
+        "wss://relay.example.com/connect", "t" * 40, True, "conversation-abc123")
+
+    # allow_insecure absent is the same as false, and conversation_id absent
+    # is a plain workspace invitation rather than a shared conversation.
+    assert parse_invitation(json.dumps({
+        "version": 1, "url": "wss://relay.example.com/connect",
+        "token": "t" * 40})) == (
+        "wss://relay.example.com/connect", "t" * 40, False, None)
 
 
 def test_the_create_panel_previews_the_rail_button(window) -> None:
