@@ -8,6 +8,8 @@ leave a device token in the developer's OS credential store.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import json
 import os
 import time
@@ -2030,6 +2032,34 @@ def test_the_window_opens_maximised(qt_app, storage) -> None:
     finally:
         instance.network.shutdown()
         instance.network.wait(10000)
+
+
+def test_nothing_reintroduces_a_stored_window_size(qt_app, storage) -> None:
+    """Guards the preference against being written by something unnoticed.
+
+    A key already exists in the real settings, left by an older build that
+    saved its size. Nothing reads it now, but the cheap way for the window to
+    stop opening maximised later is for some path to start writing it again,
+    and the reader is ``window_size(None, {})`` which ignores it entirely.
+    """
+    module = Path(win.__file__)
+    for name in ("runtime.py", "dialogs.py", "bridge.py", "window.py"):
+        text = (module.parent / name).read_text(encoding="utf-8")
+        assert 'settings["window_size"]' not in text, (
+            f"{name} writes a window size, which would bring back the "
+            "remembered-size behaviour")
+
+    instance = win.MainWindow(storage)
+    try:
+        instance.resize(900, 700)
+        instance.close()
+        assert "window_size" not in storage.settings
+    finally:
+        instance.network.shutdown()
+        instance.network.wait(10000)
+
+
+
 
 
 def test_sidebar_hides_when_the_window_is_narrow(window) -> None:
