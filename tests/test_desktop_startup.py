@@ -44,11 +44,11 @@ def window_is_going_to_be_shown(window, splash=None):
     shown from the card's handover, which has not happened by the time
     main() returns.
     """
-    if window.show.call_count:
+    if window.showMaximized.call_count:
         return True
     if splash is None:
         return False
-    return splash.begin.call_args.kwargs.get("on_done") == window.show
+    return splash.begin.call_args.kwargs.get("on_done") == window.showMaximized
 
 
 @pytest.mark.parametrize("error", [PermissionError("Access denied"),
@@ -126,22 +126,25 @@ def test_the_launch_screen_is_shown_by_default(monkeypatch, startup_flow):
     startup.LaunchScreen.assert_called_once()
     splash = startup.LaunchScreen.return_value
     # Shown from the card's handover rather than straight away, so the
-    # window is never on screen behind it.
-    splash.begin.assert_called_once_with(on_done=window.show)
-    assert not window.show.called, (
+    # window is never on screen behind it. Maximised, not shown, because the
+    # app always opens filling the screen.
+    splash.begin.assert_called_once_with(on_done=window.showMaximized)
+    assert not window.showMaximized.called, (
         "the window is shown before the card, so it peeks out from behind it")
     # And painted while hidden, so the frame it appears with is complete.
     window.grab.assert_called()
 
 
 def test_the_launch_screen_can_be_turned_off(monkeypatch, startup_flow):
+    """No card still means maximised, not an ordinary window."""
     storage, app, lock, window, messages = startup_flow
     storage.settings["launch_screen"] = False
 
     assert startup.main() == 0
 
     startup.LaunchScreen.assert_not_called()
-    window.show.assert_called_once_with()
+    window.showMaximized.assert_called_once_with()
+    window.show.assert_not_called()
 
 
 def test_reduce_motion_suppresses_the_launch_screen(monkeypatch, startup_flow):
@@ -162,7 +165,7 @@ def test_the_startup_check_never_shows_the_launch_screen(monkeypatch, startup_fl
     startup.main()
 
     startup.LaunchScreen.assert_not_called()
-    window.show.assert_not_called()
+    window.showMaximized.assert_not_called()
 
 
 def test_a_fatal_error_tears_the_launch_screen_down(monkeypatch, startup_flow):

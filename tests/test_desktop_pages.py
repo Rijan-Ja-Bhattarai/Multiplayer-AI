@@ -21,8 +21,8 @@ pytest.importorskip("psutil", reason="psutil backs the Resources page")
 
 from PySide6.QtCore import QPoint, QPointF, Qt, QTimer  # noqa: E402
 from PySide6.QtGui import QShortcut, QWheelEvent  # noqa: E402
-from PySide6.QtWidgets import (QApplication, QFrame, QLabel, QMessageBox,
-                             QPushButton)  # noqa: E402
+from PySide6.QtWidgets import (QApplication, QDialog, QFrame, QLabel,
+                             QMessageBox, QPushButton)  # noqa: E402
 
 from desktop_app import window as win  # noqa: E402
 from desktop_app.storage import ABSENT, REMOVED, Storage  # noqa: E402
@@ -605,6 +605,130 @@ def test_a_refused_create_reports_on_the_page_not_in_a_toast(window, qt_app) -> 
     assert not shown, f"the message went to a toast instead: {shown}"
 
 
+def test_joining_from_the_page_does_not_open_a_dialog(window, monkeypatch) -> None:
+    """The page's own fields are the ones that get used.
+
+    This was the bug: the page had an invitation box, a relay box, a token
+    box and a checkbox, and pressing Join threw all of them away and opened
+    the old modal to ask for the same information again. So the fields were
+    decoration and whatever you had typed was silently discarded.
+    """
+    opened = []
+    monkeypatch.setattr(QDialog, "exec", lambda self, *a, **k: opened.append(self))
+    window.ready = True
+
+    sent = []
+    window.command = lambda name, *args, **kwargs: sent.append((name, args))
+
+    invitation = json.dumps({
+        "version": 1,
+        "url": "wss://relay.example.com/connect",
+        "token": "t" * 40,
+        "allow_insecure": True,
+    })
+    window.workspace_invitation.setPlainText(invitation)
+
+    window.join_workspace()
+
+    assert not opened, f"a dialog was opened instead of joining: {opened}"
+    assert sent, "no join was attempted"
+    name, args = sent[0]
+    assert name == "join"
+    # The invitation filled the page's fields, and those were submitted.
+    assert window.workspace_relay.text() == "wss://relay.example.com/connect"
+    assert window.workspace_token.text() == "t" * 40
+    assert window.workspace_lan.isChecked() is True
+    assert args[0] == "wss://relay.example.com/connect"
+    assert args[1] == "t" * 40
+    assert args[2] is True
+
+
+def test_a_shared_conversation_invitation_joins_that_conversation(window) -> None:
+    """The conversation id in an invitation is carried into the join."""
+    window.ready = True
+    sent = []
+    window.command = lambda name, *args, **kwargs: sent.append((name, args))
+    window.workspace_invitation.setPlainText(json.dumps({
+        "version": 1,
+        "url": "wss://relay.example.com/connect",
+        "token": "t" * 40,
+        "conversation_id": "conversation-abc123",
+    }))
+
+    window.join_workspace()
+
+    assert sent[0][0] == "join"
+    # join(relay, token, allow_insecure, announce, conversation_id)
+    assert sent[0][1][4] == "conversation-abc123"
+
+
+@pytest.mark.parametrize("paste, expected", [
+    ("not json at all", "Paste the complete invitation JSON"),
+    ('{"url": "wss://x", "token": "y"}', "Unsupported invitation version"),
+    ('["a"]', "beginning with { and ending with }"),
+    ('{"version": 1, "url": "wss://x", "token": "y", "conversation_id": "nope"}',
+     "Use the complete shared conversation invitation"),
+])
+def test_a_bad_invitation_is_reported_on_the_page(window, paste, expected) -> None:
+    """Every reason a paste is unusable is shown where the paste is."""
+    window.ready = True
+    sent = []
+    window.command = lambda name, *args, **kwargs: sent.append((name, args))
+    window.workspace_invitation.setPlainText(paste)
+
+    window.join_workspace()
+
+    assert not sent, "a join was attempted with an unusable invitation"
+    assert expected in window.workspace_error.text(), (
+        f"the page says {window.workspace_error.text()!r}")
+    assert window.workspace_join_button.text() == "Join workspace"
+
+
+def test_a_too_short_token_is_refused_on_the_page(window) -> None:
+    window.ready = True
+    sent = []
+    window.command = lambda name, *args, **kwargs: sent.append((name, args))
+    window.workspace_invitation.setPlainText("")
+
+    window.join_workspace()
+
+    assert not sent
+    assert "device token" in window.workspace_error.text()
+
+
+def test_a_failed_join_leaves_the_page_usable(window) -> None:
+    """A failure puts the button back and says why, on the page."""
+    window.ready = True
+    window.workspace_invitation.setPlainText("")
+    window.workspace_token.setText("t" * 40)
+    window.workspace_relay.setText("wss://relay.example.com/connect")
+
+    callbacks = {}
+    window.command = lambda name, *args, **kwargs: callbacks.update(kwargs)
+
+    window.join_workspace()
+    assert window.workspace_join_button.text() == "Connecting…"
+    assert window.workspace_join_button.isEnabled() is False
+
+    # The failure arrives asynchronously, after join_workspace returned.
+    callbacks["failure"]("The relay refused the token")
+
+    assert window.workspace_join_button.text() == "Join workspace"
+    assert window.workspace_join_button.isEnabled() is True
+    assert "refused" in window.workspace_error.text()
+
+
+def test_joining_before_the_network_is_ready_is_refused(window) -> None:
+    window.ready = False
+    sent = []
+    window.command = lambda name, *args, **kwargs: sent.append((name, args))
+
+    window.join_workspace()
+
+    assert not sent, "a join was attempted before the network was ready"
+    assert "still starting" in window.workspace_error.text()
+
+
 def test_the_create_panel_previews_the_rail_button(window) -> None:
     """The rail shows a workspace as its first two letters.
 
@@ -978,6 +1102,58 @@ def test_the_launch_screen_carries_the_apps_own_mark(qt_app) -> None:
     centre = screen.mark.pixmap().toImage().pixelColor(44, 44).name()
     assert centre == color(MIKU, "accent").lower(), (
         f"the mark is painted {centre}, not the theme's accent")
+
+
+def test_the_launch_screen_actually_writes_its_text(qt_app) -> None:
+    """The caption and the status line are on the card, not just in the code.
+
+    Both of these lines were invisible for the whole life of the card. They
+    are hand-painted widgets that a layout centres, and a bare QWidget has no
+    valid size hint, so the layout gave them zero width and a zero-width
+    widget never paints. Nothing failed, nothing warned, and the card looked
+    finished because it had a mark and an orbit on it.
+
+    So the check is on width and on painted pixels, which is the thing that
+    was actually wrong, rather than on the presence of the widgets.
+    """
+    from desktop_app.splash import CARD_TEXT_WIDTH, LaunchScreen
+
+    screen = LaunchScreen("dark")
+    screen.show()
+    qt_app.processEvents()
+
+    for widget in (screen.caption, screen.status):
+        assert widget.width() > 0, (
+            f"a line of text has no width, so it cannot paint: {widget._text!r}")
+        assert widget.width() <= CARD_TEXT_WIDTH, (
+            f"a line wider than the card: {widget.width()} > {CARD_TEXT_WIDTH}")
+
+    # Width is not proof of paint, so check glyphs were laid down. With no
+    # fonts installed the shapes are wrong but the pixels are still inked.
+    image = screen.grab().toImage()
+    background = color(DARK, "surface")
+    for widget in (screen.caption, screen.status):
+        box = widget.geometry()
+        region = image.copy(box.x(), box.y(), box.width(), box.height())
+        inked = {region.pixelColor(x, y).name()
+                 for y in range(region.height())
+                 for x in range(region.width())} - {background}
+        assert inked, f"nothing was painted for {widget._text!r}"
+
+
+def test_a_status_line_too_long_for_the_card_is_elided(qt_app) -> None:
+    """A long warning cannot push the layout about or run off both edges."""
+    from desktop_app.splash import CARD_TEXT_WIDTH, LaunchScreen
+
+    screen = LaunchScreen("dark")
+    screen.show()
+    screen.status.set("Could not start: the relay is unreachable and its vault "
+                      "could not be read, so nothing can be sent", "error")
+    qt_app.processEvents()
+
+    assert screen.status.sizeHint().width() <= CARD_TEXT_WIDTH
+    assert screen.status.width() <= CARD_TEXT_WIDTH
+    assert screen.status.width() > 0
 
 
 def test_the_launch_screen_follows_the_theme(qt_app) -> None:
@@ -1597,13 +1773,34 @@ def test_window_fits_the_screen_it_opens_on(qt_app, storage) -> None:
         instance.network.wait(10000)
 
 
-def test_window_size_is_remembered(qt_app, storage) -> None:
-    """Closing records the size so the next launch opens at the same one."""
+def test_window_size_is_never_remembered(qt_app, storage) -> None:
+    """No size is written on close, so the app cannot reopen as a window.
+
+    Replaced a test that asserted the opposite. Remembering the size is what
+    made the app come back up in a window rather than maximised, and the
+    window it opened at was chosen by whatever the last session happened to
+    leave behind.
+    """
     instance = win.MainWindow(storage)
     try:
         instance.resize(1150, 760)
-        instance.remember_window_size()
-        assert storage.settings["window_size"] == [1150, 760]
+        instance.close()
+        assert "window_size" not in storage.settings
+    finally:
+        instance.network.shutdown()
+        instance.network.wait(10000)
+
+
+def test_the_window_opens_maximised(qt_app, storage) -> None:
+    """The window is maximised, and a stale stored size is ignored."""
+    storage.settings["window_size"] = [1150, 760]
+    instance = win.MainWindow(storage)
+    try:
+        instance.showMaximized()
+        assert instance.isMaximized()
+        # A size left behind by an earlier version must not shrink the
+        # window back to a restored rectangle.
+        assert instance.size() != win.QSize(1150, 760)
     finally:
         instance.network.shutdown()
         instance.network.wait(10000)

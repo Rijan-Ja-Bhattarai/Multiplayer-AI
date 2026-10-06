@@ -24,8 +24,8 @@ from __future__ import annotations
 
 import time
 
-from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QRectF, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QPainter, QPen
+from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QRectF, QSize, Qt, QTimer
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
 from PySide6.QtWidgets import (QApplication, QGraphicsOpacityEffect, QLabel,
                                QVBoxLayout, QWidget)
 
@@ -45,6 +45,12 @@ FADE_MS = 260
 # report. Short and plain, because a line of text that has stalled for two
 # seconds starts to read as a hang.
 HOLD_TEXT = "Getting things ready"
+
+# The card, in one place so the lines can be told how much room they have.
+CARD_WIDTH = 400
+CARD_HEIGHT = 470
+CARD_GUTTER = 24
+CARD_TEXT_WIDTH = CARD_WIDTH - 2 * CARD_GUTTER
 
 
 class StartupStatus:
@@ -163,7 +169,7 @@ class LaunchScreen(QWidget):
                            | Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAccessibleName("Multiplayer AI is starting")
-        self.setFixedSize(400, 470)
+        self.setFixedSize(CARD_WIDTH, CARD_HEIGHT)
         # The rounded card is painted rather than laid out, because the only
         # way to get rounded corners out of a frameless window is to paint
         # them, and because the fill has to be opaque: left transparent the
@@ -188,7 +194,9 @@ class LaunchScreen(QWidget):
         self.mark.setAccessibleName("Multiplayer AI")
         column.addWidget(self.mark, 0, Qt.AlignmentFlag.AlignHCenter)
 
-        self.caption = Caption(theme_name)
+        self.caption = Line("Multiplayer AI", theme_name, size=17,
+                            weight=QFont.Weight.DemiBold, token="text_strong",
+                            max_width=CARD_TEXT_WIDTH)
         column.addWidget(self.caption, 0, Qt.AlignmentFlag.AlignHCenter)
 
         self.art = OrbitArt(theme=theme_name, moving=moving)
@@ -196,7 +204,8 @@ class LaunchScreen(QWidget):
 
         # Hand-painted like the caption, so it follows the theme without the
         # splash needing the application stylesheet, which it never has.
-        self.status = StatusLine(theme_name)
+        self.status = Line("Starting your network", theme_name, size=12,
+                           max_width=CARD_TEXT_WIDTH)
         column.addWidget(self.status, 0, Qt.AlignmentFlag.AlignHCenter)
 
         self.shown_at = 0.0
@@ -229,7 +238,7 @@ class LaunchScreen(QWidget):
         """Adopt a StartupStatus, or None to keep the opening line."""
         self._status = status
         if status is not None:
-            self.status.set(status.line, status.tone)
+            self.status.set(status.line, "error" if status.tone == "warn" else "text_muted")
 
     def dismiss_when_floored(self):
         """Leave once the floor has passed and the checks have settled.
@@ -351,56 +360,64 @@ class LaunchScreen(QWidget):
                   area.center().y() - self.height() // 2)
 
 
-class StatusLine(QWidget):
-    """The one line of plain text under the orbit.
+class Line(QWidget):
+    """A centred line of text, painted by hand and sized from its own font.
 
-    Hand-painted for the same reason as the caption: the splash is its own
-    window and never has the application stylesheet, so anything coloured
-    has to be painted or styled here.
+    Painted rather than a QLabel because the splash is its own window and
+    never has the application stylesheet, so anything coloured has to be
+    painted or styled here.
+
+    Sized explicitly because this is the whole bug. A bare QWidget has no
+    valid size hint, so a layout centring one gives it zero width, and a
+    zero-width widget never paints. Both lines on the card were invisible
+    for that reason, which is why they are one class now rather than two
+    copies of the same mistake.
     """
 
-    def __init__(self, theme_name):
+    def __init__(self, text, theme_name, size=11, weight=None, token="text_muted",
+                 max_width=None):
         super().__init__()
         self._theme = theme_name
-        self._line = "Starting your network"
-        self._tone = "normal"
-        self.setFixedHeight(24)
+        self._text = text
+        self._token = token
+        # A message longer than the card has to be elided rather than allowed
+        # to push the layout around or run off both edges.
+        self._max_width = max_width
+        self.setFont(QFont("Segoe UI", size,
+                           weight if weight is not None else QFont.Weight.Normal))
+        self.setFixedHeight(round(size * 1.9))
+        self.setAccessibleName(text)
 
-    def set(self, line, tone="normal"):
-        self._line = line
-        self._tone = tone
+    def set(self, text, token=None):
+        self._text = text
+        if token is not None:
+            self._token = token
+        self.setAccessibleName(text)
+        # The hint is derived from the text, so a layout has to be asked
+        # again or the new text is drawn into the old width.
+        self.updateGeometry()
         self.update()
 
     def set_theme(self, name):
         self._theme = name
         self.update()
 
-    def paintEvent(self, event):
-        token = "error" if self._tone == "warn" else "text_muted"
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(QPen(QColor(color(self._theme, token)), 1))
-        painter.setFont(QFont("Segoe UI", 11))
-        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._line)
-        painter.end()
+    def sizeHint(self):
+        metrics = QFontMetrics(self.font())
+        width = max(metrics.horizontalAdvance(self._text), 1) + 8
+        if self._max_width is not None:
+            width = min(width, self._max_width)
+        return QSize(width, self.height())
 
-
-class Caption(QWidget):
-    """The product name, painted so it carries no layout of its own."""
-
-    def __init__(self, theme_name):
-        super().__init__()
-        self._theme = theme_name
-        self.setFixedHeight(28)
-
-    def set_theme(self, name):
-        self._theme = name
-        self.update()
+    def minimumSizeHint(self):
+        return self.sizeHint()
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(QPen(QColor(color(self._theme, "text_strong")), 1))
-        painter.setFont(QFont("Segoe UI", 17, QFont.Weight.DemiBold))
-        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Multiplayer AI")
+        painter.setFont(self.font())
+        painter.setPen(QPen(QColor(color(self._theme, self._token)), 1))
+        flags = (int(Qt.AlignmentFlag.AlignCenter.value)
+                 | int(Qt.TextElideMode.ElideRight.value))
+        painter.drawText(self.rect(), flags, self._text)
         painter.end()

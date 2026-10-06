@@ -21,7 +21,7 @@ from network_a2a.persistence import HistoryStore, model_context
 from network_a2a.content import MAX_MESSAGE_BYTES, content_summary, validate_content
 
 from .bridge import NetworkThread
-from .dialogs import AgentDialog, InviteDialog, JoinDialog
+from .dialogs import AgentDialog, InviteDialog, parse_invitation
 from .icons import navigation_icon, provider_logo, provider_pixmap
 from .layout import minimum_size, sidebar_should_collapse, window_size
 from .markdown import MarkdownMessage
@@ -169,8 +169,12 @@ class MainWindow(QMainWindow):
         # picks up the right colours the first time.
         self.theme = resolve_theme(storage.settings)
         self.setWindowIcon(app_icon(self.theme))
-        width, height = window_size(self.stored_window_size(), storage.settings,
-                                    self.primary_screen_size())
+        # The app always opens maximised, so no size is restored: a window
+        # that reopens at whatever it happened to be last time is the reason
+        # it read as an ordinary window rather than an app. A size is still
+        # set here because Qt wants sane geometry before maximising, and the
+        # minimum stays so restoring the window down cannot make it unusable.
+        width, height = window_size(None, {}, self.primary_screen_size())
         self.resize(width, height)
         self.setMinimumSize(*minimum_size(self.primary_screen_size()))
         self.setStyleSheet(stylesheet(self.theme))
@@ -972,21 +976,6 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         return None
-
-    def stored_window_size(self):
-        """The size saved from the previous session, if any."""
-        stored = self.storage.settings.get("window_size")
-        if not stored:
-            return None
-        try:
-            return int(stored[0]), int(stored[1])
-        except (TypeError, ValueError, IndexError):
-            return None
-
-    def remember_window_size(self):
-        """Save the current size so the next launch opens at the same one."""
-        self.storage.settings["window_size"] = [self.width(), self.height()]
-        self.storage.save()
 
     def style_toast(self, error=None):
         """Repaint the toast in the current theme's colours.
@@ -1952,16 +1941,70 @@ class MainWindow(QMainWindow):
             bool(self.ready and self.workspace_name_input.text().strip()))
 
     def join_workspace(self):
-        """Join from the page, reusing the dialog's own parsing.
+        """Join from the page, with the whole connection done here.
 
-        The dialog did this correctly, including the invitation format and
-        the relay fallback. Only the presentation moved, so the rule for
-        what counts as an invitation is not restated here.
+        This used to open the old modal, which made the page's own fields
+        decoration: paste an invitation, press the button, and the page was
+        thrown away in favour of being asked for the same information again.
+        The rules about what counts as an invitation are not restated here;
+        they live in ``parse_invitation`` so this route and the dialog's
+        cannot disagree.
+
+        The command is asynchronous, so a failure arrives after this returns
+        and is reported on the page's own line, beside the fields that
+        caused it, rather than in a toast that has gone by the time it is
+        read.
         """
         if not self.ready:
             self.workspace_error.setText("Your network is still starting.")
             return
-        JoinDialog(self).exec()
+        self.workspace_error.setText("")
+        try:
+            conversation_id = None
+            invitation = self.workspace_invitation.toPlainText().strip()
+            if invitation:
+                url, token, allow_insecure, conversation_id = parse_invitation(invitation)
+                self.workspace_relay.setText(url)
+                self.workspace_token.setText(token)
+                self.workspace_lan.setChecked(allow_insecure)
+            if len(self.workspace_token.text().strip()) < 32:
+                raise ValueError("Enter the device token from your invitation")
+            self.workspace_join_button.setEnabled(False)
+            self.workspace_join_button.setText("Connecting…")
+            self.workspace_error.setText("Contacting the relay. Keep the host app open; "
+                                         "this can take up to 30 seconds.")
+
+            def failure(message):
+                self.workspace_join_button.setEnabled(True)
+                self.workspace_join_button.setText("Join workspace")
+                self.workspace_error.setText(
+                    message or "The connection failed. Check the host address, network, "
+                               "and firewall.")
+
+            def success(result):
+                self.workspace_token.clear()
+                self.workspace_invitation.clear()
+                self.render_workspace_page()
+                if conversation_id:
+                    self.select_agent(conversation_id)
+                    return
+                peer = next((agent for agent in self.agents
+                             if agent["online"] and agent["id"] != self.identity), None)
+                if peer:
+                    self.select_agent(peer["id"])
+                else:
+                    self.navigate(1)
+                    self.notice("Workspace joined. No other devices are online yet. "
+                                "Keep the host app open and connect an agent to begin.")
+
+            self.command("join", self.workspace_relay.text().strip(),
+                         self.workspace_token.text().strip(),
+                         self.workspace_lan.isChecked(), True, conversation_id,
+                         success=success, failure=failure)
+        except (ValueError, KeyError, TypeError) as exc:
+            self.workspace_join_button.setEnabled(True)
+            self.workspace_join_button.setText("Join workspace")
+            self.workspace_error.setText(str(exc))
 
     def add_workspace(self):
         """The rail's plus goes to the page, where both routes are offered."""
@@ -1995,12 +2038,6 @@ class MainWindow(QMainWindow):
         if not self.closing:
             self.persist_history()
             self.closing = True
-            # Remembered before the shutdown begins, because that path
-            # ends in a second close that must not overwrite it.
-            try:
-                self.remember_window_size()
-            except Exception:
-                pass
             self.setEnabled(False)
             self.toast.setText("Disconnecting agents and shutting down your local relay…")
             self.toast.show()

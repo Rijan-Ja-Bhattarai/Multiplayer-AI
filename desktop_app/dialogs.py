@@ -296,6 +296,37 @@ class AgentDialog(QDialog):
                             success=success, failure=failure)
 
 
+def parse_invitation(text):
+    """Read an invitation object into the four values a join needs.
+
+    Returns ``(url, token, allow_insecure, conversation_id)``. Raises
+    ValueError carrying a sentence meant to be shown to the reader as-is.
+
+    This lives on its own, not inside the dialog, because the Workspaces page
+    and the dialog both have to agree on exactly what counts as an
+    invitation. When the page opened the dialog instead of doing the work
+    itself, the fields on the page were decoration and the rules had two
+    homes; a rule stated once cannot disagree with itself.
+    """
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            "Paste the complete invitation JSON, including its url, token, "
+            "and version fields.") from exc
+    if not isinstance(data, dict):
+        raise ValueError("Paste the invitation object beginning with { and ending with }")
+    if data.get("version") != 1:
+        raise ValueError("Unsupported invitation version")
+    conversation_id = data.get("conversation_id")
+    if conversation_id is not None and (not isinstance(conversation_id, str)
+                                        or not conversation_id.startswith("conversation-")
+                                        or not conversation_id.removeprefix("conversation-").isalnum()):
+        raise ValueError("Use the complete shared conversation invitation")
+    return (data["url"], data["token"], bool(data.get("allow_insecure")),
+            conversation_id)
+
+
 class JoinDialog(QDialog):
     def __init__(self, window):
         super().__init__(window)
@@ -335,19 +366,11 @@ class JoinDialog(QDialog):
         try:
             conversation_id = None
             if self.invitation.toPlainText().strip():
-                data = json.loads(self.invitation.toPlainText())
-                if not isinstance(data, dict):
-                    raise ValueError("Paste the invitation object beginning with { and ending with }")
-                if data.get("version") != 1:
-                    raise ValueError("Unsupported invitation version")
-                self.url.setText(data["url"])
-                self.token.setText(data["token"])
-                self.insecure.setChecked(bool(data.get("allow_insecure")))
-                conversation_id = data.get("conversation_id")
-                if conversation_id is not None and (not isinstance(conversation_id, str)
-                        or not conversation_id.startswith("conversation-")
-                        or not conversation_id.removeprefix("conversation-").isalnum()):
-                    raise ValueError("Use the complete shared conversation invitation")
+                url, token, allow_insecure, conversation_id = parse_invitation(
+                    self.invitation.toPlainText())
+                self.url.setText(url)
+                self.token.setText(token)
+                self.insecure.setChecked(allow_insecure)
             if len(self.token.text().strip()) < 32:
                 raise ValueError("Enter the device token from your invitation")
             self.connect_button.setEnabled(False)
@@ -376,8 +399,11 @@ class JoinDialog(QDialog):
         except (ValueError, KeyError, TypeError) as exc:
             self.connect_button.setEnabled(True)
             self.connect_button.setText("Join workspace")
-            self.error.setText(str(exc) if isinstance(exc, ValueError) and not isinstance(exc, json.JSONDecodeError)
-                               else "Paste the complete invitation JSON, including its url, token, and version fields.")
+            # parse_invitation already turns a malformed paste into a
+            # sentence for the reader, so only a missing field is left.
+            self.error.setText(
+                str(exc) if isinstance(exc, ValueError)
+                else "Paste the complete invitation JSON, including its url, token, and version fields.")
 
 
 class InviteDialog(QDialog):

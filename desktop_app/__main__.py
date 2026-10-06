@@ -71,10 +71,10 @@ def main():
                 # than one that fills in while you look at it. Showing it
                 # first and covering it is what made it peek out from
                 # behind the card.
-                splash.begin(on_done=window.show)
+                splash.begin(on_done=window.showMaximized)
                 window.grab()
             else:
-                window.show()
+                window.showMaximized()
 
             def hand_over(event=None, data=None):
                 # Nothing should be able to leave a card on screen over a
