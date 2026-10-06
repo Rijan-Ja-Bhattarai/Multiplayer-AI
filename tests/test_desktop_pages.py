@@ -22,10 +22,11 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6", reason="PySide6 is needed for the desktop page tests")
 pytest.importorskip("psutil", reason="psutil backs the Resources page")
 
-from PySide6.QtCore import QPoint, QPointF, Qt, QTimer  # noqa: E402
+from PySide6.QtCore import QEasingCurve, QPoint, QPointF, Qt, QTimer  # noqa: E402
 from PySide6.QtGui import QShortcut, QWheelEvent  # noqa: E402
-from PySide6.QtWidgets import (QApplication, QDialog, QFrame, QLabel,
-                             QMessageBox, QPushButton)  # noqa: E402
+from PySide6.QtWidgets import (QApplication, QDialog, QFrame, QLabel,  # noqa: E402
+                             QMessageBox, QPushButton)
+from PySide6.QtCore import QAbstractAnimation  # noqa: E402
 
 from desktop_app import window as win  # noqa: E402
 from desktop_app.storage import ABSENT, REMOVED, Storage  # noqa: E402
@@ -1320,6 +1321,270 @@ def test_the_welcome_orbit_fits_at_every_width(window, qt_app) -> None:
             f"which clips the chips")
 
 
+def test_the_card_really_fades_in(qt_app) -> None:
+    """It has never faded. It popped in opaque and snapped out.
+
+    ``fade_to`` set the effect to the target, then animated from the target
+    to the target, which writes the destination immediately and then writes
+    it again for the duration. So there was no fade at all, and the 260ms
+    before the window appeared was 260ms of empty desktop.
+
+    Measured over wall-clock time, because pumping the event loop without
+    letting time pass does not advance an animation at all.
+    """
+    from desktop_app.splash import FADE_MS, LaunchScreen
+
+    screen = LaunchScreen(DARK)
+    screen.show()
+    screen.fade_to(1.0, FADE_MS, QEasingCurve.Type.OutCubic)
+    qt_app.processEvents()
+
+    effect = screen.graphicsEffect()
+    assert effect is not None, "a fade needs an effect"
+    assert effect.opacity() == 0.0, (
+        f"the fade starts at {effect.opacity()}, so the card is already "
+        "partly on screen rather than fading up from nothing")
+
+    samples = []
+    deadline = time.time() + FADE_MS / 1000 + 0.2
+    while time.time() < deadline:
+        qt_app.processEvents()
+        samples.append(round(effect.opacity(), 3))
+        time.sleep(0.01)
+
+    assert samples[-1] == pytest.approx(1.0, abs=0.01), (
+        f"the fade ended at {samples[-1]}, not fully visible")
+    assert samples == sorted(samples), f"the fade was not smooth: {samples}"
+    assert len(set(samples)) > 3, (
+        f"only {len(set(samples))} distinct values, so nothing moved: {samples}")
+
+
+def test_the_card_really_fades_out_before_handing_over(qt_app) -> None:
+    """The window appears as the card reaches nothing, not 260ms before."""
+    from desktop_app.splash import FADE_MS, LaunchScreen
+
+    screen = LaunchScreen(DARK)
+    screen.show()
+    screen.fade_to(1.0, FADE_MS, QEasingCurve.Type.OutCubic)
+    pump(qt_app, FADE_MS / 1000 + 0.15)
+
+    effect = screen.graphicsEffect()
+    handed_over = []
+    screen.fade_to(0.0, FADE_MS, QEasingCurve.Type.InCubic,
+                   on_finished=lambda: handed_over.append(effect.opacity()))
+
+    deadline = time.time() + FADE_MS / 1000 + 0.25
+    while time.time() < deadline:
+        qt_app.processEvents()
+        time.sleep(0.01)
+
+    assert handed_over, "the handover never ran"
+    assert handed_over[0] == pytest.approx(0.0, abs=0.01), (
+        f"the window was handed to at opacity {handed_over[0]}, which is the "
+        "flash: the card had already gone but the window had not arrived")
+
+
+def test_only_one_fade_is_ever_live_on_the_card(qt_app) -> None:
+    """One animation per property, which Qt gives us and _fade now records.
+
+    The explicit stop() in fade_to is belt-and-braces: starting an animation
+    on a property that already has one stops the previous animation, so two
+    could never fight over the opacity in the first place. It is kept because
+    ``self._fade`` used to be written and never read, so there was no way to
+    ask, and deleteLater() releases the old object rather than leaving it for
+    the collector.
+
+    The invariant is asserted rather than the mechanism, because the mechanism
+    is Qt's and would hold even with the stop() removed.
+    """
+    from desktop_app.splash import FADE_MS, LaunchScreen
+
+    screen = LaunchScreen(DARK)
+    screen.show()
+    screen.fade_to(1.0, FADE_MS, QEasingCurve.Type.OutCubic)
+    first = screen._fade
+    assert first is not None
+
+    screen.fade_to(0.0, FADE_MS, QEasingCurve.Type.InCubic)
+
+    assert screen._fade is not first, "the second fade did not become the live one"
+    assert first.state() != QAbstractAnimation.State.Running, (
+        f"the earlier fade is still {first.state().name} and would keep "
+        "writing the opacity")
+    assert screen._fade.state() == QAbstractAnimation.State.Running
+
+
+def test_selecting_an_agent_opens_the_conversation(window) -> None:
+    """It navigated to the literal 2, which is Workspaces.
+
+    Conversations was 2 until Workspaces was inserted ahead of it, so every
+    selection landed the reader on the Workspaces page while the composer
+    they had just focused sat on a page that was not showing.
+    """
+    assert win.CONVERSATIONS_PAGE == win.PAGE_INDEX["conversations"]
+    assert win.PAGES[win.CONVERSATIONS_PAGE][0] == "Conversations"
+
+    window.select_agent("local-llama")
+
+    assert window.stack.currentIndex() == win.CONVERSATIONS_PAGE, (
+        f"selecting an agent opened "
+        f"{win.PAGES[window.stack.currentIndex()][0]!r} instead of Conversations")
+
+
+def test_no_page_is_navigated_to_by_a_literal(qt_app) -> None:
+    """Every one of them was a number, and one of them was wrong."""
+    source = Path(win.__file__).read_text(encoding="utf-8")
+    import re
+    for line in source.splitlines():
+        if re.search(r"self\.navigate\(\s*[0-9]", line):
+            raise AssertionError(f"a page is navigated to by literal: {line.strip()}")
+
+
+@pytest.mark.parametrize("operation, set_up", [
+    ("join", lambda w: (w.workspace_invitation.setPlainText(""),
+                        w.workspace_token.setText("t" * 40),
+                        w.workspace_relay.setText("wss://relay.example.com/connect"))),
+    ("create", lambda w: w.workspace_name_input.setText("Research lab")),
+    ("invite", lambda w: w.workspace_invite_name.setText("alex-laptop")),
+])
+def test_a_poll_does_not_re_enable_an_operation_in_flight(window, qt_app, operation,
+                                                          set_up) -> None:
+    """A second submit was possible within three seconds of the first.
+
+    The runtime polls agents every three seconds, the poll redraws this page,
+    and the page re-enabled its buttons unconditionally. A join says it can
+    take 30 seconds, so the button came back long before the attempt
+    resolved, and a second join could be queued behind the first and then
+    report its failure over the first one's success.
+    """
+    window.ready = True
+    # Setting ready alone does not redraw the page, so the fields are still
+    # disabled from construction. Without this the locked-field assertion
+    # below would pass for the wrong reason.
+    window.render_workspace_page()
+    assert window.workspace_name_input.isEnabled() is True, (
+        "the workspace name field is not editable once the runtime is up, so "
+        "locking it during a create would prove nothing")
+    set_up(window)
+    callbacks = {}
+    window.command = lambda name, *args, **kwargs: callbacks.update(kwargs)
+
+    if operation == "join":
+        window.join_workspace()
+        button = window.workspace_join_button
+    elif operation == "create":
+        window.create_workspace()
+        button = window.workspace_create_button
+    else:
+        window.create_invitation()
+        button = window.workspace_invite_create_button
+
+    assert button.isEnabled() is False, f"{operation} started with an enabled button"
+
+    # The create name field is locked as well as its button. A button that
+    # says Creating while the name beside it is still editable is the other
+    # half of the confusion. The join and invitation fields are left editable
+    # deliberately: correcting an address you have just submitted from is
+    # reasonable, and the button, which is what stops a second attempt, is
+    # what has to stay locked.
+    if operation == "create":
+        assert window.workspace_name_input.isEnabled() is False, (
+            "the workspace name field stayed editable while it was being used")
+
+    for _ in range(4):
+        window.network_event("agents", {"agents": [], "self": window.identity,
+                                        "connected": False})
+        qt_app.processEvents()
+        assert button.isEnabled() is False, (
+            f"a poll re-enabled the {operation} button while it was in flight")
+
+    # Typing must not re-enable it either: the name field is a live signal.
+    if operation == "create":
+        window.workspace_name_input.setText("Research lab 2")
+    elif operation == "invite":
+        window.workspace_invite_name.setText("alex-desktop")
+    qt_app.processEvents()
+    assert button.isEnabled() is False, (
+        f"typing re-enabled the {operation} button while it was in flight")
+
+
+def test_a_finished_operation_lets_the_button_work_again(window) -> None:
+    window.ready = True
+    window.workspace_name_input.setText("Research lab")
+    callbacks = {}
+    window.command = lambda name, *args, **kwargs: callbacks.update(kwargs)
+
+    window.create_workspace()
+    assert window.workspace_create_button.isEnabled() is False
+    callbacks["failure"]("That name is taken")
+    assert window.workspace_create_button.isEnabled() is True
+    assert window.workspace_busy["create"] is False
+
+    window.workspace_invite_name.setText("alex-laptop")
+    window.create_invitation()
+    assert window.workspace_invite_create_button.isEnabled() is False
+    callbacks["failure"]("The relay is not running")
+    assert window.workspace_invite_create_button.isEnabled() is True
+    assert window.workspace_busy["invite"] is False
+
+
+def test_connecting_a_model_after_editing_one_starts_blank(window) -> None:
+    """It overwrote the model just edited, and said it was connecting.
+
+    The card is built once and reused, so the edited profile's id, model,
+    instructions and every search setting stayed in place, the name field
+    stayed read-only with the old id, and saving submitted that id. Storage
+    filters profiles by id before appending, so this could only ever silently
+    replace the model rather than add a second one, which is worse.
+    """
+    window.ready = True
+    profile = {"id": "llama-agent", "model": "llama3.2", "base_url": "http://host:1234",
+               "system_prompt": "be terse", "autostart": False, "vision": True,
+               "allow_insecure": True, "web_search": "always",
+               "search_provider": "ollama", "searxng_url": "https://search.example.com",
+               "searxng_allow_insecure": True}
+    window.edit_agent({"id": "llama-agent", "provider": "ollama", "profile": profile})
+
+    # The same provider, so setCurrentIndex emits nothing and cannot be
+    # relied on to reset anything.
+    window.add_agent("ollama")
+
+    assert window.model_name.text() == "ollama-agent", (
+        f"the new form is still named {window.model_name.text()!r}")
+    assert window.model_name.isReadOnly() is False, (
+        "the name field is still read-only, so a new agent cannot be named")
+    assert window.model_id.currentText() == "", (
+        f"the previous model id is still there: {window.model_id.currentText()!r}")
+    assert window.model_system.toPlainText() == "", "the instructions carried over"
+    assert window.model_vision.isChecked() is False, "vision carried over"
+    assert window.model_autostart.isChecked() is True, "autostart carried over"
+    assert window.model_insecure.isChecked() is False, "allow-insecure carried over"
+    assert window.model_internet.isChecked() is False, "web search carried over"
+    assert window.model_search_url.text() == "", "the SearXNG address carried over"
+    assert window.model_search_insecure.isChecked() is False, (
+        "the search insecure box carried over")
+    assert window.model_base.text() != "http://host:1234", (
+        "the previous API root carried over")
+    assert window.model_form_title.text() == "Connect a model"
+
+
+def test_connecting_a_model_after_editing_cannot_overwrite_it(window) -> None:
+    """The name field being read-only was what made the overwrite certain."""
+    window.ready = True
+    sent = []
+    window.command = lambda name, *args, **kwargs: sent.append(args[0] if args else None)
+    profile = {"id": "llama-agent", "model": "llama3.2"}
+    window.edit_agent({"id": "llama-agent", "provider": "ollama", "profile": profile})
+
+    window.add_agent("ollama")
+    window.model_id.setCurrentText("qwen3")
+    window.save_model()
+
+    assert sent and sent[0]["id"] == "ollama-agent", (
+        f"the new agent would be saved as {sent[0]['id']!r}, which is the "
+        "model that was just edited")
+
+
 def test_the_create_panel_previews_the_rail_button(window) -> None:
     """The rail shows a workspace as its first two letters.
 
@@ -1612,12 +1877,16 @@ def test_the_launch_screen_has_a_background_of_its_own(qt_app) -> None:
     a card in the theme's own colour: opaque in the middle, rounded and so
     transparent at the corners.
     """
-    from desktop_app.splash import LaunchScreen
+    from desktop_app.splash import FADE_MS, LaunchScreen
 
     for name in THEME_NAMES:
         screen = LaunchScreen(name)
         screen.begin()
-        qt_app.processEvents()
+        # Past the fade. The card is genuinely transparent for the first
+        # FADE_MS now that the fade works, so sampling immediately would
+        # measure the fade rather than the card, and would pass the corner
+        # check for the wrong reason.
+        pump(qt_app, FADE_MS / 1000 + 0.15)
         image = screen.grab().toImage()
         width, height = image.width(), image.height()
 
@@ -1643,12 +1912,13 @@ def test_the_launch_screen_has_a_background_of_its_own(qt_app) -> None:
 
 
 def test_the_launch_screen_background_follows_a_theme_change(qt_app) -> None:
-    from desktop_app.splash import LaunchScreen
+    from desktop_app.splash import FADE_MS, LaunchScreen
 
     screen = LaunchScreen(DARK)
     screen.begin()
     screen.set_theme(LIGHT)
-    qt_app.processEvents()
+    # Past the fade, which the card is genuinely transparent for now.
+    pump(qt_app, FADE_MS / 1000 + 0.15)
     image = screen.grab().toImage()
     middle = image.pixelColor(image.width() // 2, 8)
     assert middle.name().lower() == color(LIGHT, "surface").lower(), (

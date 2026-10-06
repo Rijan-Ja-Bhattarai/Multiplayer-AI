@@ -209,6 +209,10 @@ class LaunchScreen(QWidget):
         column.addWidget(self.status, 0, Qt.AlignmentFlag.AlignHCenter)
 
         self.shown_at = 0.0
+        # The fade currently running, so a second one can stop it. It was
+        # written and never read, which is why two of them could drive the
+        # opacity at once.
+        self._fade = None
         self.dismissed = False
         self._on_done = None
         self._status = None
@@ -335,21 +339,50 @@ class LaunchScreen(QWidget):
         self.update()
 
     def fade_to(self, opacity, duration, easing, on_finished=None):
-        """Fade the whole card, creating the effect only while needed."""
+        """Fade the whole card to ``opacity``, creating the effect if needed.
+
+        This has never faded anything. It set the effect to the target, then
+        animated from the target to the target, which is a no-op that writes
+        the destination immediately and then writes it again for the duration.
+        So the card appeared fully opaque and vanished at once, leaving the
+        whole 260ms of empty desktop between it going and the window arriving.
+
+        Three things have to be right for a fade to be a fade:
+
+        * the current opacity is read before it is overwritten, or the start
+          value is the target again;
+        * a freshly created effect starts transparent, or there is nothing to
+          fade up from;
+        * any fade already running is stopped, or two animations drive the same
+          property and fight. The fatal path can dismiss the card while the
+          fade in is still going, which is exactly when that happens.
+        """
         effect = self.graphicsEffect()
         if effect is None:
             effect = QGraphicsOpacityEffect(self)
+            # Transparent, so a fade in starts at zero. Qt's own default is
+            # neither zero nor reliably documented, and the animation below
+            # sets the real value on its first tick regardless.
+            effect.setOpacity(0.0)
             self.setGraphicsEffect(effect)
-        effect.setOpacity(opacity)
+        start = effect.opacity()
+
+        previous = self._fade
+        if previous is not None:
+            previous.stop()
+            previous.deleteLater()
+
         animation = QPropertyAnimation(effect, b"opacity", self)
-        animation.setStartValue(opacity)
+        animation.setStartValue(start)
         animation.setEndValue(opacity)
         animation.setDuration(duration)
         animation.setEasingCurve(easing)
-        animation.start()
-        self._fade = animation
+        # Connected before the first tick, so a zero-duration or immediate
+        # finish cannot be missed.
         if on_finished:
             animation.finished.connect(on_finished)
+        animation.start()
+        self._fade = animation
 
     def _centre(self):
         screen = self.screen() or QApplication.primaryScreen()

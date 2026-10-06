@@ -89,6 +89,12 @@ RESOURCES_PAGE = PAGE_INDEX["resources"]
 SETTINGS_PAGE = PAGE_INDEX["settings"]
 WORKSPACES_PAGE = PAGE_INDEX["workspaces"]
 AGENTS_PAGE = PAGE_INDEX["agents"]
+# Conversations was navigated to by the literal 2, which was the right number
+# until Workspaces was inserted ahead of it. Selecting an agent has been
+# landing the reader on the Workspaces page while the composer they had just
+# focused sat on a page that was not showing.
+CONVERSATIONS_PAGE = PAGE_INDEX["conversations"]
+OVERVIEW_PAGE = PAGE_INDEX["overview"]
 # The mark beside a message, and the width a grouped message is indented by
 # when it follows its own speaker's earlier message.
 SPEAKER_AVATAR = 34
@@ -174,6 +180,11 @@ class MainWindow(QMainWindow):
         # rebuild of the page can find it again. Lines hold no message of
         # their own.
         self.card_lines = {}
+        # Whether each Workspaces operation is still in flight. The poll runs
+        # every three seconds and this page re-enables its buttons from it, so
+        # without this a join could be submitted a second time while the first
+        # was still waiting on a relay that takes up to 30 seconds.
+        self.workspace_busy = {"create": False, "join": False, "invite": False}
         self.toast_error = False
         self.request_count = 0
         self.ready = False
@@ -392,7 +403,7 @@ class MainWindow(QMainWindow):
             f"Qt {PySide6.__version__}"
         )
         self.update_theme_hint()
-        self.navigate(0)
+        self.navigate(OVERVIEW_PAGE)
         # Settle the welcome now rather than waiting for the first agents
         # event, so the first paint never shows the welcome and the
         # statistics at the same time.
@@ -1396,7 +1407,7 @@ class MainWindow(QMainWindow):
         self.selected = agent_id
         self.chats.setdefault(agent_id, {"messages": [], "history": [], "pending": False})
         self.chats[agent_id]["unread"] = 0
-        self.navigate(2)
+        self.navigate(CONVERSATIONS_PAGE)
         self.render_agents()
         self.render_messages()
         self.render_attachments()
@@ -2074,13 +2085,10 @@ class MainWindow(QMainWindow):
         self.model_save_button.setEnabled(False)
 
         def success(result):
-            self.model_key.clear()
-            self.model_search_key.clear()
-            self.model_profile_id = None
             self.model_save_button.setEnabled(True)
             self.model_form_title.setText("Connect a model")
             self.model_save_button.setText("Connect agent")
-            self.clear_model_form()
+            self.reset_model_form()
             self.navigate(AGENTS_PAGE)
             self.notice(f"{profile['id']} is connected.")
 
@@ -2097,24 +2105,55 @@ class MainWindow(QMainWindow):
                      search_key, success=success, failure=failure)
 
     def clear_model_form(self):
-        """Back to a blank connect form after a save."""
+        """Back to a blank connect form.
+
+        One reset for both routes out of a used form. It was only reachable
+        from a successful save, so clicking "Connect a model" after editing
+        left the edited profile's id, model, instructions and every search
+        setting in place with the name field still read-only, and saving that
+        silently overwrote the model the reader had just been looking at.
+
+        The search provider, mode and insecure box are reset here too: they
+        are chosen once and then persist, which is right while editing and
+        wrong for a new agent.
+        """
         self.model_key.clear()
         self.model_search_key.clear()
         self.model_system.clear()
         self.model_search_url.clear()
         self.model_search_status.setText("")
+        self.model_name.clear()
         self.model_name.setReadOnly(False)
-        self.model_provider.setCurrentIndex(
-            self.model_provider.findData("ollama"))
-        self.change_model_provider()
+        # clear() empties a combo box's items but leaves the text of an
+        # editable one, which is where the previous model's id was sitting.
+        self.model_id.clearEditText()
         self.model_autostart.setChecked(True)
         self.model_insecure.setChecked(False)
         self.model_vision.setChecked(False)
         self.model_internet.setChecked(False)
+        self.model_search_insecure.setChecked(False)
+        self.model_search_provider.setCurrentIndex(
+            max(0, self.model_search_provider.findData("ollama")))
+        self.model_search_mode.setCurrentIndex(
+            max(0, self.model_search_mode.findData("auto")))
         self.change_model_internet()
+        self.clear_card_message(self.model_error_line)
+
+    def reset_model_form(self, provider="ollama"):
+        """Blank the form and point it at ``provider``.
+
+        Separated from the clear so add_agent can choose the provider and then
+        ask for the provider's own fields to be filled in. setCurrentIndex is a
+        no-op when the index is already current and emits nothing, so the
+        provider change cannot be relied on to reset anything.
+        """
+        self.model_profile_id = None
+        self.clear_model_form()
+        self.model_provider.setCurrentIndex(self.model_provider.findData(provider))
+        self.change_model_provider()
 
     def add_agent(self, provider="ollama"):
-        """Open the page's own card, set to this provider.
+        """Open the page's own card, blank, set to this provider.
 
         Every one of the five entry points lands here now, so connecting a
         model happens in one place. A dialog was a separate window for a form
@@ -2126,10 +2165,9 @@ class MainWindow(QMainWindow):
             return
         if not isinstance(provider, str):
             provider = "ollama"
-        self.model_profile_id = None
         self.model_form_title.setText("Connect a model")
         self.model_save_button.setText("Connect agent")
-        self.model_provider.setCurrentIndex(self.model_provider.findData(provider))
+        self.reset_model_form(provider)
         self.navigate(AGENTS_PAGE)
         self.model_name.setFocus()
 
@@ -2432,13 +2470,21 @@ class MainWindow(QMainWindow):
         self.workspace_members_label.setText(summary)
         self.workspace_invite_button.setEnabled(self.ready and not self.remote)
         self.workspace_invite_create_button.setEnabled(
-            self.ready and bool(self.workspace_invite_name.text().strip()))
+            self.ready and bool(self.workspace_invite_name.text().strip())
+            and not self.workspace_busy["invite"])
         self.workspace_invite_error.setVisible(bool(
             self.workspace_invite_error.message.text()))
-        self.workspace_name_input.setEnabled(self.ready)
+        self.workspace_name_input.setEnabled(
+            self.ready and not self.workspace_busy["create"])
         self.workspace_create_button.setEnabled(
-            self.ready and bool(self.workspace_name_input.text().strip()))
-        self.workspace_join_button.setEnabled(self.ready)
+            self.ready and bool(self.workspace_name_input.text().strip())
+            and not self.workspace_busy["create"])
+        # Held for the whole attempt, which the progress message says can take
+        # 30 seconds. The poll used to re-enable this within three, so a join
+        # could be submitted twice and the second attempt's failure could land
+        # on top of the first attempt's success.
+        self.workspace_join_button.setEnabled(
+            self.ready and not self.workspace_busy["join"])
         self.workspace_preview.setEnabled(False)
         # The button and preview follow the runtime here, but the name hint
         # belongs to typing, so only that one line is re-derived.
@@ -2446,7 +2492,8 @@ class MainWindow(QMainWindow):
         self.workspace_preview.setText(name[:2].upper())
         self.workspace_preview_label.setText(
             f"appears in the rail as {name[:2].upper()!r}" if name else "")
-        self.workspace_create_button.setEnabled(self.ready and 1 <= len(name) <= 80)
+        self.workspace_create_button.setEnabled(
+            self.ready and 1 <= len(name) <= 80 and not self.workspace_busy["create"])
 
     def workspace_name_typed(self, text):
         """Keep the create button honest, preview the rail button, hint the rule.
@@ -2469,7 +2516,8 @@ class MainWindow(QMainWindow):
             self.clear_card_message(self.workspace_name_line)
         else:
             self.set_card_message(self.workspace_name_line, self.name_rule())
-        self.workspace_create_button.setEnabled(bool(self.ready and allowed))
+        self.workspace_create_button.setEnabled(
+            bool(self.ready and allowed and not self.workspace_busy["create"]))
 
     def create_workspace(self):
         """Create from the page, and report the outcome where it happened.
@@ -2488,19 +2536,23 @@ class MainWindow(QMainWindow):
         # message never lingers over a button the reader has just pressed.
         self.clear_card_message(self.workspace_create_line)
         self.workspace_create_button.setEnabled(False)
+        self.workspace_name_input.setEnabled(False)
+        self.workspace_busy["create"] = True
         self.command("create_workspace", name,
                      success=self.workspace_created,
                      failure=self.workspace_failed)
 
     def workspace_created(self, entry):
+        self.workspace_busy["create"] = False
         self.workspace_name_input.clear()
         self.clear_card_message(self.workspace_create_line)
+        self.render_workspace_page()
         self.notice(f"Now in {entry.get('name', 'the new workspace')}.")
 
     def workspace_failed(self, message):
+        self.workspace_busy["create"] = False
         self.set_card_message(self.workspace_create_line, message)
-        self.workspace_create_button.setEnabled(
-            bool(self.ready and self.workspace_name_input.text().strip()))
+        self.render_workspace_page()
 
     def join_workspace(self):
         """Join from the page, with the whole connection done here.
@@ -2534,6 +2586,7 @@ class MainWindow(QMainWindow):
                 raise ValueError("Enter the device token from your invitation")
             self.workspace_join_button.setEnabled(False)
             self.workspace_join_button.setText("Connecting…")
+            self.workspace_busy["join"] = True
             # Progress belongs to this card and stays until the attempt
             # resolves, so a slow relay says why it is slow rather than
             # looking hung.
@@ -2543,7 +2596,8 @@ class MainWindow(QMainWindow):
                 "to 30 seconds.", "progress")
 
             def failure(message):
-                self.workspace_join_button.setEnabled(True)
+                self.workspace_busy["join"] = False
+                self.workspace_join_button.setEnabled(self.ready)
                 self.workspace_join_button.setText("Join workspace")
                 self.set_card_message(
                     self.workspace_join_line,
@@ -2551,6 +2605,7 @@ class MainWindow(QMainWindow):
                                "and firewall.")
 
             def success(result):
+                self.workspace_busy["join"] = False
                 self.workspace_token.clear()
                 self.workspace_invitation.clear()
                 self.clear_card_message(self.workspace_join_line)
@@ -2563,7 +2618,7 @@ class MainWindow(QMainWindow):
                 if peer:
                     self.select_agent(peer["id"])
                 else:
-                    self.navigate(1)
+                    self.navigate(AGENTS_PAGE)
                     self.notice("Workspace joined. No other devices are online yet. "
                                 "Keep the host app open and connect an agent to begin.")
 
@@ -2572,7 +2627,8 @@ class MainWindow(QMainWindow):
                          self.workspace_lan.isChecked(), True, conversation_id,
                          success=success, failure=failure)
         except (ValueError, KeyError, TypeError) as exc:
-            self.workspace_join_button.setEnabled(True)
+            self.workspace_busy["join"] = False
+            self.workspace_join_button.setEnabled(self.ready)
             self.workspace_join_button.setText("Join workspace")
             self.set_card_message(self.workspace_join_line, str(exc))
 
@@ -2584,7 +2640,7 @@ class MainWindow(QMainWindow):
         device cannot reach this one.
         """
         self.workspace_invite_create_button.setEnabled(
-            bool(self.ready and text.strip()))
+            bool(self.ready and text.strip() and not self.workspace_busy["invite"]))
         self.workspace_invite_address()
 
     def workspace_invite_address(self):
@@ -2606,22 +2662,24 @@ class MainWindow(QMainWindow):
                                   "Your network is still starting.")
             return
         self.clear_card_message(self.workspace_invite_error)
+        self.workspace_busy["invite"] = True
         self.workspace_invite_create_button.setEnabled(False)
         self.workspace_invite_create_button.setText("Creating…")
 
         def failure(message):
-            self.workspace_invite_create_button.setEnabled(True)
+            self.workspace_busy["invite"] = False
             self.workspace_invite_create_button.setText("Create invitation")
             self.set_card_message(self.workspace_invite_error, message)
+            self.render_workspace_page()
 
         def success(data):
+            self.workspace_busy["invite"] = False
             self.workspace_invite_create_button.setText("Create invitation")
-            self.workspace_invite_create_button.setEnabled(
-                bool(self.ready and self.workspace_invite_name.text().strip()))
             self.workspace_invite_name.clear()
             self.workspace_invite_result.setPlainText(json.dumps(data, indent=2))
             self.workspace_invite_result.show()
             self.workspace_invite_copy_button.show()
+            self.render_workspace_page()
 
         self.command("invite", self.workspace_invite_name.text().strip(),
                      self.workspace_invite_url.text().strip(),
