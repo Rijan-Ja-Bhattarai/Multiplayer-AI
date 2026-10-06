@@ -11,9 +11,10 @@ from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QSize, Qt, QTimer, 
 from PySide6.QtGui import (QGuiApplication, QIcon, QKeySequence, QPixmap, QPainter,
                            QColor, QDesktopServices, QFont, QPalette, QShortcut)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QFileDialog,
-    QFrame, QGraphicsOpacityEffect, QGridLayout, QHBoxLayout, QInputDialog, QLabel,
-    QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
-    QProgressBar, QScrollArea, QStackedWidget, QVBoxLayout, QWidget)
+    QFrame, QGraphicsOpacityEffect, QGridLayout, QHBoxLayout, QLabel,
+    QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
+    QPlainTextEdit, QProgressBar, QScrollArea, QStackedWidget, QVBoxLayout,
+    QWidget)
 
 from network_a2a.persistence import HistoryStore, model_context
 from network_a2a.content import MAX_MESSAGE_BYTES, content_summary, validate_content
@@ -54,12 +55,18 @@ def clear_layout(layout):
 PAGES = (
     ("Overview", "overview"),
     ("Agents", "agents"),
+    ("Workspaces", "workspaces"),
     ("Conversations", "conversations"),
     ("Providers", "providers"),
     ("Resources", "resources"),
     ("Settings", "settings"),
 )
 PAGE_TITLES = tuple(f"#  {key}" for _, key in PAGES)
+# Looked up by key rather than counted. Adding a page used to shift every
+# index below it, which broke the Ctrl+5 and Ctrl+, shortcuts without
+# anything failing: the numbers were still in range, just pointing at the
+# wrong page.
+PAGE_INDEX = {key: index for index, (_, key) in enumerate(PAGES)}
 
 # Tooltips for the navigation buttons. Every one of them is reachable from
 # the keyboard and from the rail, so a page whose name does not describe its
@@ -67,13 +74,15 @@ PAGE_TITLES = tuple(f"#  {key}" for _, key in PAGES)
 PAGE_HELP = {
     "overview": "What is in this workspace, and what to do next",
     "agents": "Every model agent on this workspace, online or not",
+    "workspaces": "The workspace you are in, and how to add another",
     "conversations": "Shared conversations and the messages in them",
     "providers": "Where models come from: local, hosted, or your own endpoint",
     "resources": "Disk, memory and what this device is using",
     "settings": "Appearance, privacy and resetting this device's identity",
 }
-RESOURCES_PAGE = 4
-SETTINGS_PAGE = 5
+RESOURCES_PAGE = PAGE_INDEX["resources"]
+SETTINGS_PAGE = PAGE_INDEX["settings"]
+WORKSPACES_PAGE = PAGE_INDEX["workspaces"]
 # The mark beside a message, and the width a grouped message is indented by
 # when it follows its own speaker's earlier message.
 SPEAKER_AVATAR = 34
@@ -365,6 +374,7 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         self.stack.addWidget(self.overview_page())
         self.stack.addWidget(self.agents_page())
+        self.stack.addWidget(self.workspaces_page())
         self.stack.addWidget(self.chat_page())
         self.stack.addWidget(self.providers_page())
         self.stack.addWidget(self.resources_page())
@@ -1634,6 +1644,11 @@ class MainWindow(QMainWindow):
             self.progress.hide()
             self.add_button.setEnabled(True)
             self.welcome_connect.setEnabled(True)
+            # The Workspaces page holds its buttons disabled until the
+            # runtime is up. It refreshed on the agents poll, so opening it
+            # in the first second would have shown controls that were not
+            # yet usable and gave no sign that they were coming.
+            self.render_workspace_page()
             self.invite_button.setEnabled(not self.remote)
             self.workspace_settings_button.setEnabled(True)
             self.update_chat_controls()
@@ -1676,6 +1691,7 @@ class MainWindow(QMainWindow):
             self.agents = data["agents"]
             self.connection_status.setText("●  Relay connected" if data["connected"] else "●  Reconnecting…")
             self.render_agents()
+            self.render_workspace_page()
         elif event == "conversations":
             changed = set(self.conversations) != {room["id"] for room in data}
             self.conversations = {room["id"]: room for room in data}
@@ -1746,28 +1762,194 @@ class MainWindow(QMainWindow):
     def edit_agent(self, agent):
         AgentDialog(self, agent["provider"], agent["profile"]).exec()
 
-    def join_workspace(self):
-        if self.ready:
-            JoinDialog(self).exec()
-        else:
-            self.notice("Your network is still starting.")
+    def workspaces_page(self):
+        """The workspace you are in, and the two ways of adding another.
 
-    def add_workspace(self):
-        menu = QMenu(self)
-        create = menu.addAction("Create a workspace")
-        join = menu.addAction("Join a workspace")
-        selected = menu.exec(self.add_workspace_button.mapToGlobal(self.add_workspace_button.rect().bottomRight()))
-        menu.deleteLater()
-        # Open modal dialogs after the menu's event loop has returned.
-        if selected == create:
-            self.create_workspace()
-        elif selected == join:
-            self.join_workspace()
+        This used to be a pop-up menu off the rail followed by a modal:
+        creating was a bare prompt with one field, and joining was a
+        dialog that had been built properly but did not belong in a modal
+        for a choice this size. Both now sit in the content area beside
+        the other pages, and the rail's plus comes straight here.
+        """
+        page, layout = self.scroll_page()
+        layout.addWidget(label("WHERE YOU ARE", "eyebrow"))
+        layout.addWidget(label("Workspaces", "title"))
+        layout.addWidget(label(
+            "A workspace is a private network. This device belongs to one at a "
+            "time, and you can move between them or bring in another device.",
+            "muted"))
+
+        current, column = frame("card")
+        column.setContentsMargins(22, 20, 22, 20)
+        column.addWidget(label("This workspace", "heading"))
+        self.workspace_name_label = label(self.workspace_label.text(), "statValue")
+        column.addWidget(self.workspace_name_label)
+        self.workspace_members_label = label("", "muted", True)
+        self.workspace_members_label.setWordWrap(True)
+        column.addWidget(self.workspace_members_label)
+        column.addSpacing(10)
+        self.workspace_invite_button = action("Invite a device", self.invite_device)
+        column.addWidget(self.workspace_invite_button, 0, Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(current)
+
+        layout.addWidget(label("Add another", "heading"))
+        row = QHBoxLayout()
+        row.setSpacing(16)
+
+        create, column = frame("card")
+        column.setContentsMargins(22, 20, 22, 20)
+        column.addWidget(label("Create a workspace", "heading"))
+        column.addWidget(label(
+            "A new private network on this device. You can invite other "
+            "devices to it afterwards.", "muted", True))
+        column.addSpacing(12)
+        self.workspace_name_input = QLineEdit()
+        self.workspace_name_input.setPlaceholderText("Workspace name")
+        self.workspace_name_input.textChanged.connect(self.workspace_name_typed)
+        self.workspace_name_input.returnPressed.connect(self.create_workspace)
+        column.addWidget(self.workspace_name_input)
+        # The rail shows a workspace as its first two letters, so the name
+        # is previewed as it is typed rather than after the fact.
+        preview_row = QHBoxLayout()
+        preview_row.setSpacing(10)
+        self.workspace_preview = WorkspaceButton("")
+        self.workspace_preview.setEnabled(False)
+        preview_row.addWidget(self.workspace_preview)
+        self.workspace_preview_label = label("", "muted", True)
+        preview_row.addWidget(self.workspace_preview_label)
+        preview_row.addStretch()
+        column.addLayout(preview_row)
+        column.addSpacing(8)
+        self.workspace_error = label("", "muted", True)
+        self.workspace_error.setWordWrap(True)
+        self.workspace_error.setStyleSheet("color:" + color(self.theme, "error"))
+        column.addWidget(self.workspace_error)
+        self.workspace_create_button = action(
+            "Create workspace", self.create_workspace, True)
+        self.workspace_create_button.setEnabled(False)
+        column.addWidget(self.workspace_create_button)
+        row.addWidget(create, 1)
+
+        join, column = frame("card")
+        column.setContentsMargins(22, 20, 22, 20)
+        column.addWidget(label("Join a workspace", "heading"))
+        column.addWidget(label(
+            "Someone has to invite this device first. Paste their invitation, "
+            "or enter their relay address and your device token.", "muted", True))
+        column.addSpacing(12)
+        self.workspace_invitation = QPlainTextEdit()
+        self.workspace_invitation.setPlaceholderText("Paste an invitation")
+        self.workspace_invitation.setMaximumHeight(96)
+        column.addWidget(self.workspace_invitation)
+        self.workspace_relay = QLineEdit()
+        self.workspace_relay.setPlaceholderText("wss://your-relay.example.com/connect")
+        column.addWidget(self.workspace_relay)
+        self.workspace_token = QLineEdit()
+        self.workspace_token.setPlaceholderText("Your device's relay token")
+        self.workspace_token.setEchoMode(QLineEdit.EchoMode.Password)
+        column.addWidget(self.workspace_token)
+        self.workspace_lan = QCheckBox("This is a trusted LAN connection (allow ws://)")
+        column.addWidget(self.workspace_lan, 0, Qt.AlignmentFlag.AlignLeft)
+        column.addSpacing(8)
+        self.workspace_join_button = action("Join workspace", self.join_workspace, True)
+        column.addWidget(self.workspace_join_button)
+        row.addWidget(join, 1)
+        layout.addLayout(row)
+        layout.addStretch()
+        self.render_workspace_page()
+        return page
+
+    def render_workspace_page(self):
+        """Refresh the parts of the page that follow the runtime.
+
+        Called on every agents event, because joining or creating changes
+        what the workspace is, and the page has to stop claiming to be
+        creating something you already created.
+        """
+        if not hasattr(self, "workspace_name_label"):
+            return
+        self.workspace_name_label.setText(self.workspace_label.text())
+        members = self.workspace_meta.get("members", [])
+        people = [m for m in members if m.get("role") != "Model"]
+        models = [m for m in members if m.get("role") == "Model"]
+        summary = f"{len(people)} device{'s' if len(people) != 1 else ''} here"
+        if models:
+            summary += f", {len(models)} model agent{'s' if len(models) != 1 else ''}"
+        if self.remote:
+            summary += " · joined from another device"
+        self.workspace_members_label.setText(summary)
+        self.workspace_invite_button.setEnabled(self.ready and not self.remote)
+        self.workspace_name_input.setEnabled(self.ready)
+        self.workspace_create_button.setEnabled(
+            self.ready and bool(self.workspace_name_input.text().strip()))
+        self.workspace_join_button.setEnabled(self.ready)
+        self.workspace_preview.setEnabled(False)
+        self.workspace_name_typed(self.workspace_name_input.text())
+
+    def workspace_name_typed(self, text):
+        """Keep the create button honest and preview the rail button.
+
+        The name is checked here rather than on submit, so the constraint
+        is visible before anything is attempted, using the same rule and
+        the same wording the runtime applies, so the two cannot disagree
+        about it.
+
+        Every widget it touches is built by workspaces_page, which is
+        reached during construction, but this is also connected to the
+        field's own signal, so it can only assume what exists.
+        """
+        name = text.strip()
+        allowed = 1 <= len(name) <= 80
+        self.workspace_preview.setText(name[:2].upper())
+        self.workspace_preview_label.setText(
+            f"appears in the rail as {name[:2].upper()!r}" if name else "")
+        self.workspace_error.setText(
+            "" if allowed else "Use a workspace name with 1-80 characters")
+        self.workspace_create_button.setEnabled(bool(self.ready and allowed))
 
     def create_workspace(self):
-        name, accepted = QInputDialog.getText(self, "Create a workspace", "Workspace name")
-        if accepted:
-            self.command("create_workspace", name)
+        """Create from the page, and report the outcome where it happened.
+
+        The command is asynchronous, so the failure arrives after this
+        returns; routing it to the page's own line keeps the message on
+        screen beside the field that caused it, rather than in a toast that
+        has gone by the time it is read.
+        """
+        name = self.workspace_name_input.text().strip()
+        if not 1 <= len(name) <= 80:
+            self.workspace_error.setText("Use a workspace name with 1-80 characters")
+            return
+        self.workspace_error.setText("")
+        self.workspace_create_button.setEnabled(False)
+        self.command("create_workspace", name,
+                     success=self.workspace_created,
+                     failure=self.workspace_failed)
+
+    def workspace_created(self, entry):
+        self.workspace_name_input.clear()
+        self.workspace_error.setText("")
+        self.notice(f"Now in {entry.get('name', 'the new workspace')}.")
+
+    def workspace_failed(self, message):
+        self.workspace_error.setText(message)
+        self.workspace_create_button.setEnabled(
+            bool(self.ready and self.workspace_name_input.text().strip()))
+
+    def join_workspace(self):
+        """Join from the page, reusing the dialog's own parsing.
+
+        The dialog did this correctly, including the invitation format and
+        the relay fallback. Only the presentation moved, so the rule for
+        what counts as an invitation is not restated here.
+        """
+        if not self.ready:
+            self.workspace_error.setText("Your network is still starting.")
+            return
+        JoinDialog(self).exec()
+
+    def add_workspace(self):
+        """The rail's plus goes to the page, where both routes are offered."""
+        self.navigate(WORKSPACES_PAGE)
 
     def manage_workspace(self):
         from .workspace_dialog import WorkspaceDialog

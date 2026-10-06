@@ -20,7 +20,7 @@ pytest.importorskip("PySide6", reason="PySide6 is needed for the desktop page te
 pytest.importorskip("psutil", reason="psutil backs the Resources page")
 
 from PySide6.QtCore import QPoint, QPointF, Qt, QTimer  # noqa: E402
-from PySide6.QtGui import QWheelEvent  # noqa: E402
+from PySide6.QtGui import QShortcut, QWheelEvent  # noqa: E402
 from PySide6.QtWidgets import (QApplication, QFrame, QLabel, QMessageBox,
                              QPushButton)  # noqa: E402
 
@@ -522,6 +522,142 @@ def test_hovering_the_rail_does_not_strip_a_workspace_button(qt_app) -> None:
     assert button.styleSheet() == "QPushButton { border-radius: 15px; }", (
         f"the hover sheet should carry the corner and nothing else, "
         f"found {button.styleSheet()!r}")
+
+
+# --- the workspaces page ------------------------------------------------
+
+
+def test_a_page_is_reachable_and_explains_itself(window) -> None:
+    """Adding a page used to shift every index below it silently."""
+    assert set(win.PAGE_HELP) == {key for _, key in win.PAGES}, (
+        "every page needs a tooltip entry, or one is about to be missing")
+    assert win.PAGE_INDEX["workspaces"] == win.WORKSPACES_PAGE
+    assert len(win.PAGES) == window.stack.count(), (
+        "a page is declared but never added to the stack, so its button "
+        "would go somewhere else")
+
+
+@pytest.mark.parametrize("key", ["resources", "settings", "workspaces"])
+def test_the_named_pages_point_where_they_say(window, key) -> None:
+    """RESOURCES_PAGE and SETTINGS_PAGE were counted, not looked up.
+
+    Inserting a page above them moved both, which broke Ctrl+5 and Ctrl+,
+    and nothing failed: the numbers were still in range, just addressing
+    the wrong page.
+    """
+    position = [name for _, name in win.PAGES].index(key)
+    assert getattr(win, f"{key.upper()}_PAGE") == position, (
+        f"{key} is page {position} but the constant says "
+        f"{getattr(win, f'{key.upper()}_PAGE')}")
+
+
+@pytest.mark.parametrize("index,key", list(enumerate(k for _, k in win.PAGES)))
+def test_every_shortcut_lands_on_its_own_page(window, index, key) -> None:
+    """Ctrl+1..Ctrl+n have to follow the pages, not the order they were added."""
+    shortcuts = {s.key().toString(): s for s in window.findChildren(QShortcut)}
+    shortcut = shortcuts.get(f"Ctrl+{index + 1}")
+    assert shortcut is not None, f"Ctrl+{index + 1} is not bound to anything"
+    shortcut.activated.emit()
+    assert window.stack.currentIndex() == index, (
+        f"Ctrl+{index + 1} landed on {window.stack.currentIndex()} "
+        f"instead of {key}")
+
+
+def test_the_rail_plus_goes_to_the_page_and_not_a_menu(window) -> None:
+    """It used to pop a two-item menu, and creating was a bare prompt."""
+    before = window.stack.currentIndex()
+    window.add_workspace_button.click()
+
+    assert window.stack.currentIndex() == win.WORKSPACES_PAGE, (
+        f"the plus left the user on page {window.stack.currentIndex()}")
+    assert window.stack.currentIndex() != before
+    assert QApplication.activePopupWidget() is None, (
+        "the plus still opens a pop-up instead of going to the page")
+
+
+def test_the_create_panel_refuses_a_name_it_would_be_rejected_for(window) -> None:
+    """The rule is the runtime's, so the two cannot disagree about it."""
+    window.ready = True
+    for text, ok in (("", False), ("   ", False), ("x" * 81, False), ("Team", True)):
+        window.workspace_name_input.setText(text)
+        assert window.workspace_create_button.isEnabled() is ok, (
+            f"{len(text.strip())} characters should {'allow' if ok else 'refuse'} "
+            f"the submit button")
+
+    window.workspace_name_input.setText("x" * 81)
+    assert window.workspace_error.text(), "the refusal was not explained"
+
+
+def test_a_refused_create_reports_on_the_page_not_in_a_toast(window, qt_app) -> None:
+    """The command is asynchronous, so the failure lands after it returns.
+
+    A toast has usually gone by the time anyone reads it; the field that
+    caused the problem is still on screen.
+    """
+    window.ready = True
+    window.workspace_name_input.setText("")
+    shown: list[str] = []
+    window.notice = lambda message, error=False: shown.append(message)
+
+    window.create_workspace()
+
+    assert window.workspace_error.text(), "nothing was reported anywhere"
+    assert not shown, f"the message went to a toast instead: {shown}"
+
+
+def test_the_create_panel_previews_the_rail_button(window) -> None:
+    """The rail shows a workspace as its first two letters.
+
+    Nothing showed that before, so the name you typed and the button you
+    would then be clicking were unconnected until you clicked it.
+    """
+    window.ready = True
+    window.workspace_name_input.setText("Research lab")
+    assert window.workspace_preview.text() == "RE", (
+        f"the preview reads {window.workspace_preview.text()!r}")
+    assert "RE" in window.workspace_preview_label.text(), (
+        "the preview is not named in words beside the field")
+
+    window.workspace_name_input.setText("")
+    assert not window.workspace_preview.text(), (
+        "an empty name still leaves letters in the preview")
+
+
+def test_the_page_says_which_workspace_you_are_in(window) -> None:
+    """The sidebar names it, but only in one line and only the name."""
+    window.workspace_label.setText("Research lab")
+    window.workspace_meta = {"members": [
+        {"id": "device-1", "role": "Device"},
+        {"id": "device-2", "role": "Device"},
+        {"id": "local-llama", "role": "Model"},
+    ]}
+    window.render_workspace_page()
+
+    assert window.workspace_name_label.text() == "Research lab"
+    summary = window.workspace_members_label.text()
+    assert "2 devices" in summary, f"the summary does not count the devices: {summary!r}"
+    assert "1 model agent" in summary, f"the summary does not count the agents: {summary!r}"
+
+
+def test_the_page_opens_usable_once_the_runtime_is_up(window) -> None:
+    """It refreshed on the agents poll, so the first second looked broken.
+
+    The runtime reports ready long before it lists any agents, so a user
+    opening this page in that gap was shown controls that were not yet
+    usable and nothing to say they were coming. Driven through the real
+    event rather than by flipping the flag, because the flag is not what
+    decides whether the page refreshes.
+    """
+    window.ready = False
+    window.render_workspace_page()
+    assert not window.workspace_invite_button.isEnabled()
+
+    window.network_event("ready", {"port": 0, "device_id": "device-test"})
+
+    assert window.ready, "the runtime was not marked ready"
+    assert window.workspace_invite_button.isEnabled(), (
+        "the page did not refresh when the runtime came up")
+    assert window.workspace_join_button.isEnabled()
 
 
 # --- the settings controls ----------------------------------------------

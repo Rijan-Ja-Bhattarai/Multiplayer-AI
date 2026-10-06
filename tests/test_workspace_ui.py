@@ -15,7 +15,7 @@ pytest.importorskip("PySide6.QtWidgets")
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDialogButtonBox, QInputDialog, QMenu, QMessageBox
+from PySide6.QtWidgets import QApplication, QDialogButtonBox, QMessageBox
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
@@ -24,7 +24,7 @@ from network_a2a.persistence import HistoryStore
 from desktop_app.dialogs import AgentDialog, InviteDialog, JoinDialog
 from desktop_app.agent_list_dialog import AgentListDialog
 from desktop_app.storage import Storage
-from desktop_app.window import MainWindow
+from desktop_app.window import MainWindow, WORKSPACES_PAGE
 from desktop_app.workspace_dialog import WorkspaceDialog
 from tests.test_desktop_runtime import MemoryVault
 from tests.test_attachments import make_files
@@ -125,8 +125,9 @@ class WorkspaceUITests(unittest.TestCase):
         self.send(self.host, "Keep the original chat")
         self.wait(lambda: not self.host.chats[target]["pending"])
         original_messages = list(self.host.chats[target]["messages"])
-        with patch("desktop_app.window.QInputDialog.getText", return_value=("Research", True)):
-            self.host.create_workspace()
+        self.host.navigate(WORKSPACES_PAGE)
+        self.host.workspace_name_input.setText("Research")
+        self.host.create_workspace()
         self.wait(lambda: self.host.workspace_id != original)
         second = self.host.workspace_id
         self.assertEqual(self.host.workspace_label.text(), "Research")
@@ -191,59 +192,30 @@ class WorkspaceUITests(unittest.TestCase):
         self.assertEqual(dialog.url.text(), "wss://relay.example.com/connect")
         dialog.close()
 
-    def test_create_from_real_menu_and_dialog_preserves_existing_animated_rail_button(self):
+    def test_create_from_the_page_preserves_an_animated_rail_button(self):
+        """Creating through the real UI must not disturb the rail.
+
+        The rail button's hover animation used to be running when the flow
+        was a pop-up menu and a prompt, so both had to survive the menu
+        opening and closing under the pointer. Creating is a page now, so
+        what has to survive is the navigation and the click.
+        """
         original = self.host.workspace_id
         button = self.host.workspace_buttons[original]
         button.animation.setDuration(10000)
         button.animation.setStartValue(23.0)
         button.animation.setEndValue(15.0)
         button.animation.start()
-        stages = []
-        deadline = time.monotonic() + 15
 
-        def drive_dialogs():
-            popup = self.app.activePopupWidget()
-            dialog = self.app.activeModalWidget()
-            if time.monotonic() > deadline:
-                if isinstance(dialog, QInputDialog):
-                    dialog.reject()
-                if isinstance(popup, QMenu):
-                    popup.close()
-                driver.stop()
-            elif isinstance(popup, QMenu) and not stages:
-                stages.append("menu")
-                QTest.mouseClick(popup, Qt.MouseButton.LeftButton, pos=popup.actionGeometry(popup.actions()[0]).center())
-            elif isinstance(dialog, QInputDialog) and stages == ["menu"]:
-                stages.append("dialog")
-                dialog.setTextValue("Created through the menu")
-                buttons = dialog.findChild(QDialogButtonBox)
-                QTest.mouseClick(buttons.button(QDialogButtonBox.StandardButton.Ok), Qt.MouseButton.LeftButton)
+        self.host.navigate(WORKSPACES_PAGE)
+        self.host.workspace_name_input.setText("Created through the page")
+        self.wait(lambda: self.host.workspace_create_button.isEnabled())
+        QTest.mouseClick(self.host.workspace_create_button, Qt.MouseButton.LeftButton)
 
-        driver = QTimer(self.host)
-        driver.setInterval(10)
-        driver.timeout.connect(drive_dialogs)
-        watchdog = QTimer(self.host)
-        watchdog.setSingleShot(True)
-        def dismiss_dialogs():
-            dialog = self.app.activeModalWidget()
-            popup = self.app.activePopupWidget()
-            if isinstance(dialog, QInputDialog):
-                dialog.reject()
-            if isinstance(popup, QMenu):
-                popup.close()
-        watchdog.timeout.connect(dismiss_dialogs)
-        watchdog.start(15000)
-        driver.start()
-        try:
-            QTest.mouseClick(self.host.add_workspace_button, Qt.MouseButton.LeftButton)
-        finally:
-            driver.stop()
-            watchdog.stop()
-        self.assertEqual(stages, ["menu", "dialog"])
         self.wait(lambda: self.host.workspace_id != original)
         self.assertTrue(self.host.isVisible())
         self.assertTrue(self.host.network.isRunning())
-        self.assertEqual(self.host.workspace_label.text(), "Created through the menu")
+        self.assertEqual(self.host.workspace_label.text(), "Created through the page")
         self.assertIs(self.host.workspace_buttons[original], button)
         self.assertEqual(self.host.workspace_rail.count(), 2)
         self.switch(self.host, original)
@@ -307,8 +279,9 @@ class WorkspaceUITests(unittest.TestCase):
             return await self.echo_model(request)
         self.configure_model(delayed_model)
         first = self.host.workspace_id
-        with patch("desktop_app.window.QInputDialog.getText", return_value=("Other workspace", True)):
-            self.host.create_workspace()
+        self.host.navigate(WORKSPACES_PAGE)
+        self.host.workspace_name_input.setText("Other workspace")
+        self.host.create_workspace()
         self.wait(lambda: self.host.workspace_id != first)
         second = self.host.workspace_id
         self.switch(self.host, first)
