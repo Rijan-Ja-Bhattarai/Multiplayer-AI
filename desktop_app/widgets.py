@@ -170,10 +170,41 @@ class OrbitArt(QWidget):
     _CHIP_RY = 98.0
     _SWAY = 0.26
     _CYCLE_MS = 16000
+    # The chip's own painted size, from the rounded rect in paintEvent. The
+    # box this widget needs is these radii plus half a chip, so the two are
+    # stated here rather than being retyped into a minimum size.
+    _CHIP_W = 74.0
+    _CHIP_H = 66.0
+
+    @classmethod
+    def required_size(cls):
+        """The smallest box that contains every chip at every phase.
+
+        Worked out from the geometry rather than guessed. It was a flat
+        ``setMinimumSize(260, 240)``, and the sway that was added later to
+        make the chips perceptible pushed the outermost one about three
+        pixels past that number, so the left and right edges were clipped
+        while the top and bottom, which had room to spare, looked fine.
+
+        The sway is why the extremes have to be searched for rather than
+        taken from the nominal radius: no chip sits at angle zero, so the
+        radius is never the true horizontal reach.
+        """
+        half_width = half_height = 0.0
+        for step in range(361):
+            phase = math.tau * step / 360
+            for index in range(len(cls._CHIPS)):
+                angle = (index * math.pi / 2 - math.pi / 4
+                         + math.sin(phase) * cls._SWAY)
+                half_width = max(half_width,
+                                 abs(math.cos(angle)) * cls._CHIP_RX + cls._CHIP_W / 2)
+                half_height = max(half_height,
+                                  abs(math.sin(angle)) * cls._CHIP_RY + cls._CHIP_H / 2)
+        return (int(math.ceil(half_width * 2)), int(math.ceil(half_height * 2)))
 
     def __init__(self, parent=None, theme=DARK, moving=True):
         super().__init__(parent)
-        self.setMinimumSize(260, 240)
+        self.setMinimumSize(*self.required_size())
         self._phase = 0.0
         self._theme = theme
         self.animation = QPropertyAnimation(self, b"phase", self)

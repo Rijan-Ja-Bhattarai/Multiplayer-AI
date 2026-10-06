@@ -1299,6 +1299,27 @@ def test_a_stale_search_result_is_dropped_when_the_settings_change(window) -> No
         "a result arrived for settings that are no longer on screen")
 
 
+def test_the_welcome_orbit_fits_at_every_width(window, qt_app) -> None:
+    """Widening the orbit must not give the welcome panel a sideways scroll.
+
+    The orbit needed seven more pixels than it had been given, and the
+    welcome panel is the one page whose hero is a fixed row rather than
+    something that wraps, so a wider illustration could have pushed the
+    content past the window at its minimum size.
+    """
+    floor, _ = win.minimum_size(window.primary_screen_size())
+    for width in (floor, 760, 900, 1330):
+        window.resize(width, 900)
+        pump(qt_app, 0.2)
+        page = window.stack.currentWidget()
+        assert not page.horizontalScrollBar().isVisible(), (
+            f"at {width}px the welcome page scrolls sideways")
+        width_needed, _ = win.OrbitArt.required_size()
+        assert window.welcome_art.width() >= width_needed, (
+            f"at {width}px the orbit is {window.welcome_art.width()}px, "
+            f"which clips the chips")
+
+
 def test_the_create_panel_previews_the_rail_button(window) -> None:
     """The rail shows a workspace as its first two letters.
 

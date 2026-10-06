@@ -274,6 +274,100 @@ def test_one_cycle_is_long_enough_to_breathe(qt_app) -> None:
         f"a {cycle_ms}ms cycle is {'too quick to settle' if cycle_ms < 10000 else 'too slow to notice'}")
 
 
+def test_no_orbit_chip_is_painted_outside_its_box(qt_app) -> None:
+    """The left and right edges were clipped while top and bottom were fine.
+
+    The box was a flat setMinimumSize(260, 240), and the sway that was added
+    later to make the motion perceptible pushed the outermost chip about three
+    pixels past that width. The height happened to have room to spare, so it
+    looked like a clipping problem on two sides only.
+
+    Checked over a whole cycle, because the worst case is a phase rather than
+    the resting one, and against the painted chip size rather than the radius.
+    """
+    art = OrbitArt(moving=False)
+    width, height = OrbitArt.required_size()
+    art.resize(width, height)
+
+    worst = {"left": 0.0, "right": 0.0, "top": 0.0, "bottom": 0.0}
+    for step in range(721):
+        phase = math.tau * step / 720
+        for index in range(len(OrbitArt._CHIPS)):
+            x, y = art.chip_position(index, phase)
+            worst["left"] = min(worst["left"], x - OrbitArt._CHIP_W / 2)
+            worst["right"] = max(worst["right"], x + OrbitArt._CHIP_W / 2)
+            worst["top"] = min(worst["top"], y - OrbitArt._CHIP_H / 2)
+            worst["bottom"] = max(worst["bottom"], y + OrbitArt._CHIP_H / 2)
+
+    assert worst["left"] >= 0, (
+        f"a chip is cut off on the left by {-worst['left']:.1f}px")
+    assert worst["right"] <= width, (
+        f"a chip is cut off on the right by {worst['right'] - width:.1f}px")
+    assert worst["top"] >= 0, (
+        f"a chip is cut off at the top by {-worst['top']:.1f}px")
+    assert worst["bottom"] <= height, (
+        f"a chip is cut off at the bottom by {worst['bottom'] - height:.1f}px")
+
+
+def test_the_orbit_box_follows_its_own_geometry(qt_app) -> None:
+    """It must be worked out, or the next change to the motion clips again."""
+    width, _ = OrbitArt.required_size()
+    original = OrbitArt._CHIP_W
+    try:
+        OrbitArt._CHIP_W = original + 40
+        wider, _ = OrbitArt.required_size()
+        assert wider > width, (
+            f"a wider chip did not ask for a wider box ({width} -> {wider})")
+    finally:
+        OrbitArt._CHIP_W = original
+
+    art = OrbitArt(moving=False)
+    assert art.minimumSize().width() >= width, (
+        f"the widget accepts {art.minimumSize().width()}px but needs {width}px")
+
+
+def test_the_orbit_box_is_wider_than_the_one_that_clipped(qt_app) -> None:
+    """Guards the reported symptom against the old number coming back."""
+    width, _ = OrbitArt.required_size()
+    assert width > 260, (
+        f"the orbit box is {width}px wide, which is the width that clipped")
+
+
+def test_the_orbit_box_is_the_smallest_that_fits(qt_app) -> None:
+    """It should be tight, not merely large enough.
+
+    Adding the full orbit radius to half a chip and calling it a day gives a
+    box that never clips but is about thirty pixels wider than it needs to
+    be, which on the welcome panel is thirty pixels of illustration pushing
+    the words along. The reach is not the radius either: no chip sits at
+    angle zero, so the true extreme is only found by searching the sweep.
+    """
+    width, height = OrbitArt.required_size()
+
+    left, right = 0.0, 0.0
+    top, bottom = 0.0, 0.0
+    for step in range(721):
+        phase = math.tau * step / 720
+        for index in range(len(OrbitArt._CHIPS)):
+            angle = (index * math.pi / 2 - math.pi / 4
+                     + math.sin(phase) * OrbitArt._SWAY)
+            left = min(left, -abs(math.cos(angle)) * OrbitArt._CHIP_RX - OrbitArt._CHIP_W / 2)
+            right = max(right, abs(math.cos(angle)) * OrbitArt._CHIP_RX + OrbitArt._CHIP_W / 2)
+            top = min(top, -abs(math.sin(angle)) * OrbitArt._CHIP_RY - OrbitArt._CHIP_H / 2)
+            bottom = max(bottom, abs(math.sin(angle)) * OrbitArt._CHIP_RY + OrbitArt._CHIP_H / 2)
+
+    assert width == math.ceil(right * 2), (
+        f"the box is {width}px wide but the chips only need "
+        f"{math.ceil(right * 2)}px")
+    assert height == math.ceil(bottom * 2), (
+        f"the box is {height}px tall but the chips only need "
+        f"{math.ceil(bottom * 2)}px")
+    # And the nominal radius really would have been bigger, which is why
+    # adding the two together is not the same answer.
+    assert width < (OrbitArt._CHIP_RX + OrbitArt._CHIP_W / 2) * 2, (
+        "the box is the nominal radius, so the extremes are not being searched")
+
+
 @pytest.mark.parametrize("name", [LIGHT, MIKU, DARK])
 def test_model_controls_use_the_stored_theme_on_first_paint(
     qt_app, storage, name: str
