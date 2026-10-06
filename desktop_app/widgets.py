@@ -2,11 +2,33 @@ import math
 
 from PySide6.QtCore import (Property, QAbstractAnimation, QEasingCurve, QRectF,
                             QPropertyAnimation, Qt, Signal)
-from PySide6.QtGui import QColor, QFont, QPainter, QPen
+from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (QComboBox, QHBoxLayout, QLabel, QPushButton,
                              QPlainTextEdit, QVBoxLayout, QWidget)
 
 from .theme import DARK, color
+
+
+def app_mark(theme_name=DARK, initial="M", size=64):
+    """The rounded accent tile the app is recognised by.
+
+    Painted rather than themed, so the accent is read from the palette
+    instead of hardcoded, and drawn at whatever size is asked for so the
+    window icon, the sidebar avatar and the launch screen stay the same
+    mark rather than becoming hand-built approximations of each other.
+    """
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setBrush(QColor(color(theme_name, "accent")))
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.drawRoundedRect(QRectF(0, 0, size, size), size * 20 / 64, size * 20 / 64)
+    painter.setPen(QColor(color(theme_name, "on_accent")))
+    painter.setFont(QFont("Segoe UI", max(1, round(size * 27 / 64)), QFont.Weight.Bold))
+    painter.drawText(QRectF(0, 0, size, size), Qt.AlignmentFlag.AlignCenter, initial)
+    painter.end()
+    return pixmap
 
 
 def label(text="", name=None, wrap=False):

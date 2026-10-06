@@ -660,6 +660,124 @@ def test_the_page_opens_usable_once_the_runtime_is_up(window) -> None:
     assert window.workspace_join_button.isEnabled()
 
 
+# --- the launch screen --------------------------------------------------
+
+
+def pump(qt_app, seconds):
+    """Turn the event loop for a while, which is what drives a timer."""
+    end = time.time() + seconds
+    while time.time() < end:
+        qt_app.processEvents()
+        time.sleep(0.005)
+
+
+def test_the_launch_screen_waits_for_a_floor(qt_app) -> None:
+    """Startup takes about a quarter of a second here.
+
+    Waiting only for readiness would flash the screen for a fifth of a
+    second, which reads as a glitch rather than as an intention, so it
+    holds for a floor even though it is ready well before that.
+    """
+    from desktop_app.splash import LAUNCH_FLOOR_MS, LaunchScreen
+
+    screen = LaunchScreen("dark")
+    screen.begin()
+    qt_app.processEvents()
+    assert screen.isVisible()
+
+    screen.runtime_ready()
+    pump(qt_app, 0.2)
+    assert not screen.dismissed, (
+        f"it left after 200ms; the floor is {LAUNCH_FLOOR_MS}ms")
+
+    pump(qt_app, LAUNCH_FLOOR_MS / 1000 + 0.5)
+    assert screen.dismissed and not screen.isVisible()
+
+
+def test_the_launch_screen_leaves_at_once_when_ready(qt_app) -> None:
+    """Ready well after the floor has passed means no waiting."""
+    from desktop_app.splash import LaunchScreen
+
+    screen = LaunchScreen("dark")
+    screen.begin()
+    pump(qt_app, 1.2)
+    assert not screen.dismissed, "the floor let go on its own, which it should not"
+
+    screen.runtime_ready()
+    pump(qt_app, 0.5)
+    assert screen.dismissed
+
+
+def test_the_launch_screen_takes_its_effect_off_when_it_goes(qt_app) -> None:
+    """Left attached, every later paint goes through Qt's effect machinery.
+
+    That is the fault the page fade has in the window, and a widget with
+    nothing left to fade has no business keeping one.
+    """
+    from desktop_app.splash import LaunchScreen
+
+    screen = LaunchScreen("dark")
+    screen.begin()
+    qt_app.processEvents()
+    assert screen.graphicsEffect() is not None, "the fade-in needs an effect"
+
+    screen.dismiss()
+    pump(qt_app, 0.6)
+    assert screen.graphicsEffect() is None, (
+        "the effect outlived the animation it was there for")
+    assert screen.art.moving is False, "the orbit keeps turning behind a closed splash"
+
+
+def test_the_launch_screen_carries_the_apps_own_mark(qt_app) -> None:
+    """The same mark the taskbar is about to show.
+
+    The letter on it cannot be checked here: with no fonts installed Qt
+    draws no glyph at all, so a marked tile and a blank one paint
+    identically. What is checked is that the fill is the theme's accent,
+    which is what would otherwise make the splash a coloured square.
+    """
+    from desktop_app.splash import LaunchScreen
+
+    screen = LaunchScreen("miku")
+    assert screen.art._theme == MIKU
+    assert not screen.mark.pixmap().isNull()
+    centre = screen.mark.pixmap().toImage().pixelColor(44, 44).name()
+    assert centre == color(MIKU, "accent").lower(), (
+        f"the mark is painted {centre}, not the theme's accent")
+
+
+def test_the_launch_screen_follows_the_theme(qt_app) -> None:
+    from desktop_app.splash import LaunchScreen
+
+    screen = LaunchScreen("dark")
+    screen.set_theme(LIGHT)
+    assert screen.art._theme == LIGHT
+    centre = screen.mark.pixmap().toImage().pixelColor(44, 44).name()
+    assert centre == color(LIGHT, "accent").lower()
+
+
+def test_dismissing_the_launch_screen_twice_is_harmless(qt_app) -> None:
+    """A fatal error and the floor can both ask it to go."""
+    from desktop_app.splash import LaunchScreen
+
+    screen = LaunchScreen("dark")
+    screen.begin()
+    qt_app.processEvents()
+    screen.dismiss()
+    screen.dismiss()
+    pump(qt_app, 0.5)
+    assert screen.dismissed and not screen.isVisible()
+
+
+def test_a_launch_screen_that_never_ran_leaves_cleanly(qt_app) -> None:
+    """It can be asked to go before it was ever shown."""
+    from desktop_app.splash import LaunchScreen
+
+    screen = LaunchScreen("dark")
+    screen.dismiss()
+    assert screen.dismissed and not screen.isVisible()
+
+
 # --- the settings controls ----------------------------------------------
 
 

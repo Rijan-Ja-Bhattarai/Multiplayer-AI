@@ -27,7 +27,8 @@ from .markdown import MarkdownMessage
 from .resources import ResourceSampler
 from .theme import (DARK, LIGHT, THEME_CHOICES, color, provider_entry, provider_names,
                     resolve_theme, stylesheet, system_theme)
-from .widgets import (Composer, HoverRow, OrbitArt, Select, WorkspaceButton, action, label)
+from .widgets import (Composer, HoverRow, OrbitArt, Select, WorkspaceButton,
+                     action, app_mark, label)
 
 
 def frame(name, layout_type=QVBoxLayout):
@@ -86,29 +87,6 @@ WORKSPACES_PAGE = PAGE_INDEX["workspaces"]
 # The mark beside a message, and the width a grouped message is indented by
 # when it follows its own speaker's earlier message.
 SPEAKER_AVATAR = 34
-
-
-def app_mark(theme_name=DARK, initial="M", size=64):
-    """The rounded accent tile the app is recognised by.
-
-    Painted rather than themed, so the accent is read from the palette
-    instead of hardcoded, and drawn at whatever size is asked for so the
-    window icon and the sidebar avatar stay the same mark rather than
-    becoming two hand-built approximations of each other.
-    """
-    pixmap = QPixmap(size, size)
-    pixmap.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    painter.setBrush(QColor(color(theme_name, "accent")))
-    painter.setPen(Qt.PenStyle.NoPen)
-    radius = round(size * 20 / 64)
-    painter.drawRoundedRect(0, 0, size, size, radius, radius)
-    painter.setPen(QColor(color(theme_name, "on_accent")))
-    painter.setFont(QFont("Segoe UI", max(1, round(size * 27 / 64)), QFont.Weight.Bold))
-    painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, initial)
-    painter.end()
-    return pixmap
 
 
 def app_icon(theme_name=DARK):
@@ -763,11 +741,22 @@ class MainWindow(QMainWindow):
         motion, column = frame("settings")
         column.setContentsMargins(22, 18, 22, 20)
         column.addWidget(label("Motion", "heading"))
+        self.launch_screen_toggle = QCheckBox("Show the launch screen")
+        self.launch_screen_toggle.setChecked(
+            self.storage.settings.get("launch_screen", True) is not False)
+        self.launch_screen_toggle.toggled.connect(self.launch_screen_changed)
+        column.addWidget(self.launch_screen_toggle, 0, Qt.AlignmentFlag.AlignLeft)
+        column.addWidget(label(
+            "A brief branded screen while the network starts. Reduce "
+            "animations below overrides it either way.", "muted", True))
+        column.addSpacing(10)
         self.reduce_motion = QCheckBox("Reduce animations")
         self.reduce_motion.setChecked(self.storage.settings.get("reduce_motion", False))
         self.reduce_motion.toggled.connect(self.motion_changed)
         column.addWidget(self.reduce_motion, 0, Qt.AlignmentFlag.AlignLeft)
-        column.addWidget(label("Turns off page fades.", "muted", True))
+        column.addWidget(label(
+            "Turns off page fades and the moving illustration, and the "
+            "launch screen with them.", "muted", True))
         layout.addWidget(motion)
 
         cleanup, column = frame("settings")
@@ -1050,6 +1039,16 @@ class MainWindow(QMainWindow):
         self.storage.settings["theme"] = name
         self.storage.save()
         self.apply_theme(name)
+
+    def launch_screen_changed(self, wanted):
+        """Store whether to show the launch screen next time.
+
+        A preference rather than a motion setting, so it is stored on its
+        own. It only takes effect on the next start; the screen is
+        already up or already gone by the time anybody can reach this.
+        """
+        self.storage.settings["launch_screen"] = bool(wanted)
+        self.storage.save()
 
     def motion_changed(self, reduced):
         self.storage.settings["reduce_motion"] = reduced
