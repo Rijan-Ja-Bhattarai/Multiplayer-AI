@@ -12,7 +12,7 @@ pytest.importorskip("PySide6.QtWidgets")
 
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
@@ -132,5 +132,13 @@ class SharedConversationUITests(unittest.TestCase):
             self.assertIn("bold text", reply.toPlainText())
         self.assertEqual(chat["messages"], [("user", text), ("assistant", text), ("local_agent", text)])
         self.wait(lambda: self.host.messages.count() > 0)
-        user_bubble = self.host.messages.itemAt(0).widget()
-        self.assertEqual(user_bubble.layout().itemAt(1).widget().text(), text)
+        # The user's own text is rendered plainly, with the markdown left
+        # in it, while the two replies above went through the renderer. It
+        # is found by scanning the row's labels rather than by index: a
+        # message row now carries the speaker's mark, the body and a slot
+        # for hover actions, so no single position identifies the body.
+        first_row = self.host.messages.itemAt(0).widget()
+        bodies = [child.text() for child in first_row.findChildren(QLabel) if child.text()]
+        self.assertIn(text, bodies,
+                      "the user's message must show its text exactly as sent, "
+                      "markdown included")

@@ -474,6 +474,10 @@ QFrame#profile { background: @@surface_profile@@; border: none; border-top: 1px 
 QFrame#card, QFrame#stat, QFrame#settings { background: @@surface@@; border: 1px solid @@border@@; border-radius: 12px; }
 QFrame#hero { background: @@surface_hero@@; border: 1px solid @@border_hero@@; border-radius: 16px; }
 QLabel { background: transparent; }
+    QWidget#messageRow { background: transparent; border-radius: 8px; }
+    QWidget#messageRow:hover { background: @@surface_row_hover@@; }
+    QWidget#messageActions { background: transparent; }
+    QFrame#composerBar { background: @@surface_base@@; border: none; border-top: 1px solid @@border@@; }
 QLabel#title { font-size: 31px; font-weight: 700; color: @@text_strong@@; }
 QLabel#heroTitle { font-size: 34px; font-weight: 700; color: @@text_hero@@; }
 QLabel#heading { font-size: 19px; font-weight: 650; color: @@text_strong@@; }

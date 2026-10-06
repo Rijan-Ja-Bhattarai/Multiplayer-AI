@@ -19,7 +19,8 @@ pytest.importorskip("PySide6", reason="PySide6 is needed for the desktop page te
 pytest.importorskip("psutil", reason="psutil backs the Resources page")
 
 from PySide6.QtCore import QTimer  # noqa: E402
-from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton  # noqa: E402
+from PySide6.QtWidgets import (QApplication, QFrame, QLabel, QMessageBox,
+                             QPushButton)  # noqa: E402
 
 from desktop_app import window as win  # noqa: E402
 from desktop_app.storage import ABSENT, REMOVED, Storage  # noqa: E402
@@ -290,6 +291,156 @@ def test_the_orbit_respects_the_stored_motion_setting(qt_app, storage) -> None:
     finally:
         instance.network.shutdown()
         instance.network.wait(10000)
+
+
+# --- the conversation ----------------------------------------------------
+
+
+def conversation_window(window):
+    """A chat with two speakers, so grouping has something to group."""
+    window.navigate(2)
+    window.agents = [{"id": "local-llama", "kind": "model", "online": True,
+                      "provider": "ollama", "model": "llama3"}]
+    window.selected = "local-llama"
+    window.chats = {"local-llama": {"messages": [
+        ("user", "Explain this traceback"),
+        ("user", "It only happens on the second run"),
+        ("assistant", "Two runs means the port is still bound"),
+        ("assistant", "Close it before starting again"),
+    ]}}
+    window.render_messages()
+    return window
+
+
+def row_lead(row):
+    """The widget holding a row's leading slot: an avatar, or the indent."""
+    return row.content.itemAt(0).widget()
+
+
+def row_has_mark(row):
+    """A mark is a label carrying a painted pixmap; the indent is a bare widget."""
+    lead = row_lead(row)
+    return isinstance(lead, QLabel) and not lead.pixmap().isNull()
+
+
+def row_labels(row):
+    return [child.text() for child in row.findChildren(QLabel) if child.text()]
+
+
+def test_messages_are_rows_and_not_cards(window) -> None:
+    """Each message used to be a full-width card, which reads as a stack of
+    documents rather than as a conversation."""
+    conversation_window(window)
+
+    rows = window.messages_widget.findChildren(win.HoverRow)
+    assert len(rows) == 4, f"expected one row per message, got {len(rows)}"
+    assert not [c for c in window.messages_widget.findChildren(QFrame)
+                if c.objectName() == "card"], (
+        "a message is still drawn as a card")
+
+
+def test_consecutive_messages_from_one_speaker_are_grouped(window) -> None:
+    """Discord repeats the name and mark once per speaker, not once per message."""
+    conversation_window(window)
+    rows = window.messages_widget.findChildren(win.HoverRow)
+
+    assert row_has_mark(rows[0]), (
+        "the first message from a speaker should carry their mark")
+    assert not row_has_mark(rows[1]), (
+        "the second message from the same speaker should have no mark")
+    assert "You" in row_labels(rows[0]), "the opening message should name its speaker"
+    assert "You" not in row_labels(rows[1]), (
+        "a follow-on message repeats the name above it")
+
+    assert "local-llama" in row_labels(rows[2]), (
+        "a new speaker should be named")
+    assert "local-llama" not in row_labels(rows[3]), (
+        "a follow-on message repeats the name above it")
+
+
+def test_a_grouped_message_lines_up_under_the_one_above(window, qt_app) -> None:
+    """Without the indent the text slides left under the absent mark."""
+    conversation_window(window)
+    window.show()
+    qt_app.processEvents()
+    rows = window.messages_widget.findChildren(win.HoverRow)
+
+    def text_indent(row):
+        # Any label with text is body copy; the speaker's name is a label
+        # too, but it only appears on an ungrouped row and sits at the same
+        # indent, so it does not disturb the comparison.
+        bodies = [child for child in row.findChildren(QLabel) if child.text()]
+        return min((b.mapTo(row, b.rect().topLeft()).x() for b in bodies),
+                   default=None)
+
+    assert text_indent(rows[0]) == text_indent(rows[1]), (
+        f"a grouped message sits at {text_indent(rows[1])} while the one above "
+        f"it sits at {text_indent(rows[0])}")
+
+
+def test_the_action_slot_keeps_its_place_when_revealed(window, qt_app) -> None:
+    """The actions stay in the layout whether or not they are shown.
+
+    If they were added on hover instead, every row would jump sideways as
+    the pointer crossed it. The invariant is checked on the layout rather
+    than only on the resulting width, because a row is sized by the panel
+    around it and a reflow can leave the width unchanged by luck.
+    """
+    conversation_window(window)
+    window.show()
+    qt_app.processEvents()
+    rows = window.messages_widget.findChildren(win.HoverRow)
+
+    def action_slot(row):
+        return [row.outer.itemAt(index).widget()
+                for index in range(row.outer.count())]
+
+    assert rows and not any(r.actions_revealed for r in rows), (
+        "the actions start visible, so there is nothing to reveal")
+    for row in rows:
+        assert any(w is not None and w.objectName() == "messageActions"
+                   for w in action_slot(row)), (
+            "the actions are not in the layout while hidden, so revealing "
+            "them would reflow the row")
+
+    before = [r.geometry().width() for r in rows]
+    for row in rows:
+        row.reveal_actions(True)
+    qt_app.processEvents()
+
+    assert all(r.actions_revealed for r in rows), "revealing did not take"
+    assert [r.geometry().width() for r in rows] == before, (
+        "revealing the actions changed the row width, so the row will shift "
+        "as the pointer crosses it")
+
+    for row in rows:
+        row.reveal_actions(False)
+    assert not any(r.actions_revealed for r in rows), "hiding did not take"
+
+
+def test_the_composer_is_set_apart_from_the_messages(window, qt_app) -> None:
+    """It already sat outside the scrolling area, so it did not move.
+
+    What it lacked was any sign that it was a separate surface.
+    """
+    conversation_window(window)
+    window.show()
+    qt_app.processEvents()
+
+    assert window.composer_bar.geometry().y() >= window.messages_scroll.geometry().y(), (
+        "the composer overlaps the message area")
+    assert window.composer_bar.objectName() == "composerBar"
+
+
+@pytest.mark.parametrize("name", THEME_NAMES)
+def test_the_composer_and_the_rows_are_divided_in_every_theme(name) -> None:
+    for frame_name in ("composerBar", "messageRow", "messageActions"):
+        rule = next((line for line in THEMES[name].splitlines()
+                     if f"#{frame_name}" in line), "")
+        assert rule, f"{name} has no rule for {frame_name}"
+        assert "transparent" in rule or "border-top" in rule, (
+            f"{name} gives {frame_name} no separation from the surface behind it")
+
 
 
 # --- the user panel ------------------------------------------------------

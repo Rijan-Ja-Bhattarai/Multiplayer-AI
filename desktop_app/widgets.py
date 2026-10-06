@@ -3,7 +3,8 @@ import math
 from PySide6.QtCore import (Property, QAbstractAnimation, QEasingCurve,
                             QPropertyAnimation, Qt, Signal)
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
-from PySide6.QtWidgets import QLabel, QPushButton, QPlainTextEdit, QWidget
+from PySide6.QtWidgets import (QHBoxLayout, QLabel, QPushButton, QPlainTextEdit,
+                             QVBoxLayout, QWidget)
 
 from .theme import DARK, color
 
@@ -122,6 +123,82 @@ class OrbitArt(QWidget):
             painter.setPen(accent("orbit_chip_text"))
             painter.setFont(QFont("Segoe UI", 9))
             painter.drawText(int(x - 35), int(y + 6), 70, 20, Qt.AlignmentFlag.AlignCenter, name)
+
+
+class HoverRow(QWidget):
+    """A row that keeps a slot for actions it only shows while hovered.
+
+    The actions stay in the layout whether or not they are visible, so
+    revealing them cannot reflow the row and a message cannot shift as the
+    pointer passes over it. The row itself is one widget rather than a
+    layout, because ``:hover`` in a stylesheet matches widgets, and a bare
+    layout has nothing to match on.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("messageRow")
+        self.outer = QHBoxLayout(self)
+        self.outer.setContentsMargins(0, 0, 0, 0)
+        self.outer.setSpacing(0)
+        self.content = QHBoxLayout()
+        self.content.setSpacing(12)
+        self.outer.addLayout(self.content, 1)
+        self._actions = QWidget()
+        self._actions.setObjectName("messageActions")
+        self._actions_layout = QHBoxLayout(self._actions)
+        self._actions_layout.setContentsMargins(8, 0, 0, 0)
+        self._actions_layout.setSpacing(4)
+        self.outer.addWidget(self._actions, 0, Qt.AlignmentFlag.AlignTop)
+        self._actions.setVisible(False)
+        self._revealed = False
+
+    def add_content(self, item, stretch=0, alignment=None):
+        """Add a widget or a sub-layout to the part that is always shown.
+
+        Qt keeps these in two methods, so a caller holding a layout rather
+        than a widget has to know which to reach for. Here the type decides,
+        and a caller can pass either without keeping track.
+        """
+        if isinstance(item, QWidget):
+            if alignment is None:
+                self.content.addWidget(item, stretch)
+            else:
+                self.content.addWidget(item, stretch, alignment)
+        else:
+            self.content.addLayout(item, stretch)
+        return item
+
+    def add_action(self, widget):
+        self._actions_layout.addWidget(widget)
+        return widget
+
+    @property
+    def actions_revealed(self):
+        return self._revealed
+
+    def reveal_actions(self, revealed):
+        """Show or hide the action slot.
+
+        A no-op when it is already in that state, so the enter and leave
+        events of a pointer crossing a child widget cannot fight each other
+        into a flicker.
+        """
+        if revealed == self._revealed:
+            return
+        self._revealed = revealed
+        self._actions.setVisible(revealed)
+        self.setProperty("actionsShown", revealed)
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+    def enterEvent(self, event):
+        self.reveal_actions(True)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.reveal_actions(False)
+        super().leaveEvent(event)
 
 
 class WorkspaceButton(QPushButton):

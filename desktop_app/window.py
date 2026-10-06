@@ -10,8 +10,8 @@ from datetime import datetime
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QSize, Qt, QTimer, QUrl, Slot
 from PySide6.QtGui import (QGuiApplication, QIcon, QKeySequence, QPixmap, QPainter,
                            QColor, QDesktopServices, QFont, QPalette, QShortcut)
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QFrame,
-    QGraphicsOpacityEffect, QGridLayout, QHBoxLayout, QInputDialog, QLabel,
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFileDialog,
+    QFrame, QGraphicsOpacityEffect, QGridLayout, QHBoxLayout, QInputDialog, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
     QProgressBar, QScrollArea, QStackedWidget, QVBoxLayout, QWidget)
 
@@ -26,7 +26,7 @@ from .markdown import MarkdownMessage
 from .resources import ResourceSampler
 from .theme import (DARK, LIGHT, THEME_CHOICES, color, provider_entry, provider_names,
                     resolve_theme, stylesheet, system_theme)
-from .widgets import Composer, OrbitArt, WorkspaceButton, action, label
+from .widgets import (Composer, HoverRow, OrbitArt, WorkspaceButton, action, label)
 
 
 def frame(name, layout_type=QVBoxLayout):
@@ -74,6 +74,9 @@ PAGE_HELP = {
 }
 RESOURCES_PAGE = 4
 SETTINGS_PAGE = 5
+# The mark beside a message, and the width a grouped message is indented by
+# when it follows its own speaker's earlier message.
+SPEAKER_AVATAR = 34
 
 
 def app_mark(theme_name=DARK, initial="M", size=64):
@@ -588,8 +591,14 @@ class MainWindow(QMainWindow):
         self.composer.submitted.connect(self.send_message)
         self.attachment_rows = QVBoxLayout()
         self.attachment_rows.setSpacing(6)
-        column.addLayout(self.attachment_rows)
-        column.addWidget(self.composer)
+        # The composer already sat outside the scrolling area, so it did not
+        # move; what it lacked was any sign that it was a different surface
+        # from the messages above it. A hairline is what says that.
+        self.composer_bar, composer_column = frame("composerBar")
+        composer_column.setContentsMargins(0, 12, 0, 14)
+        composer_column.setSpacing(8)
+        composer_column.addLayout(self.attachment_rows)
+        composer_column.addWidget(self.composer)
         footer = QHBoxLayout()
         self.attach_button = action("Attach images / PDFs", self.attach_files)
         # The hint beside this button states the keys but not what the button
@@ -602,7 +611,8 @@ class MainWindow(QMainWindow):
         self.send_button = action("Send request  ↑", self.send_message, True)
         self.send_button.setToolTip("Send this message to the selected agent")
         footer.addWidget(self.send_button)
-        column.addLayout(footer)
+        composer_column.addLayout(footer)
+        column.addWidget(self.composer_bar)
         layout.addWidget(panel, 1)
         return page
 
@@ -1271,6 +1281,30 @@ class MainWindow(QMainWindow):
             button.setToolTip(entry["name"])
             button.setChecked(entry["id"] == self.workspace_id)
 
+    def speaker_avatar(self, speaker, role):
+        """The mark beside a message.
+
+        The provider's own logo when the speaker is a known model agent, so
+        a conversation between providers can be read at a glance, and the
+        shared device mark otherwise. Both are painted rather than styled,
+        so they follow the theme on the same terms as the orbit art.
+        """
+        if role == "user":
+            return device_avatar(self.theme, self.identity, SPEAKER_AVATAR)
+        agent = next((entry for entry in self.agents if entry["id"] == speaker), None)
+        if agent and agent.get("provider"):
+            return provider_logo(agent["provider"], self.theme, SPEAKER_AVATAR)
+        return device_avatar(self.theme, speaker, SPEAKER_AVATAR)
+
+    def copy_message(self, text):
+        """Put a message on the clipboard.
+
+        Says so afterwards, because nothing on screen changes when a copy
+        succeeds and silence would leave the button looking inert.
+        """
+        QApplication.clipboard().setText(text)
+        self.notice("Message copied.")
+
     def render_messages(self):
         clear_layout(self.messages)
         chat = self.chats.get(self.selected, {})
@@ -1289,23 +1323,45 @@ class MainWindow(QMainWindow):
                 self.messages.addWidget(
                     label("Pick a conversation or an agent on the left, or connect a "
                           "model from Providers to start one.", "muted", True))
+        names = {"user": "You", "error": "Request unsuccessful", "local_agent": "Agent on this device"}
+        room = self.conversations.get(self.selected)
+        previous = None
         for role, text in chat.get("messages", []):
-            bubble, column = frame("card")
-            column.setContentsMargins(17, 13, 17, 13)
-            names = {"user": "You", "error": "Request unsuccessful", "local_agent": "Agent on this device"}
-            room = self.conversations.get(self.selected)
             speaker = role.removeprefix("member:") if role.startswith("member:") else names.get(role, room["target"] if room else self.selected)
-            title = label(speaker)
-            title.setStyleSheet("font-weight:650; color:"
-                                + color(self.theme, "error" if role == "error" else "agent_title") + ";")
-            column.addWidget(title)
+            # Discord groups consecutive messages from one speaker under a
+            # single header rather than boxing each one. A row per message
+            # with a card around it reads as a stack of documents, which is
+            # what this used to look like.
+            grouped = speaker == previous
+            row = HoverRow()
+            if grouped:
+                # Keep the text aligned under the first message's text
+                # rather than sliding it left under the absent avatar.
+                spacer = QWidget()
+                spacer.setFixedWidth(SPEAKER_AVATAR)
+                row.add_content(spacer, 0, Qt.AlignmentFlag.AlignTop)
+            else:
+                row.add_content(self.speaker_avatar(speaker, role), 0,
+                                Qt.AlignmentFlag.AlignTop)
+            column = QVBoxLayout()
+            column.setSpacing(4)
+            row.add_content(column, 1)
+            if not grouped:
+                title = label(speaker)
+                title.setStyleSheet("font-weight:650; color:"
+                                    + color(self.theme, "error" if role == "error" else "agent_title") + ";")
+                column.addWidget(title)
             if role in ("assistant", "local_agent"):
                 body = MarkdownMessage(text, theme_name=self.theme)
             else:
                 body = label(text, wrap=True)
                 body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             column.addWidget(body)
-            self.messages.addWidget(bubble)
+            copy = action("Copy", lambda checked=False, value=text: self.copy_message(value), name="ghost")
+            copy.setToolTip("Copy this message")
+            row.add_action(copy)
+            self.messages.addWidget(row)
+            previous = speaker
         if chat.get("pending") or chat.get("local_pending"):
             self.messages.addWidget(label("● ● ●   Waiting for your agent…", "muted"))
         self.update_chat_controls()
