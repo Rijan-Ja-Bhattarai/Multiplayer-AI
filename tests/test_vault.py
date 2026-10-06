@@ -449,6 +449,104 @@ class DurableWriteTests(unittest.TestCase):
             self.assertEqual(len(calls), storage_module._REPLACE_ATTEMPTS,
                              "it should stop at the attempt limit, not sooner")
             self.assertFalse(target.exists())
+            self.assertEqual(leftovers(directory), [],
+                             "a write that never landed left its temporary "
+                             "file behind")
+
+    def test_a_refused_write_leaves_no_temporary_file(self) -> None:
+        """Every failed attempt left a full copy of the document behind.
+
+        Nothing in the desktop app enumerates the data directory, so a write
+        that keeps failing under a scanner or a sync client leaves one file
+        per attempt for the life of the install. The name is unique per
+        attempt, which is what stopped two writers sharing one file and is
+        also what stops a leak being noticed.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory, "settings.json")
+
+            def replace(self, other):
+                raise PermissionError("Access is denied")
+
+            with mock.patch.object(Path, "replace", replace), \
+                    mock.patch("desktop_app.storage._REPLACE_PAUSE", 0):
+                with self.assertRaises(PermissionError):
+                    write_json_durably(target, '{"written": true}')
+
+            self.assertEqual(leftovers(directory), [],
+                             f"a refused write left {leftovers(directory)} behind")
+
+    def test_a_write_that_cannot_be_synced_leaves_no_temporary_file(self) -> None:
+        """The failure before the rename, not after it."""
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory, "settings.json")
+
+            def broken_fsync(fileno):
+                raise OSError("No space left on device")
+
+            with mock.patch("desktop_app.storage.os.fsync", broken_fsync):
+                with self.assertRaises(OSError):
+                    write_json_durably(target, '{"written": true}')
+
+            self.assertFalse(target.exists())
+            self.assertEqual(leftovers(directory), [],
+                             "a write that could not be flushed left its "
+                             "temporary file behind")
+
+    def test_a_successful_write_still_lands_and_leaves_nothing(self) -> None:
+        """The cleanup must not delete what the rename just put in place."""
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory, "settings.json")
+            self.assertTrue(write_json_durably(target, '{"written": true}'))
+            self.assertEqual(json.loads(target.read_text(encoding="utf-8")),
+                             {"written": True})
+            self.assertEqual(leftovers(directory), [])
+
+    def test_cleanup_failure_does_not_mask_the_original_error(self) -> None:
+        """The unlink's own error must not replace what actually went wrong."""
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory, "settings.json")
+
+            def replace(self, other):
+                raise PermissionError("Access is denied")
+
+            def broken_unlink(self, missing_ok=False):
+                raise OSError("the temporary file cannot be removed either")
+
+            with mock.patch.object(Path, "replace", replace), \
+                    mock.patch("desktop_app.storage._REPLACE_PAUSE", 0), \
+                    mock.patch.object(Path, "unlink", broken_unlink):
+                with self.assertRaises(PermissionError):
+                    write_json_durably(target, '{"written": true}')
+
+    def test_the_retry_pause_is_read_when_the_call_is_made(self) -> None:
+        """A default argument froze the value when the def ran.
+
+        ``_replace_with_retry(source, target, attempts=..., pause=...)``
+        looked adjustable and was not: the defaults were evaluated once, so
+        patching the module global changed nothing and the tests that tried to
+        make the retries instant were still paying for real sleeps.
+        """
+        slept = []
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory, "a.tmp")
+            target = Path(directory, "a.json")
+            source.write_text("{}", encoding="utf-8")
+
+            calls = []
+
+            def replace(self, other):
+                calls.append(1)
+                if len(calls) < 3:
+                    raise PermissionError("Access is denied")
+
+            with mock.patch.object(Path, "replace", replace), \
+                    mock.patch("desktop_app.storage.time.sleep", slept.append), \
+                    mock.patch("desktop_app.storage._REPLACE_PAUSE", 0):
+                storage_module._replace_with_retry(source, target)
+
+            self.assertEqual(slept, [0, 0],
+                             f"the patched pause was not used: {slept}")
 
     def test_concurrent_durable_writes_all_land(self) -> None:
         """The case that produced the flake: two threads, one settings file.

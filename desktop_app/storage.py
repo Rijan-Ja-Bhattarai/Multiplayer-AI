@@ -5,6 +5,7 @@ import re
 import tempfile
 import threading
 import time
+from contextlib import suppress
 from pathlib import Path
 from uuid import uuid4
 
@@ -42,7 +43,7 @@ def _fsync_directory(directory):
         os.close(handle)
 
 
-def _replace_with_retry(source, target, attempts=_REPLACE_ATTEMPTS, pause=_REPLACE_PAUSE):
+def _replace_with_retry(source, target, attempts=None, pause=None):
     """Move ``source`` over ``target``, retrying while Windows refuses.
 
     Replacing a file on Windows goes through ``MoveFileEx`` with
@@ -63,10 +64,17 @@ def _replace_with_retry(source, target, attempts=_REPLACE_ATTEMPTS, pause=_REPLA
     write, not a write that went wrong, and the content is identical on
     every attempt.
 
+    The two tunables are read from the module rather than bound as defaults.
+    A default is evaluated once when the ``def`` runs, so patching the module
+    global afterwards changed nothing and the tests that tried to make the
+    retries instant were still paying for real sleeps.
+
     Raises:
         PermissionError: if every attempt was refused, so that a caller
             which needs to know the write did not land still finds out.
     """
+    attempts = _REPLACE_ATTEMPTS if attempts is None else attempts
+    pause = _REPLACE_PAUSE if pause is None else pause
     source = Path(source)
     for attempt in range(attempts):
         try:
@@ -110,11 +118,25 @@ def write_json_durably(path, text):
                                         prefix=path.name + ".", suffix=".tmp")
     os.close(descriptor)
     temporary = Path(name)
-    with temporary.open("w", encoding="utf-8") as handle:
-        handle.write(text)
-        handle.flush()
-        os.fsync(handle.fileno())
-    _replace_with_retry(temporary, path)
+    try:
+        with temporary.open("w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _replace_with_retry(temporary, path)
+    finally:
+        # Only anything left behind is removed, so a successful rename is not
+        # followed by a delete of the path it now occupies. Every failure above
+        # leaves a full copy of the document in the data directory, and nothing
+        # ever sweeps one: no code in the desktop app enumerates that
+        # directory, so a write that keeps failing under a scanner or a sync
+        # client leaves one file per attempt for the life of the install.
+        #
+        # The unlink's own failure is suppressed so it cannot replace the
+        # error that got us here, and unlink(missing_ok) covers the case
+        # where another writer or an installer already removed it.
+        with suppress(OSError):
+            temporary.unlink(missing_ok=True)
     try:
         _fsync_directory(path.parent)
     except OSError:

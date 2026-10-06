@@ -24,8 +24,8 @@ pytest.importorskip("psutil", reason="psutil backs the Resources page")
 
 from PySide6.QtCore import QEasingCurve, QPoint, QPointF, Qt, QTimer  # noqa: E402
 from PySide6.QtGui import QShortcut, QWheelEvent  # noqa: E402
-from PySide6.QtWidgets import (QApplication, QDialog, QFrame, QLabel,  # noqa: E402
-                             QMessageBox, QPushButton)
+from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog, QFrame,  # noqa: E402
+                             QLabel, QMessageBox, QPushButton)
 from PySide6.QtCore import QAbstractAnimation  # noqa: E402
 
 from desktop_app import window as win  # noqa: E402
@@ -304,7 +304,7 @@ def test_the_orbit_respects_the_stored_motion_setting(qt_app, storage) -> None:
 
 def conversation_window(window):
     """A chat with two speakers, so grouping has something to group."""
-    window.navigate(2)
+    window.navigate(win.PAGE_INDEX["conversations"])
     window.agents = [{"id": "local-llama", "kind": "model", "online": True,
                       "provider": "ollama", "model": "llama3"}]
     window.selected = "local-llama"
@@ -513,7 +513,7 @@ def test_hovering_the_rail_does_not_strip_a_workspace_button(qt_app) -> None:
     Checked on a button carrying text rather than the rail's plus, which
     is drawn and so never depended on the button's own colour.
     """
-    from desktop_app.widgets import WorkspaceButton
+    from desktop_app.widgets import Select, WorkspaceButton
 
     button = WorkspaceButton("AB")
     button.set_ink("success")
@@ -2639,10 +2639,40 @@ def test_every_page_can_be_opened(window, index: int) -> None:
 
 
 def test_controls_moved_off_the_providers_page(window) -> None:
-    """Providers holds provider configuration and nothing else."""
-    window.navigate(3)
+    """Providers holds provider configuration and nothing else.
 
-    assert not hasattr(window.stack.currentWidget(), "_holds_settings")
+    This navigated to the literal 3, which is Conversations, so it was
+    asserting that the Conversations page has no settings controls on it, and
+    it passed for a second reason as well: ``_holds_settings`` is set on
+    nothing at all, so the assertion was true of every page. It now points at
+    Providers and asks whether the two pages' controls are in the right
+    places, which is the thing it was written to protect.
+    """
+    window.navigate(win.PAGE_INDEX["providers"])
+    providers = window.stack.currentWidget()
+    assert win.PAGES[win.PAGE_INDEX["providers"]][0] == "Providers"
+    assert not hasattr(providers, "_holds_settings"), (
+        "the marker this test looked for is on no widget, so it asserted "
+        "nothing whatever")
+
+    # Something only this page has, so pointing the test at the wrong page
+    # cannot leave it passing. The eyebrow is the cheapest thing that is
+    # genuinely Providers and not Conversations.
+    eyebrows = {child.text() for child in providers.findChildren(QLabel)}
+    assert "CHOOSE YOUR INTELLIGENCE" in eyebrows, (
+        f"that is not the Providers page; its labels are {sorted(eyebrows)}")
+
+    # The theme picker is a combo box and reduce-motion is a checkbox, so the
+    # two pages are asked about the widget types they actually use.
+    assert window.theme_picker not in providers.findChildren(win.Select), (
+        "the theme picker turned up on the Providers page")
+
+    window.navigate(win.SETTINGS_PAGE)
+    settings_page = window.stack.currentWidget()
+    assert window.reduce_motion in settings_page.findChildren(QCheckBox), (
+        "Reduce animations is not on the Settings page")
+    assert window.theme_picker in settings_page.findChildren(win.Select), (
+        "the theme picker is not on the Settings page")
 
 
 def test_settings_controls_are_on_the_settings_page(window) -> None:
@@ -2751,7 +2781,7 @@ def test_polling_runs_only_while_the_page_is_visible(window) -> None:
     window.navigate(win.RESOURCES_PAGE)
     assert window.resource_timer.isActive()
 
-    window.navigate(0)
+    window.navigate(win.OVERVIEW_PAGE)
     assert not window.resource_timer.isActive()
 
     window.navigate(win.RESOURCES_PAGE)
@@ -2760,7 +2790,7 @@ def test_polling_runs_only_while_the_page_is_visible(window) -> None:
 
 def test_manual_refresh_works_from_any_page(window) -> None:
     """The refresh shortcut updates the meters without navigating."""
-    window.navigate(0)
+    window.navigate(win.OVERVIEW_PAGE)
     window.refresh_resources()
 
     assert window.resource_rows["cpu"][0].text() != "—"

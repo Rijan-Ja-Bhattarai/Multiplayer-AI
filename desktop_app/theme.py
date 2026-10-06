@@ -550,15 +550,6 @@ def _stylesheet(tokens):
         KeyError: if the sheet names a token the palette does not define,
             which is what stops a colour being silently hard-coded.
     """
-
-
-def _stylesheet(tokens):
-    """The stylesheet for one palette.
-
-    Raises:
-        KeyError: if the sheet names a token the palette does not define,
-            which is what stops a colour being silently hard-coded.
-    """
     sheet = _TEMPLATE
     # Only the odd-indexed segments are token names; the even ones are text.
     parts = _TEMPLATE.split("@@")
