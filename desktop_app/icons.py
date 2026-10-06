@@ -13,7 +13,13 @@ BRANDS = frozenset(("ollama", "bionic", "openai", "anthropic", "gemini", "groq",
 
 
 def navigation_icon(name, ink):
-    """Draw a navigation symbol with consistent strokes in the supplied ink color."""
+    """Draw a symbol with consistent strokes in the supplied ink color.
+
+    Named for the navigation set it was built for, but any key draws: the
+    rail's plus is the same stroke weight and rounding as a page icon, and
+    drawing it here keeps it from depending on how one font happens to
+    space that one glyph.
+    """
     pixmap = QPixmap(48, 48)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
@@ -29,7 +35,14 @@ def navigation_icon(name, ink):
             path.lineTo(*point)
         painter.drawPath(path)
 
-    if name == "overview":
+    if name == "plus":
+        # A round-capped cross extends half a stroke past its end points,
+        # so a plus drawn to its nominal bounds sits low and right of where
+        # the eye expects it. Pulled back by the cap so the mark is
+        # optically centred rather than geometrically centred.
+        line((12, 5.6), (12, 18.4))
+        line((5.6, 12), (18.4, 12))
+    elif name == "overview":
         for x, y in ((4, 4), (14, 4), (4, 14), (14, 14)):
             painter.drawRoundedRect(x, y, 6, 6, 1, 1)
     elif name == "agents":

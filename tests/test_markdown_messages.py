@@ -11,6 +11,7 @@ from PySide6.QtGui import QDesktopServices, QFont, QTextTable
 from PySide6.QtWidgets import QApplication
 
 from desktop_app.markdown import MarkdownMessage
+from desktop_app.theme import DARK, color
 
 
 class MarkdownMessageTests(unittest.TestCase):
@@ -40,7 +41,11 @@ class MarkdownMessageTests(unittest.TestCase):
         for text, url in (("Website", "https://example.test"), ("another link", "https://other.test")):
             link_format = document.find(text).charFormat()
             self.assertEqual(link_format.anchorHref(), url)
-            self.assertEqual(link_format.foreground().color().name(), "#ffffff")
+            # Read from the palette rather than naming a colour: a link takes
+            # the agent_title token, and hard-coding its value here made this
+            # test fail every time that token was retuned.
+            self.assertEqual(link_format.foreground().color().name().lower(),
+                             color(DARK, "agent_title").lower())
 
     def test_long_replies_resize_without_clipping_and_remain_selectable(self):
         widget = MarkdownMessage("## Long reply\n\n" + "A sentence that needs to wrap. " * 100)

@@ -1,14 +1,14 @@
 import json
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import QCheckBox, QComboBox, QDialog, QFormLayout, QHBoxLayout, QLineEdit, QPlainTextEdit, QScrollArea, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QCheckBox, QDialog, QFormLayout, QHBoxLayout, QLineEdit, QPlainTextEdit, QScrollArea, QVBoxLayout, QWidget
 
 from network_a2a.adapters import PROVIDERS
 from network_a2a.web_search import validate_search_settings, validate_search_url
 
 from .theme import PROVIDER_NAMES, color
 from .lan import lan_addresses
-from .widgets import action, label
+from .widgets import Select, action, label
 
 
 def _style_error(widget, window):
@@ -48,11 +48,11 @@ class AgentDialog(QDialog):
         form = QFormLayout()
         form.setVerticalSpacing(12)
         self.name = QLineEdit()
-        self.provider = QComboBox()
+        self.provider = Select()
         for key, info in PROVIDER_NAMES.items():
             self.provider.addItem(info[0], key)
         self.provider.setCurrentIndex(self.provider.findData(provider))
-        self.model = QComboBox()
+        self.model = Select()
         self.model.setEditable(True)
         self.model.lineEdit().setPlaceholderText("Model ID, e.g. llama3.2")
         self.models_button = action("Find models", self.find_models)
@@ -76,23 +76,23 @@ class AgentDialog(QDialog):
         form.addRow("API key", self.key)
         form.addRow("Instructions", self.system)
         body_layout.addLayout(form)
-        body_layout.addWidget(self.autostart)
-        body_layout.addWidget(self.insecure)
+        body_layout.addWidget(self.autostart, 0, Qt.AlignmentFlag.AlignLeft)
+        body_layout.addWidget(self.insecure, 0, Qt.AlignmentFlag.AlignLeft)
         self.vision = QCheckBox("Enable image support for this model")
-        body_layout.addWidget(self.vision)
+        body_layout.addWidget(self.vision, 0, Qt.AlignmentFlag.AlignLeft)
         body_layout.addWidget(label("Select a vision-capable model to understand images and scanned PDFs. Text PDFs work with any model.", "muted", True))
         body_layout.addWidget(label("Internet access", "heading"))
         self.internet = QCheckBox("Allow this model to search the web")
-        body_layout.addWidget(self.internet)
+        body_layout.addWidget(self.internet, 0, Qt.AlignmentFlag.AlignLeft)
         self.search_settings = QWidget()
         search_layout = QVBoxLayout(self.search_settings)
         search_layout.setContentsMargins(0, 0, 0, 0)
         search_form = QFormLayout()
         self.search_form = search_form
-        self.search_provider = QComboBox()
+        self.search_provider = Select()
         self.search_provider.addItem("Ollama web search · no server setup", "ollama")
         self.search_provider.addItem("SearXNG · use your own server", "searxng")
-        self.search_mode = QComboBox()
+        self.search_mode = Select()
         self.search_mode.addItem("Automatic · when the model needs outside information", "auto")
         self.search_mode.addItem("Always · search for every question", "always")
         self.search_url = QLineEdit()
@@ -106,7 +106,7 @@ class AgentDialog(QDialog):
         search_form.addRow("SearXNG server", self.search_url)
         search_layout.addLayout(search_form)
         self.search_insecure = QCheckBox("Allow SearXNG over HTTP on a trusted LAN")
-        search_layout.addWidget(self.search_insecure)
+        search_layout.addWidget(self.search_insecure, 0, Qt.AlignmentFlag.AlignLeft)
         self.search_help = label("", "muted", True)
         self.search_help.setTextFormat(Qt.TextFormat.RichText)
         self.search_help.setOpenExternalLinks(True)
@@ -296,6 +296,59 @@ class AgentDialog(QDialog):
                             success=success, failure=failure)
 
 
+def parse_invitation(text):
+    """Read an invitation object into the four values a join needs.
+
+    Returns ``(url, token, allow_insecure, conversation_id)``. Raises
+    ValueError carrying a sentence meant to be shown to the reader as-is.
+
+    This lives on its own, not inside the dialog, because the Workspaces page
+    and the dialog both have to agree on exactly what counts as an
+    invitation. When the page opened the dialog instead of doing the work
+    itself, the fields on the page were decoration and the rules had two
+    homes; a rule stated once cannot disagree with itself.
+
+    Every field is checked here rather than subscripted. A missing one raised
+    KeyError, which the page rendered as ``str(exc)``, so a reader who pasted
+    an invitation without a url was told ``'url'``. A wrongly typed one was
+    worse: the page put the int into a QLineEdit and the reader saw a PySide6
+    signature dump. ``allow_insecure`` had the quietest failure of the three,
+    because ``bool("false")`` is True, so a paste saying ``"allow_insecure":
+    "false"`` turned a wss:// requirement into a permitted ws:// one.
+    """
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            "Paste the complete invitation JSON, including its url, token, "
+            "and version fields.") from exc
+    if not isinstance(data, dict):
+        raise ValueError("Paste the invitation object beginning with { and ending with }")
+    # isinstance rather than != 1, because True == 1 and a paste saying
+    # "version": true was accepted as version one.
+    version = data.get("version")
+    if not isinstance(version, int) or isinstance(version, bool) or version != 1:
+        raise ValueError("Unsupported invitation version")
+
+    url = data.get("url")
+    if not isinstance(url, str) or not url.strip():
+        raise ValueError("This invitation has no relay address in it")
+    token = data.get("token")
+    if not isinstance(token, str) or not token.strip():
+        raise ValueError("This invitation has no device token in it")
+
+    allow_insecure = data.get("allow_insecure", False)
+    if not isinstance(allow_insecure, bool):
+        raise ValueError("The invitation's allow_insecure field must be true or false")
+
+    conversation_id = data.get("conversation_id")
+    if conversation_id is not None and (not isinstance(conversation_id, str)
+                                        or not conversation_id.startswith("conversation-")
+                                        or not conversation_id.removeprefix("conversation-").isalnum()):
+        raise ValueError("Use the complete shared conversation invitation")
+    return (url, token, allow_insecure, conversation_id)
+
+
 class JoinDialog(QDialog):
     def __init__(self, window):
         super().__init__(window)
@@ -322,7 +375,7 @@ class JoinDialog(QDialog):
         layout.addWidget(label("Device token", "muted"))
         layout.addWidget(self.token)
         self.insecure = QCheckBox("This is a trusted LAN connection (allow ws://)")
-        layout.addWidget(self.insecure)
+        layout.addWidget(self.insecure, 0, Qt.AlignmentFlag.AlignLeft)
         self.error = label("", "muted", True)
         self.error.setStyleSheet("color:#f38a8e")
         layout.addWidget(self.error)
@@ -335,19 +388,11 @@ class JoinDialog(QDialog):
         try:
             conversation_id = None
             if self.invitation.toPlainText().strip():
-                data = json.loads(self.invitation.toPlainText())
-                if not isinstance(data, dict):
-                    raise ValueError("Paste the invitation object beginning with { and ending with }")
-                if data.get("version") != 1:
-                    raise ValueError("Unsupported invitation version")
-                self.url.setText(data["url"])
-                self.token.setText(data["token"])
-                self.insecure.setChecked(bool(data.get("allow_insecure")))
-                conversation_id = data.get("conversation_id")
-                if conversation_id is not None and (not isinstance(conversation_id, str)
-                        or not conversation_id.startswith("conversation-")
-                        or not conversation_id.removeprefix("conversation-").isalnum()):
-                    raise ValueError("Use the complete shared conversation invitation")
+                url, token, allow_insecure, conversation_id = parse_invitation(
+                    self.invitation.toPlainText())
+                self.url.setText(url)
+                self.token.setText(token)
+                self.insecure.setChecked(allow_insecure)
             if len(self.token.text().strip()) < 32:
                 raise ValueError("Enter the device token from your invitation")
             self.connect_button.setEnabled(False)
@@ -376,8 +421,11 @@ class JoinDialog(QDialog):
         except (ValueError, KeyError, TypeError) as exc:
             self.connect_button.setEnabled(True)
             self.connect_button.setText("Join workspace")
-            self.error.setText(str(exc) if isinstance(exc, ValueError) and not isinstance(exc, json.JSONDecodeError)
-                               else "Paste the complete invitation JSON, including its url, token, and version fields.")
+            # parse_invitation already turns a malformed paste into a
+            # sentence for the reader, so only a missing field is left.
+            self.error.setText(
+                str(exc) if isinstance(exc, ValueError)
+                else "Paste the complete invitation JSON, including its url, token, and version fields.")
 
 
 class InviteDialog(QDialog):
@@ -403,14 +451,14 @@ class InviteDialog(QDialog):
         self.lan = QCheckBox("Share this relay on my local network")
         self.lan.setChecked(True)
         self.url = QLineEdit()
-        self.network_address = QComboBox()
+        self.network_address = Select()
         for name, ip in lan_addresses():
             self.network_address.addItem(f"{name} · {ip}", ip)
         address = self.network_address.currentData() or "YOUR_LAN_IP"
         self.url.setText(f"ws://{address}:{window.port}/connect")
         layout.addWidget(label("New device identity", "muted"))
         layout.addWidget(self.name)
-        layout.addWidget(self.lan)
+        layout.addWidget(self.lan, 0, Qt.AlignmentFlag.AlignLeft)
         layout.addWidget(label("Host network · choose the Wi-Fi or hotspot connected to the other device", "muted", True))
         layout.addWidget(self.network_address)
         self.network_address.currentIndexChanged.connect(self.select_network)
