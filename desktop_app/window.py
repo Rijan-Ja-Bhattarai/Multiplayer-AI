@@ -508,10 +508,11 @@ class MainWindow(QMainWindow):
         self.welcome_join = action("  Join a workspace", self.add_workspace, name="ghost")
         self.welcome_connect.setToolTip(
             "Connect a model agent to this workspace")
-        # This opens a menu offering both routes rather than going straight
-        # to the join dialog, so the tooltip says so.
+        # Opens the Workspaces page, where both routes sit as cards. It used to
+        # open a menu and then a dialog, and the note explaining that was left
+        # behind when the menu and the dialog both went.
         self.welcome_join.setToolTip(
-            "Create a new workspace, or join someone else's with an invitation")
+            "Open Workspaces, where you can create a workspace or join one with an invitation")
         choices = QHBoxLayout()
         choices.setSpacing(10)
         choices.addWidget(self.welcome_connect)
@@ -2320,10 +2321,14 @@ class MainWindow(QMainWindow):
             "Host network · choose the Wi-Fi or hotspot the other device is on",
             "muted", True))
         self.workspace_invite_network = Select()
+        # What this card last wrote into the address box, so a later refresh
+        # can tell its own address from one the reader typed.
+        self._invite_generated = ""
         for name, ip in lan_addresses():
             self.workspace_invite_network.addItem(f"{name} · {ip}", ip)
         self.workspace_invite_network.currentIndexChanged.connect(
             self.workspace_invite_address)
+        self.workspace_invite_lan.toggled.connect(self.workspace_invite_address)
         column.addWidget(self.workspace_invite_network)
         column.addWidget(label("Address the other device can reach", "muted", True))
         self.workspace_invite_url = QLineEdit()
@@ -2488,6 +2493,11 @@ class MainWindow(QMainWindow):
         # on top of the first attempt's success.
         self.workspace_join_button.setEnabled(
             self.ready and not self.workspace_busy["join"])
+        # The relay's port is not known when this card is built, so the
+        # address it generated first carried port 0 and the invitation would
+        # have advertised it. Harmless to repeat here: a typed address is
+        # never overwritten.
+        self.workspace_invite_address()
         self.workspace_preview.setEnabled(False)
         # The button and preview follow the runtime here, but the name hint
         # belongs to typing, so only that one line is re-derived.
@@ -2647,11 +2657,42 @@ class MainWindow(QMainWindow):
         self.workspace_invite_address()
 
     def workspace_invite_address(self):
-        """Point the URL at whichever network is selected, while LAN is on."""
-        if not self.workspace_invite_lan.isChecked():
-            return
+        """Keep the address in step with the network, and clear it when LAN goes off.
+
+        Written only when the text is empty or is an address this card
+        generated. A relay address the reader typed in is theirs: turning off
+        local sharing is a statement about this machine, and a WSS relay
+        somebody reached for on purpose is not something to overwrite.
+
+        That is also what makes the relay's port arriving late harmless. The
+        card is built before the runtime is up, so the address it wrote first
+        carried port 0, and create_invitation submits whatever is in the box.
+        Tracking the last value this card wrote is what lets the real port
+        replace it on the next refresh without ever touching a typed one.
+
+        The toggle used to be connected to nothing at all, so turning it off
+        changed neither the address nor the network picker: the box kept
+        advertising the ws:// address while the invitation it produced was
+        made with LAN sharing off, and the picker stayed live doing nothing.
+        """
+        sharing = self.workspace_invite_lan.isChecked()
+        # The picker only means something while the address is taken from it.
+        self.workspace_invite_network.setEnabled(sharing)
+        current = self.workspace_invite_url.text()
+        ours = not current or current == self._invite_generated
+        if sharing:
+            if not ours:
+                return
+            generated = self.generated_lan_address()
+            self._invite_generated = generated
+            self.workspace_invite_url.setText(generated)
+        elif current == self._invite_generated:
+            self.workspace_invite_url.clear()
+
+    def generated_lan_address(self):
+        """The ws:// address this card would generate right now."""
         address = self.workspace_invite_network.currentData() or "YOUR_LAN_IP"
-        self.workspace_invite_url.setText(f"ws://{address}:{self.port}/connect")
+        return f"ws://{address}:{self.port}/connect"
 
     def create_invitation(self):
         """Make the invitation from the page, and show it here.

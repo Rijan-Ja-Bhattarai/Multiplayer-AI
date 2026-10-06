@@ -211,6 +211,38 @@ def test_readiness_hands_the_launch_screen_over(monkeypatch, startup_flow):
     splash.dismiss.assert_not_called()
 
 
+def test_the_startup_only_takes_ready_as_readiness(monkeypatch, startup_flow):
+    """Every other signal used to be treated as readiness.
+
+    runtime_ready was in the else of the fatal branch, so workspace, agents,
+    pending_cleanup and notice all counted as "the network is usable". Only
+    the ready event says that, and it is the signal the card now needs before
+    it will leave on the floor.
+    """
+    storage, app, lock, window, messages = startup_flow
+    handlers = []
+
+    class Signal:
+        def connect(self, handler):
+            handlers.append(handler)
+
+    window.network.event = Signal()
+    assert startup.main() == 0
+
+    splash = startup.LaunchScreen.return_value
+    splash.dismissed = False
+    for event, data in (("workspace", {"name": "Mine", "id": "w"}),
+                        ("agents", {"agents": [], "self": "d", "connected": True}),
+                        ("pending_cleanup", {"credentials": 0, "files": 0}),
+                        ("notice", "something")):
+        handlers[-1](event, data)
+        assert not splash.runtime_ready.called, (
+            f"a {event!r} signal was taken as readiness")
+
+    handlers[-1]("ready", {"port": 1234, "device_id": "device-1"})
+    splash.runtime_ready.assert_called_once_with()
+
+
 def test_the_launch_screen_leaves_even_if_the_runtime_was_already_up(monkeypatch, startup_flow):
     """A runtime that reported ready before the handler connected.
 

@@ -89,7 +89,11 @@ def main():
                     splash.set_status(status)
                 if event == "fatal":
                     splash.dismiss()
-                else:
+                elif event == "ready":
+                    # Only this event says the network is usable. Calling it
+                    # for every other signal made a settled status look like
+                    # readiness, and a card could hand over on a report that
+                    # never mentioned the network at all.
                     splash.runtime_ready()
 
             window.network.event.connect(hand_over)

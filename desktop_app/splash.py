@@ -209,6 +209,8 @@ class LaunchScreen(QWidget):
         column.addWidget(self.status, 0, Qt.AlignmentFlag.AlignHCenter)
 
         self.shown_at = 0.0
+        # Set by runtime_ready, which only the runtime's ready event calls.
+        self._ready = False
         # The fade currently running, so a second one can stop it. It was
         # written and never read, which is why two of them could drive the
         # opacity at once.
@@ -235,7 +237,21 @@ class LaunchScreen(QWidget):
         self.fade_to(1.0, FADE_MS, QEasingCurve.Type.OutCubic)
 
     def runtime_ready(self):
-        """The real work is done. Leave when the hold is also over."""
+        """The runtime has reported that it is up.
+
+        Recorded rather than merely acted on. Normal dismissal now needs this
+        as well as a settled status, because a settled status only says the
+        last report arrived, and the report that matters is the one saying the
+        network is usable. Standing in for it with whatever signal happened to
+        be last is how a card hands over to a window whose controls are all
+        disabled because the runtime never said it was ready.
+
+        A runtime that was already up before this connected will never fire
+        it, and that card waits out its hard cap instead. Measured startup
+        here is about a quarter of a second against a window that is still
+        being built, so that case is rare, and the cap is what covers it.
+        """
+        self._ready = True
         self.dismiss_when_floored()
 
     def set_status(self, status):
@@ -264,7 +280,16 @@ class LaunchScreen(QWidget):
         QTimer.singleShot(120, self.dismiss_when_floored)
 
     def _settled(self):
-        """Whether there is anything left worth waiting to hear about."""
+        """Whether the runtime is up and there is nothing left worth hearing.
+
+        Both, deliberately. Settled on its own is the status having seen its
+        last expected signal; ready on its own is the network being usable but
+        the agent list still arriving. Either alone can leave a card covering
+        an app that is not finished, which is the one failure this screen is
+        not allowed to have.
+        """
+        if not self._ready:
+            return False
         status = getattr(self, "_status", None)
         return status is None or status.settled
 

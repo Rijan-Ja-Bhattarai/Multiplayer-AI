@@ -1031,20 +1031,97 @@ def test_a_refused_invitation_is_reported_on_the_card(window) -> None:
     assert not window.workspace_join_line.message.text()
 
 
-def test_turning_off_lan_stops_the_card_changing_the_address(window) -> None:
-    """The URL is the LAN address while LAN is on, and the reader's when not."""
+def test_turning_off_lan_clears_the_address_the_card_generated(window) -> None:
+    """A stale ws:// address invites a device to an address it cannot reach.
+
+    This used to assert the opposite, that the address survives turning LAN
+    off. It was written when the toggle drove nothing, so it recorded the
+    absence of behaviour as though it were the requirement. With the toggle
+    connected, leaving the address behind is the bug: the invitation is made
+    with LAN sharing off and still advertises the LAN address.
+    """
     window.ready = True
     window.port = 1234
     window.workspace_invite_network.setCurrentIndex(0)
     window.workspace_invite_lan.setChecked(True)
-    window.workspace_invite_address()
-    lan_url = window.workspace_invite_url.text()
-    assert lan_url.startswith("ws://") and ":1234/connect" in lan_url
+    assert window.workspace_invite_url.text().startswith("ws://")
+    generated = window.workspace_invite_url.text()
 
     window.workspace_invite_lan.setChecked(False)
-    window.workspace_invite_address()
-    assert window.workspace_invite_url.text() == lan_url, (
-        "the address changed even though LAN sharing was turned off")
+
+    assert not window.workspace_invite_url.text(), (
+        f"the generated address {generated!r} is still advertised after LAN "
+        "sharing was turned off")
+
+
+def test_turning_off_lan_keeps_an_address_the_reader_typed(window) -> None:
+    """Turning off local sharing is a statement about this machine.
+
+    A WSS relay somebody reached for on purpose is not this card's address
+    and must survive the toggle, or the only way to use a relay is to turn LAN
+    sharing on and off again afterwards.
+    """
+    window.ready = True
+    window.port = 1234
+    window.workspace_invite_lan.setChecked(True)
+    window.workspace_invite_url.setText("wss://relay.example.com/connect")
+
+    window.workspace_invite_lan.setChecked(False)
+
+    assert window.workspace_invite_url.text() == "wss://relay.example.com/connect", (
+        "turning off LAN sharing erased a relay address the reader entered")
+
+
+def test_the_network_picker_is_disabled_while_lan_is_off(window) -> None:
+    """It only means something while the address is being taken from it."""
+    window.ready = True
+    assert window.workspace_invite_network.isEnabled() is True, (
+        "the picker starts disabled, so this proves nothing")
+
+    window.workspace_invite_lan.setChecked(False)
+    assert window.workspace_invite_network.isEnabled() is False, (
+        "the network picker is still live while the address it feeds is unused")
+
+    window.workspace_invite_lan.setChecked(True)
+    assert window.workspace_invite_network.isEnabled() is True
+
+
+def test_an_address_from_an_older_port_is_replaced_not_treated_as_the_readers_own(window) -> None:
+    """The relay's port is not known when the card is built.
+
+    The card wrote ws://...:0 on the first pass and create_invitation submits
+    whatever is in the box, so without a refresh the invitation advertised
+    port 0. A refresh has to tell that stale address from one the reader
+    typed, or it would either keep the bad port or overwrite their relay.
+    """
+    window.ready = True
+    window.port = 1234
+    assert window.workspace_invite_url.text().endswith(":0/connect"), (
+        "this only means anything if the first address really did carry port 0")
+
+    window.network_event("ready", {"port": 4321, "device_id": "device-1"})
+    window.render_workspace_page()
+
+    assert window.workspace_invite_url.text().endswith(":4321/connect"), (
+        f"the address still reads {window.workspace_invite_url.text()!r} after "
+        "the relay's port arrived")
+
+    window.workspace_invite_url.setText("wss://relay.example.com/connect")
+    window.render_workspace_page()
+    assert window.workspace_invite_url.text() == "wss://relay.example.com/connect", (
+        "a refresh overwrote a relay address the reader entered")
+
+
+def test_the_welcome_join_tooltip_describes_the_page(window) -> None:
+    """It used to say it opened a menu, which it has not since 7611fa8."""
+    window.welcome_join.show()
+    tooltip = window.welcome_join.toolTip()
+    assert "menu" not in tooltip.lower(), (
+        f"the tooltip still describes a menu: {tooltip!r}")
+    assert "dialog" not in tooltip.lower(), (
+        f"the tooltip still describes a dialog: {tooltip!r}")
+    assert "Workspaces" in tooltip, (
+        f"the tooltip does not say where it goes: {tooltip!r}")
 
 
 def test_the_create_and_join_cards_look_different(window) -> None:
@@ -1252,15 +1329,24 @@ def test_a_loopback_http_searxng_needs_no_lan_box(window) -> None:
         f"{window.model_error_line.message.text()!r}")
 
 
-@pytest.mark.parametrize("url, because", [
-    ("https://user:pw@search.example.com", "login details"),
-    ("http://search.example.com?format=json", "a query string"),
-    ("http://search.example.com#top", "a fragment"),
-    ("http://search.example.com:99999", "an impossible port"),
-    ("http://", "no host at all"),
+@pytest.mark.parametrize("url, expected", [
+    # Each case names the part of the address it is about, and the URL is
+    # https throughout so the trusted-LAN rule cannot be what refused it.
+    # Over http, all three of these produce the same sentence as a missing
+    # host does, so a case could pass with its own rule deleted.
+    ("https://user:pw@search.example.com", "Remove any login details"),
+    ("https://search.example.com?format=json", "?search options"),
+    ("https://search.example.com#top", "#section"),
+    ("https://search.example.com:99999", "address and port"),
+    ("https://", "starting with https://"),
 ])
-def test_a_searxng_address_the_runtime_would_refuse(window, url, because) -> None:
-    """The page asks the runtime, so it cannot drift from it any more."""
+def test_a_searxng_address_the_runtime_would_refuse(window, url, expected) -> None:
+    """The page asks the runtime, so it cannot drift from it any more.
+
+    The expected text is the runtime's own, so a case fails if the rule that
+    was meant to catch this address stops catching it, and not merely if
+    something refuses the save.
+    """
     window.ready = True
     window.add_agent("ollama")
     window.model_internet.setChecked(True)
@@ -1272,9 +1358,11 @@ def test_a_searxng_address_the_runtime_would_refuse(window, url, because) -> Non
     window.command = lambda name, *args, **kwargs: sent.append(name)
     window.save_model()
 
-    assert not sent, f"a save was attempted with {because} in the address"
-    assert window.model_error_line.message.text(), (
-        f"{because} was refused with nothing said about it")
+    assert not sent, f"a save was attempted with {url!r}, which the runtime refuses"
+    message = window.model_error_line.message.text()
+    assert expected in message, (
+        f"{url!r} was refused with {message!r}, which does not mention "
+        f"{expected!r}")
 
 
 def test_a_blank_search_key_is_allowed_when_editing_a_saved_profile(window) -> None:
@@ -1793,6 +1881,98 @@ def test_the_page_opens_usable_once_the_runtime_is_up(window) -> None:
 from desktop_app.splash import LAUNCH_CAP_MS, LAUNCH_FLOOR_MS  # noqa: E402
 
 # --- the launch screen --------------------------------------------------
+
+
+def test_a_settled_status_alone_is_not_enough_to_leave(qt_app) -> None:
+    """The agent list arriving is not the network being usable.
+
+    A settled status only means the last expected report arrived. Letting it
+    stand in for readiness is how a card hands over to a window whose controls
+    are all disabled, because the runtime never said it was ready.
+
+    Asserted on the predicate rather than on the clock. Timing it needed a
+    MainWindow for the handover, and a MainWindow's relay polls every three
+    seconds and starves the card's own 120ms poll, so the card never left on
+    time under either condition and the test could not tell them apart.
+    """
+    from desktop_app.splash import LaunchScreen, StartupStatus
+
+    status = StartupStatus()
+    status.observe("agents", {"agents": [], "connected": False})
+    assert status.settled, "this only means anything if the agents event settles it"
+
+    screen = LaunchScreen(DARK)
+    screen.set_status(status)
+    screen.begin(on_done=lambda: None)
+
+    assert screen._ready is False, "nothing has said the runtime is up"
+    assert screen._settled() is False, (
+        "a settled status alone was treated as readiness, so the card can "
+        "hand over to a window whose controls are all disabled")
+
+
+def test_a_ready_event_alone_is_not_enough_to_leave(qt_app) -> None:
+    """Ready with the agent list still to come is not finished either."""
+    from desktop_app.splash import LaunchScreen, StartupStatus
+
+    status = StartupStatus()
+    status.observe("ready", {"port": 1})
+    assert not status.settled, "a ready event must not settle the status"
+
+    screen = LaunchScreen(DARK)
+    screen.set_status(status)
+    screen.begin(on_done=lambda: None)
+    screen.runtime_ready()
+
+    assert screen._ready is True
+    assert screen._settled() is False, (
+        "a ready event alone was treated as finished, so the card can leave "
+        "before the agent list has arrived")
+
+
+def test_ready_and_settled_are_both_needed(qt_app) -> None:
+    """The ordinary case, and the only one that leaves on the floor."""
+    from desktop_app.splash import LaunchScreen, StartupStatus
+
+    status = StartupStatus()
+    status.observe("ready", {"port": 1})
+    status.observe("agents", {"agents": [], "connected": False})
+
+    screen = LaunchScreen(DARK)
+    screen.set_status(status)
+    screen.begin(on_done=lambda: None)
+    screen.runtime_ready()
+
+    assert screen._settled() is True
+
+
+def test_the_card_still_leaves_at_the_cap_without_readiness(qt_app) -> None:
+    """The one failure this screen is not allowed to have.
+
+    A runtime that reports ready and then goes quiet must not hold a card over
+    an app that is entirely usable, and neither must one that never reported
+    ready at all. The cap is what covers both.
+    """
+    from desktop_app.splash import LAUNCH_CAP_MS, LAUNCH_FLOOR_MS, LaunchScreen, StartupStatus
+
+    status = StartupStatus()
+    status.observe("agents", {"agents": [], "connected": False})
+    assert status.settled, "this only means anything if the agents event settles it"
+    assert not any("Network ready" in fact for fact in status.facts), (
+        "a ready event was recorded after all, so this case is not testing "
+        "what it claims")
+
+    screen = LaunchScreen(DARK)
+    screen.set_status(status)
+    screen.begin(on_done=lambda: None)
+    screen.dismiss_when_floored()
+
+    pump(qt_app, (LAUNCH_FLOOR_MS + 0.3) / 1000)
+    assert not screen.dismissed, (
+        "the card left on a settled status alone, with no ready event")
+
+    pump(qt_app, LAUNCH_CAP_MS / 1000 + 0.6)
+    assert screen.dismissed, "the hard cap did not release it"
 
 
 @pytest.mark.parametrize("events,expected,warnings", [
