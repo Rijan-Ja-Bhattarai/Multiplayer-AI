@@ -585,7 +585,7 @@ def test_the_create_panel_refuses_a_name_it_would_be_rejected_for(window) -> Non
             f"the submit button")
 
     window.workspace_name_input.setText("x" * 81)
-    assert window.workspace_error.text(), "the refusal was not explained"
+    assert window.workspace_name_line.message.text(), "the refusal was not explained"
 
 
 def test_a_refused_create_reports_on_the_page_not_in_a_toast(window, qt_app) -> None:
@@ -601,7 +601,7 @@ def test_a_refused_create_reports_on_the_page_not_in_a_toast(window, qt_app) -> 
 
     window.create_workspace()
 
-    assert window.workspace_error.text(), "nothing was reported anywhere"
+    assert window.workspace_name_line.message.text(), "nothing was reported anywhere"
     assert not shown, f"the message went to a toast instead: {shown}"
 
 
@@ -679,8 +679,8 @@ def test_a_bad_invitation_is_reported_on_the_page(window, paste, expected) -> No
     window.join_workspace()
 
     assert not sent, "a join was attempted with an unusable invitation"
-    assert expected in window.workspace_error.text(), (
-        f"the page says {window.workspace_error.text()!r}")
+    assert expected in window.workspace_join_line.message.text(), (
+        f"the page says {window.workspace_join_line.message.text()!r}")
     assert window.workspace_join_button.text() == "Join workspace"
 
 
@@ -693,7 +693,7 @@ def test_a_too_short_token_is_refused_on_the_page(window) -> None:
     window.join_workspace()
 
     assert not sent
-    assert "device token" in window.workspace_error.text()
+    assert "device token" in window.workspace_join_line.message.text()
 
 
 def test_a_failed_join_leaves_the_page_usable(window) -> None:
@@ -715,7 +715,7 @@ def test_a_failed_join_leaves_the_page_usable(window) -> None:
 
     assert window.workspace_join_button.text() == "Join workspace"
     assert window.workspace_join_button.isEnabled() is True
-    assert "refused" in window.workspace_error.text()
+    assert "refused" in window.workspace_join_line.message.text()
 
 
 def test_joining_before_the_network_is_ready_is_refused(window) -> None:
@@ -726,7 +726,233 @@ def test_joining_before_the_network_is_ready_is_refused(window) -> None:
     window.join_workspace()
 
     assert not sent, "a join was attempted before the network was ready"
-    assert "still starting" in window.workspace_error.text()
+    assert "still starting" in window.workspace_join_line.message.text()
+
+
+def test_each_card_keeps_its_own_message(window) -> None:
+    """A failure in one card never appears in, or clears, another.
+
+    There was one line shared by the create and join forms, so a join error
+    was painted inside the create card, and creating a workspace wrote its
+    message to the same place a join was reading.
+    """
+    window.ready = True
+    window.command = lambda name, *args, **kwargs: None
+
+    window.set_card_message(window.workspace_join_line, "the relay refused the token")
+    assert window.workspace_join_line.message.text() == "the relay refused the token"
+    assert not window.workspace_create_line.message.text(), (
+        "a join failure showed in the create card")
+    assert not window.workspace_name_line.message.text()
+
+    window.set_card_message(window.workspace_create_line, "that name is taken")
+    assert window.workspace_create_line.message.text() == "that name is taken"
+    assert window.workspace_join_line.message.text() == "the relay refused the token"
+
+
+def test_a_new_page_starts_with_the_stored_message(window, qt_app) -> None:
+    """A card built after a failure shows that failure, not an empty line.
+
+    Anything held only by the widget that displayed it is lost when the page
+    is torn down and built again, so the message is kept in the window's
+    state and each new line is given it as it is constructed.
+    """
+    window.ready = True
+    window.set_card_message(window.workspace_join_line, "the relay refused the token")
+
+    # The page is held here because a page built and dropped takes its
+    # widgets with it, which would delete the lines being asserted on.
+    rebuilt = window.workspaces_page()
+    qt_app.processEvents()
+
+    line = window.card_lines["workspace:join"]
+    assert line.message.text() == "the relay refused the token"
+    # isHidden rather than isVisible: this page was never added to the
+    # stack, so nothing in it is visible yet, and that is not what is
+    # being checked here.
+    assert line.isHidden() is False, "the line is still collapsed"
+    assert window.card_messages["workspace:join"] == (
+        "the relay refused the token", "error")
+    assert rebuilt is not None
+
+
+def test_a_card_rebuild_keeps_the_message(window, qt_app) -> None:
+    """The live rebuild path: a grid cleared and filled again.
+
+    This is what the agents page does on every poll, and it is why the
+    message cannot live in the card.
+    """
+    window.ready = True
+    window.set_card_message(window.workspace_join_line, "the relay refused the token")
+
+    window.refresh_card_messages()
+    qt_app.processEvents()
+
+    line = window.card_lines["workspace:join"]
+    assert line.message.text() == "the relay refused the token"
+
+
+def test_the_agents_poll_does_not_clear_a_message(window, qt_app) -> None:
+    """The reported bug: a message lasted about three seconds.
+
+    The runtime polls agents every three seconds, each poll re-ran
+    render_workspace_page, which ended in the name handler, and that
+    handler owned the single shared line. So a failure was erased by the
+    next poll whether or not anything had been retried.
+    """
+    window.ready = True
+    window.set_card_message(window.workspace_join_line, "the relay refused the token")
+    window.set_card_message(window.workspace_create_line, "that name is taken")
+
+    for _ in range(3):
+        window.network_event("agents", {"agents": [], "self": window.identity,
+                                        "connected": False})
+        qt_app.processEvents()
+
+    assert window.workspace_join_line.message.text() == "the relay refused the token"
+    assert window.workspace_create_line.message.text() == "that name is taken"
+
+
+def test_no_runtime_event_clears_a_message(window, qt_app) -> None:
+    """Every event that redraws the page must leave messages alone.
+
+    The workspace event does not reach render_workspace_page today, so this
+    drives render_workspace_page itself and also the events that do. The
+    requirement is about the render, not about which event happens to call
+    it, because a poll is free to start calling it tomorrow.
+    """
+    window.ready = True
+    window.set_card_message(window.workspace_join_line, "the relay refused the token")
+    window.set_card_message(window.workspace_create_line, "that name is taken")
+
+    window.render_workspace_page()
+    window.render_agents()
+    window.network_event("agents", {"agents": [], "self": window.identity,
+                                    "connected": False})
+    window.network_event("workspace", {
+        "id": window.workspace_id, "name": "Lab", "remote": False,
+        "self": window.identity, "port": 1234,
+        "history_directory": str(window.storage.directory)})
+    qt_app.processEvents()
+
+    assert window.workspace_join_line.message.text() == "the relay refused the token"
+    assert window.workspace_create_line.message.text() == "that name is taken"
+
+
+def test_typing_a_name_does_not_clear_a_create_failure(window) -> None:
+    """The name rule and the create outcome are different messages.
+
+    They shared one line, so typing after a failure replaced what the
+    runtime said with the name-length hint.
+    """
+    window.ready = True
+    window.set_card_message(window.workspace_create_line, "that name is taken")
+
+    window.workspace_name_input.setText("Research lab")
+    assert window.workspace_create_line.message.text() == "that name is taken"
+
+    window.workspace_name_input.setText("x" * 81)
+    assert window.workspace_create_line.message.text() == "that name is taken", (
+        "typing a name replaced a real failure with the name rule")
+    assert window.workspace_name_line.message.text(), (
+        "but the name rule itself was not shown either")
+
+
+def test_dismissing_clears_one_message_and_leaves_the_others(window, qt_app) -> None:
+    window.ready = True
+    window.set_card_message(window.workspace_join_line, "the relay refused the token")
+    window.set_card_message(window.workspace_create_line, "that name is taken")
+
+    window.workspace_join_line.dismiss.click()
+    qt_app.processEvents()
+
+    assert not window.workspace_join_line.message.text()
+    assert not window.workspace_join_line.isVisible()
+    assert window.workspace_create_line.message.text() == "that name is taken", (
+        "dismissing the join message also cleared the create message")
+
+
+def test_trying_again_replaces_the_message_it_is_replacing(window) -> None:
+    """The outcome line shows the newest outcome, never a stale one.
+
+    A failure left on screen while a second attempt is already under way
+    tells the reader the attempt failed when it has not been tried yet.
+    """
+    window.ready = True
+    window.workspace_invitation.setPlainText("")
+    window.workspace_token.setText("t" * 40)
+    window.workspace_relay.setText("wss://relay.example.com/connect")
+
+    callbacks = {}
+    window.command = lambda name, *args, **kwargs: callbacks.update(kwargs)
+    window.join_workspace()
+    callbacks["failure"]("The relay refused the token")
+    assert window.workspace_join_line.message.text() == "The relay refused the token"
+
+    window.join_workspace()
+
+    assert window.workspace_join_line.message.text() != "The relay refused the token", (
+        "the previous failure was still showing over a fresh attempt")
+    assert "Contacting the relay" in window.workspace_join_line.message.text()
+
+
+def test_trying_again_clears_a_failure_even_when_it_needs_no_message(window) -> None:
+    """The clear happens because the button was pressed, not as a side effect.
+
+    A retry that resolves without a message of its own must still remove the
+    last failure, or it hangs over the form forever.
+    """
+    window.ready = True
+    window.workspace_name_input.setText("Research lab")
+    window.set_card_message(window.workspace_create_line, "that name is taken")
+    sent = []
+    window.command = lambda name, *args, **kwargs: sent.append(name)
+
+    window.create_workspace()
+
+    assert not window.workspace_create_line.message.text(), (
+        "a previous failure stayed on screen after the button was pressed")
+    assert not window.card_messages.get("workspace:create")
+
+
+def test_a_message_line_costs_nothing_when_empty(window, qt_app) -> None:
+    """An empty line must not leave a band of space on every card."""
+    for line in (window.workspace_name_line, window.workspace_create_line,
+                 window.workspace_join_line):
+        assert line.isVisible() is False
+        assert not line.message.text()
+
+
+def test_a_message_line_is_out_of_the_layout_when_empty(window) -> None:
+    """An empty line must not leave a band of space on every card.
+
+    Checked through the layout rather than isVisible, because a page that
+    was never shown has nothing visible in it; what matters is that the line
+    contributes no height while it has nothing to say.
+    """
+    for line in (window.workspace_name_line, window.workspace_create_line,
+                 window.workspace_join_line):
+        assert not line.message.text()
+
+    window.set_card_message(window.workspace_join_line, "refused")
+    assert window.workspace_join_line.isHidden() is False
+
+    window.clear_card_message(window.workspace_join_line)
+    assert window.workspace_join_line.isHidden() is True, (
+        "the cleared line is still taking up space on the card")
+
+
+def test_a_card_message_follows_a_theme_change(window) -> None:
+    """It carries its own colour, so the application sheet will not do it."""
+    window.set_card_message(window.workspace_join_line, "refused")
+    line = window.workspace_join_line
+    assert color(LIGHT, "error") not in line.message.styleSheet()
+
+    window.apply_theme(LIGHT)
+
+    assert color(LIGHT, "error") in line.message.styleSheet(), (
+        f"the message kept the old theme's colour: {line.message.styleSheet()!r}")
+    assert color(DARK, "error") not in line.message.styleSheet()
 
 
 def test_the_create_panel_previews_the_rail_button(window) -> None:

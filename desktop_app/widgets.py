@@ -4,7 +4,7 @@ from PySide6.QtCore import (Property, QAbstractAnimation, QEasingCurve, QRectF,
                             QPropertyAnimation, Qt, Signal)
 from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (QComboBox, QHBoxLayout, QLabel, QPushButton,
-                             QPlainTextEdit, QVBoxLayout, QWidget)
+                             QPlainTextEdit, QSizePolicy, QVBoxLayout, QWidget)
 
 from .theme import DARK, color
 
@@ -47,6 +47,69 @@ def action(text, callback=None, primary=False, name=None):
     if callback:
         widget.clicked.connect(callback)
     return widget
+
+
+class ErrorLine(QWidget):
+    """One card's own message, with a way to dismiss it.
+
+    Every message on a card belongs to that card and is shown here rather
+    than in a toast that has gone by the time it is read, or in one line
+    shared between cards, where a failure in the join form would appear in
+    the create form and be erased by the wrong keystroke.
+
+    The message lives in the window's state, not in this widget, because
+    cards are rebuilt on every poll and a message held by a widget would be
+    destroyed by the next render. This is only the view of it.
+
+    Hidden outright when empty, so a card with nothing to say does not carry
+    a blank band.
+    """
+
+    def __init__(self, on_dismiss, tone="error", theme=DARK):
+        super().__init__()
+        self._theme = theme
+        self._tone = tone
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+        self.message = label("", wrap=True)
+        self.message.setObjectName("errorMessage")
+        self.message.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Minimum)
+        row.addWidget(self.message, 1)
+        self.dismiss = action("×", lambda: on_dismiss(self), name="ghost")
+        self.dismiss.setObjectName("errorDismiss")
+        self.dismiss.setFixedSize(20, 20)
+        self.dismiss.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.dismiss.setToolTip("Dismiss")
+        self.dismiss.setAccessibleName("Dismiss message")
+        row.addWidget(self.dismiss, 0, Qt.AlignmentFlag.AlignTop)
+        self.hide()
+
+    def set_tone(self, tone):
+        """Restyle the message for its kind, and repaint in the live theme.
+
+        The colour is applied here rather than through the application
+        stylesheet because a page message has to be right even where that
+        stylesheet does not reach, and because the tone changes on the same
+        line as the text rather than at construction.
+        """
+        self._tone = tone
+        token = {"progress": "text_muted"}.get(tone, "error")
+        self.message.setStyleSheet("color:" + color(self._theme, token))
+        self.dismiss.setStyleSheet("color:" + color(self._theme, token))
+        self.update()
+
+    def show_message(self, message):
+        self.message.setText(message)
+        self.setVisible(bool(message))
+
+    def set_theme(self, theme):
+        self._theme = theme
+        self.set_tone(self._tone)
+
+    def clear(self):
+        self.message.setText("")
+        self.hide()
 
 
 class Select(QComboBox):

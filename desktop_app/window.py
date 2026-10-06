@@ -28,7 +28,7 @@ from .markdown import MarkdownMessage
 from .resources import ResourceSampler
 from .theme import (DARK, LIGHT, THEME_CHOICES, color, provider_entry, provider_names,
                     resolve_theme, stylesheet, system_theme)
-from .widgets import (Composer, HoverRow, OrbitArt, Select, WorkspaceButton,
+from .widgets import (Composer, ErrorLine, HoverRow, OrbitArt, Select, WorkspaceButton,
                      action, app_mark, label)
 
 
@@ -159,6 +159,17 @@ class MainWindow(QMainWindow):
         self.workspace_buttons = {}
         self.callbacks = {}
         self.busy = False
+        # Every message a card shows, keyed by the card that owns it. Held
+        # here rather than in the card's widgets because cards are rebuilt on
+        # every poll: a message kept in a widget is destroyed by the next
+        # render, which is exactly what happened to the workspace page's
+        # single shared line. Only set_card_message, its dismiss handler and
+        # the card's own action may touch these.
+        self.card_messages = {}
+        # The card message line currently on screen for each key, so a
+        # rebuild of the page can find it again. Lines hold no message of
+        # their own.
+        self.card_lines = {}
         self.toast_error = False
         self.request_count = 0
         self.ready = False
@@ -1012,6 +1023,10 @@ class MainWindow(QMainWindow):
         self.style_placeholders()
         self.setWindowIcon(app_icon(name))
         self.style_toast()
+        # A card message carries its own colour, so it does not follow the
+        # application sheet and would keep the old theme's error colour.
+        for line in self.card_lines.values():
+            line.set_theme(name)
         self.join_button.set_ink("success")
         refresh_join_icon(self, name)
         self.refresh_avatar()
@@ -1757,6 +1772,62 @@ class MainWindow(QMainWindow):
     def edit_agent(self, agent):
         AgentDialog(self, agent["provider"], agent["profile"]).exec()
 
+    def name_rule(self):
+        """The one wording for the workspace-name limit, used in both places."""
+        return "Use a workspace name with 1-80 characters"
+
+    def set_card_message(self, line, message, tone="error"):
+        """Put a message on a card's own line, in the window's state.
+
+        The line widget is only the view. Holding the message here is what
+        lets it outlive the rebuild of the card it sits on, and keying it by
+        the line means no card can overwrite another's message.
+        """
+        self.card_messages[line.key] = (message, tone)
+        line.set_tone(tone)
+        line.show_message(message)
+
+    def clear_card_message(self, line):
+        """Remove one card's message. Only its own action may do this for it."""
+        self.card_messages.pop(line.key, None)
+        line.clear()
+
+    def refresh_card_messages(self):
+        """Re-apply every stored message to the lines now on screen.
+
+        Called after a page rebuild, so a message survives the render that
+        would otherwise destroy the widget holding it. Render methods must
+        not write messages themselves: a background poll that clears them is
+        exactly how the workspace page's errors used to vanish three seconds
+        after they appeared.
+        """
+        for key, line in self.card_lines.items():
+            entry = self.card_messages.get(key)
+            if entry is not None:
+                message, tone = entry
+                line.set_tone(tone)
+                line.show_message(message)
+
+    def message_line(self, key):
+        """A card's own message line, registered so a rebuild can find it.
+
+        A rebuilt page replaces the line for its key rather than adding a
+        second one, so the old widget is released with the old page instead
+        of being held for the life of the window.
+        """
+        line = ErrorLine(self.dismiss_card_message, theme=self.theme)
+        line.key = key
+        self.card_lines[key] = line
+        entry = self.card_messages.get(key)
+        if entry is not None:
+            message, tone = entry
+            line.set_tone(tone)
+            line.show_message(message)
+        return line
+
+    def dismiss_card_message(self, line):
+        self.clear_card_message(line)
+
     def workspaces_page(self):
         """The workspace you are in, and the two ways of adding another.
 
@@ -1816,11 +1887,16 @@ class MainWindow(QMainWindow):
         preview_row.addWidget(self.workspace_preview_label)
         preview_row.addStretch()
         column.addLayout(preview_row)
+        # Two separate lines rather than one. The name rule is a live hint
+        # under the field it constrains and changes as you type; the create
+        # outcome is what the runtime said about the attempt. They were one
+        # line, so typing over a failure replaced it with the name rule, and
+        # a failure arrived where a hint was expected.
+        self.workspace_name_line = self.message_line("workspace:name")
+        column.addWidget(self.workspace_name_line)
         column.addSpacing(8)
-        self.workspace_error = label("", "muted", True)
-        self.workspace_error.setWordWrap(True)
-        self.workspace_error.setStyleSheet("color:" + color(self.theme, "error"))
-        column.addWidget(self.workspace_error)
+        self.workspace_create_line = self.message_line("workspace:create")
+        column.addWidget(self.workspace_create_line)
         self.workspace_create_button = action(
             "Create workspace", self.create_workspace, True)
         self.workspace_create_button.setEnabled(False)
@@ -1857,11 +1933,14 @@ class MainWindow(QMainWindow):
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         column.addWidget(self.workspace_lan, 0, Qt.AlignmentFlag.AlignLeft)
         column.addSpacing(8)
+        self.workspace_join_line = self.message_line("workspace:join")
+        column.addWidget(self.workspace_join_line)
         self.workspace_join_button = action("Join workspace", self.join_workspace, True)
         column.addWidget(self.workspace_join_button)
         layout.addWidget(join)
         layout.addStretch()
         self.render_workspace_page()
+        self.refresh_card_messages()
         return page
 
     def render_workspace_page(self):
@@ -1870,6 +1949,12 @@ class MainWindow(QMainWindow):
         Called on every agents event, because joining or creating changes
         what the workspace is, and the page has to stop claiming to be
         creating something you already created.
+
+        Deliberately writes no messages. This runs on the three-second
+        agents poll, and it used to end in workspace_name_typed(), which
+        owned the card's single shared line, so any error on this page was
+        erased within three seconds of appearing. State refresh belongs
+        here; messages belong to the card's own action.
         """
         if not hasattr(self, "workspace_name_label"):
             return
@@ -1889,27 +1974,35 @@ class MainWindow(QMainWindow):
             self.ready and bool(self.workspace_name_input.text().strip()))
         self.workspace_join_button.setEnabled(self.ready)
         self.workspace_preview.setEnabled(False)
-        self.workspace_name_typed(self.workspace_name_input.text())
+        # The button and preview follow the runtime here, but the name hint
+        # belongs to typing, so only that one line is re-derived.
+        name = self.workspace_name_input.text().strip()
+        self.workspace_preview.setText(name[:2].upper())
+        self.workspace_preview_label.setText(
+            f"appears in the rail as {name[:2].upper()!r}" if name else "")
+        self.workspace_create_button.setEnabled(self.ready and 1 <= len(name) <= 80)
 
     def workspace_name_typed(self, text):
-        """Keep the create button honest and preview the rail button.
+        """Keep the create button honest, preview the rail button, hint the rule.
 
-        The name is checked here rather than on submit, so the constraint
-        is visible before anything is attempted, using the same rule and
-        the same wording the runtime applies, so the two cannot disagree
-        about it.
+        The name is checked here rather than on submit, so the constraint is
+        visible before anything is attempted, using the same rule and the
+        same wording the runtime applies, so the two cannot disagree.
 
-        Every widget it touches is built by workspaces_page, which is
-        reached during construction, but this is also connected to the
-        field's own signal, so it can only assume what exists.
+        Writes only the name hint, never the create outcome. It used to own
+        the card's single shared line, so a poll reaching here three seconds
+        after a failure erased it, and typing replaced a real failure with
+        the name rule.
         """
         name = text.strip()
         allowed = 1 <= len(name) <= 80
         self.workspace_preview.setText(name[:2].upper())
         self.workspace_preview_label.setText(
             f"appears in the rail as {name[:2].upper()!r}" if name else "")
-        self.workspace_error.setText(
-            "" if allowed else "Use a workspace name with 1-80 characters")
+        if allowed:
+            self.clear_card_message(self.workspace_name_line)
+        else:
+            self.set_card_message(self.workspace_name_line, self.name_rule())
         self.workspace_create_button.setEnabled(bool(self.ready and allowed))
 
     def create_workspace(self):
@@ -1922,9 +2015,12 @@ class MainWindow(QMainWindow):
         """
         name = self.workspace_name_input.text().strip()
         if not 1 <= len(name) <= 80:
-            self.workspace_error.setText("Use a workspace name with 1-80 characters")
+            self.set_card_message(self.workspace_name_line, self.name_rule())
             return
-        self.workspace_error.setText("")
+        self.clear_card_message(self.workspace_name_line)
+        # Retrying is the one thing that clears the previous outcome, so the
+        # message never lingers over a button the reader has just pressed.
+        self.clear_card_message(self.workspace_create_line)
         self.workspace_create_button.setEnabled(False)
         self.command("create_workspace", name,
                      success=self.workspace_created,
@@ -1932,11 +2028,11 @@ class MainWindow(QMainWindow):
 
     def workspace_created(self, entry):
         self.workspace_name_input.clear()
-        self.workspace_error.setText("")
+        self.clear_card_message(self.workspace_create_line)
         self.notice(f"Now in {entry.get('name', 'the new workspace')}.")
 
     def workspace_failed(self, message):
-        self.workspace_error.setText(message)
+        self.set_card_message(self.workspace_create_line, message)
         self.workspace_create_button.setEnabled(
             bool(self.ready and self.workspace_name_input.text().strip()))
 
@@ -1956,9 +2052,10 @@ class MainWindow(QMainWindow):
         read.
         """
         if not self.ready:
-            self.workspace_error.setText("Your network is still starting.")
+            self.set_card_message(self.workspace_join_line,
+                                  "Your network is still starting.")
             return
-        self.workspace_error.setText("")
+        self.clear_card_message(self.workspace_join_line)
         try:
             conversation_id = None
             invitation = self.workspace_invitation.toPlainText().strip()
@@ -1971,19 +2068,26 @@ class MainWindow(QMainWindow):
                 raise ValueError("Enter the device token from your invitation")
             self.workspace_join_button.setEnabled(False)
             self.workspace_join_button.setText("Connecting…")
-            self.workspace_error.setText("Contacting the relay. Keep the host app open; "
-                                         "this can take up to 30 seconds.")
+            # Progress belongs to this card and stays until the attempt
+            # resolves, so a slow relay says why it is slow rather than
+            # looking hung.
+            self.set_card_message(
+                self.workspace_join_line,
+                "Contacting the relay. Keep the host app open; this can take up "
+                "to 30 seconds.", "progress")
 
             def failure(message):
                 self.workspace_join_button.setEnabled(True)
                 self.workspace_join_button.setText("Join workspace")
-                self.workspace_error.setText(
+                self.set_card_message(
+                    self.workspace_join_line,
                     message or "The connection failed. Check the host address, network, "
                                "and firewall.")
 
             def success(result):
                 self.workspace_token.clear()
                 self.workspace_invitation.clear()
+                self.clear_card_message(self.workspace_join_line)
                 self.render_workspace_page()
                 if conversation_id:
                     self.select_agent(conversation_id)
@@ -2004,7 +2108,7 @@ class MainWindow(QMainWindow):
         except (ValueError, KeyError, TypeError) as exc:
             self.workspace_join_button.setEnabled(True)
             self.workspace_join_button.setText("Join workspace")
-            self.workspace_error.setText(str(exc))
+            self.set_card_message(self.workspace_join_line, str(exc))
 
     def add_workspace(self):
         """The rail's plus goes to the page, where both routes are offered."""

@@ -482,6 +482,11 @@ QLabel#title { font-size: 31px; font-weight: 700; color: @@text_strong@@; }
 QLabel#heroTitle { font-size: 34px; font-weight: 700; color: @@text_hero@@; }
 QLabel#heading { font-size: 19px; font-weight: 650; color: @@text_strong@@; }
 QLabel#muted { color: @@text_muted@@; }
+QLabel#errorMessage { color: @@error@@; }
+QLabel#progressMessage { color: @@text_muted@@; }
+QPushButton#errorDismiss { background: transparent; border: none; border-radius: 4px; padding: 0; color: @@error@@; font-weight: 700; font-size: 12px; }
+QPushButton#errorDismiss:hover { background: @@surface_hover@@; color: @@text_strong@@; }
+QPushButton#errorDismiss:pressed { background: transparent; color: @@error@@; }
 QLabel#eyebrow { color: @@eyebrow@@; font-size: 10px; font-weight: 650; }
 QLabel#statValue { font-size: 30px; color: @@text_strong@@; font-weight: 650; }
 QPushButton#statValue { background: transparent; font-size: 30px; color: @@text_strong@@; font-weight: 650; text-align: left; padding: 0; border: none; }
