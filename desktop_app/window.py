@@ -10,7 +10,7 @@ from datetime import datetime
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QSize, Qt, QTimer, QUrl, Slot
 from PySide6.QtGui import (QGuiApplication, QIcon, QKeySequence, QPixmap, QPainter,
                            QColor, QDesktopServices, QFont, QPalette, QShortcut)
-from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFileDialog,
+from PySide6.QtWidgets import (QApplication, QCheckBox, QFileDialog,
     QFrame, QGraphicsOpacityEffect, QGridLayout, QHBoxLayout, QInputDialog, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
     QProgressBar, QScrollArea, QStackedWidget, QVBoxLayout, QWidget)
@@ -26,7 +26,7 @@ from .markdown import MarkdownMessage
 from .resources import ResourceSampler
 from .theme import (DARK, LIGHT, THEME_CHOICES, color, provider_entry, provider_names,
                     resolve_theme, stylesheet, system_theme)
-from .widgets import (Composer, HoverRow, OrbitArt, WorkspaceButton, action, label)
+from .widgets import (Composer, HoverRow, OrbitArt, Select, WorkspaceButton, action, label)
 
 
 def frame(name, layout_type=QVBoxLayout):
@@ -117,6 +117,20 @@ def device_initial(identity):
     which would draw an empty tile that looks like a missing image.
     """
     return (identity or "").strip()[:1].upper() or "?"
+
+
+def refresh_join_icon(window, theme_name):
+    """Redraw the rail's plus in this theme's success colour.
+
+    Hand-painted, so like the orbit and the avatar it never sees a
+    stylesheet and has to be told when the palette moves. Painted at twice
+    the slot and marked as such, or it arrives soft on a dense display.
+    The middle pixel of a cross is a stroke, so that is what a test reads
+    to confirm the colour actually landed.
+    """
+    pixmap = navigation_icon("plus", color(theme_name, "success")).pixmap(48, 48)
+    pixmap.setDevicePixelRatio(2)
+    window.join_button.setIcon(QIcon(pixmap))
 
 
 def device_avatar(theme_name, identity, size=34):
@@ -217,11 +231,13 @@ class MainWindow(QMainWindow):
         self.workspace_rail.setAlignment(Qt.AlignmentFlag.AlignTop)
         workspace_scroll.setWidget(workspace_content)
         rail_layout.addWidget(workspace_scroll, 1)
-        join = WorkspaceButton("+")
+        join = WorkspaceButton("")
         self.join_button = join
         self.add_workspace_button = join
-        join.setStyleSheet("color:" + color(self.theme, "success"))
+        join.setIconSize(QSize(24, 24))
+        join.set_ink("success")
         join.setToolTip("Create or join a workspace")
+        refresh_join_icon(self, self.theme)
         join.clicked.connect(self.add_workspace)
         rail_layout.addWidget(join)
         self.help_button = WorkspaceButton("?")
@@ -723,7 +739,7 @@ class MainWindow(QMainWindow):
         column.setContentsMargins(22, 18, 22, 20)
         column.addWidget(label("Appearance", "heading"))
         column.addWidget(label("Theme", "muted"))
-        self.theme_picker = QComboBox()
+        self.theme_picker = Select()
         for choice in THEME_CHOICES:
             self.theme_picker.addItem(choice[0], choice[1])
         self.theme_picker.setCurrentIndex(self._theme_choice_index())
@@ -740,7 +756,7 @@ class MainWindow(QMainWindow):
         self.reduce_motion = QCheckBox("Reduce animations")
         self.reduce_motion.setChecked(self.storage.settings.get("reduce_motion", False))
         self.reduce_motion.toggled.connect(self.motion_changed)
-        column.addWidget(self.reduce_motion)
+        column.addWidget(self.reduce_motion, 0, Qt.AlignmentFlag.AlignLeft)
         column.addWidget(label("Turns off page fades.", "muted", True))
         layout.addWidget(motion)
 
@@ -1001,7 +1017,8 @@ class MainWindow(QMainWindow):
         self.style_placeholders()
         self.setWindowIcon(app_icon(name))
         self.style_toast()
-        self.join_button.setStyleSheet("color:" + color(name, "success"))
+        self.join_button.set_ink("success")
+        refresh_join_icon(self, name)
         self.refresh_avatar()
         if hasattr(self, "welcome_art"):
             self.welcome_art.set_theme(name)

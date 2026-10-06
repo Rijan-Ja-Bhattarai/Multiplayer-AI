@@ -19,7 +19,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6", reason="PySide6 is needed for the desktop page tests")
 pytest.importorskip("psutil", reason="psutil backs the Resources page")
 
-from PySide6.QtCore import QTimer  # noqa: E402
+from PySide6.QtCore import QPoint, QPointF, Qt, QTimer  # noqa: E402
+from PySide6.QtGui import QWheelEvent  # noqa: E402
 from PySide6.QtWidgets import (QApplication, QFrame, QLabel, QMessageBox,
                              QPushButton)  # noqa: E402
 
@@ -444,7 +445,213 @@ def test_the_composer_and_the_rows_are_divided_in_every_theme(name) -> None:
 
 
 
-# --- the user panel ------------------------------------------------------
+# --- the rail's plus -----------------------------------------------------
+
+
+def test_the_join_button_is_a_drawn_plus_not_a_character(window) -> None:
+    """It was the text "+", which is placed by the font and not by us.
+
+    Whether that lands where it looks right is a question about the font,
+    so the mark is drawn instead, on the same 24-unit grid as the
+    navigation icons and with the same stroke.
+    """
+    join = window.join_button
+    assert not join.text(), f"the button is still a text glyph, {join.text()!r}"
+    assert not join.icon().isNull(), "the button has no drawn mark"
+    assert not join.icon().isMask(), "the mark should be coloured, not a mask"
+
+
+def test_the_drawn_plus_is_centred_in_its_own_mark(window) -> None:
+    """A round-capped stroke runs past the end point it was given.
+
+    Drawn to its nominal bounds the cross sits low and right, so the ends
+    are pulled back by half a stroke. Checked on the mark's own ink, which
+    unlike a glyph's does not depend on a font being installed.
+
+    The centroid rather than the bounding box: a cross's box is set by its
+    longest arm, so nudging the other arm sideways still fits inside it and
+    a box check would call that centred.
+    """
+    image = window.join_button.icon().pixmap(48, 48).toImage()
+    lit = [(x, y) for x in range(image.width()) for y in range(image.height())
+           if image.pixelColor(x, y).alpha() > 32]
+    assert lit, "the mark is empty"
+
+    centre_x = sum(x for x, _ in lit) / len(lit)
+    centre_y = sum(y for _, y in lit) / len(lit)
+    middle = (image.width() - 1) / 2
+
+    assert abs(centre_x - middle) <= 0.5, (
+        f"the ink sits {abs(centre_x - middle):.1f}px right of centre")
+    assert abs(centre_y - middle) <= 0.5, (
+        f"the ink sits {abs(centre_y - middle):.1f}px below centre")
+
+
+def test_the_plus_follows_the_theme(window, qt_app) -> None:
+    """Hand-painted, so nothing reaches it but an explicit repaint."""
+    for name in THEME_NAMES:
+        window.apply_theme(name)
+        qt_app.processEvents()
+        middle = window.join_button.icon().pixmap(48, 48).toImage().pixelColor(24, 24)
+        assert middle.name().lower() == color(name, "success").lower(), (
+            f"{name}: the middle of a cross is a stroke, so it should read "
+            f"as {color(name, 'success')}, found {middle.name()}")
+
+
+def test_hovering_the_rail_does_not_strip_a_workspace_button(qt_app) -> None:
+    """The hover animation writes its own stylesheet, and it used to win.
+
+    The ink was set by a widget stylesheet, which the animation overwrote,
+    so hovering took the colour and everything else that sheet was
+    carrying for the rest of the hover with it. The ink is a property now,
+    read by the application stylesheet, so the two cannot collide.
+
+    Checked on a button carrying text rather than the rail's plus, which
+    is drawn and so never depended on the button's own colour.
+    """
+    from desktop_app.widgets import WorkspaceButton
+
+    button = WorkspaceButton("AB")
+    button.set_ink("success")
+    before = button.styleSheet()
+
+    button.set_radius(15.0)              # where the hover animation lands
+    assert button.property("ink") == "success", (
+        f"hovering took the ink, leaving {button.styleSheet()!r} instead of "
+        f"the {before!r} that was there before")
+    assert button.styleSheet() == "QPushButton { border-radius: 15px; }", (
+        f"the hover sheet should carry the corner and nothing else, "
+        f"found {button.styleSheet()!r}")
+
+
+# --- the settings controls ----------------------------------------------
+
+
+def wheel_event(delta=-120):
+    """One wheel notch, as a page scroll would deliver it."""
+    return QWheelEvent(
+        QPointF(8, 8), QPointF(8, 8 - abs(delta) // 8), QPoint(0, 0), QPoint(0, delta),
+        Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+        Qt.ScrollPhase.ScrollUpdate, False)
+
+
+def test_the_theme_picker_ignores_the_mouse_wheel(window, qt_app) -> None:
+    """Scrolling the Settings page used to rewrite the stored theme.
+
+    Qt's combo box advances on any wheel notch over it, so a scroll meant
+    to move the page kept changing the theme instead, for as long as the
+    scroll continued. A wheel is not a pick out of a closed list; the popup
+    is the way to choose.
+
+    The page is opened first on purpose: a hidden widget is given no wheel
+    events at all, so the test would pass against an unfixed picker purely
+    by looking at the wrong one. The starting row is in the middle for the
+    same reason, since a picker at either end cannot move and would pass
+    however it behaved.
+    """
+    window.navigate(win.SETTINGS_PAGE)
+    window.show()
+    qt_app.processEvents()
+    picker = window.theme_picker
+    assert picker.isVisible(), "the picker under test is not on screen"
+    assert picker.count() >= 3, "there is no room to move in the test"
+
+    middle = picker.count() // 2
+    for delta in (-120, 120):
+        picker.setCurrentIndex(middle)
+        before = picker.currentIndex()
+        for _ in range(4):
+            QApplication.sendEvent(picker, wheel_event(delta))
+        qt_app.processEvents()
+        assert picker.currentIndex() == before, (
+            f"a {delta:+d} notch moved the theme from row {before} to "
+            f"{picker.currentIndex()}")
+
+    # The control must still work; ignoring the wheel is not disabling it.
+    picker.setCurrentIndex(0)
+    assert picker.currentIndex() == 0, "the picker no longer accepts a choice"
+
+
+def test_the_dialog_dropdowns_ignore_the_wheel(window, qt_app) -> None:
+    """The same hazard sat on every provider, model and relay dropdown.
+
+    Scroll inside a dialog and the provider silently changes, which is
+    worse than no scroll at all because the choice is what gets sent.
+    """
+    from desktop_app.dialogs import AgentDialog, InviteDialog
+
+    dialogs = [AgentDialog(window, "ollama", {}), InviteDialog(window)]
+    try:
+        combos = [c for d in dialogs for c in d.findChildren(win.Select)]
+        assert len(combos) >= 4, f"only {len(combos)} dropdowns were found"
+        for combo in combos:
+            assert isinstance(combo, win.Select), (
+                f"{type(combo).__name__} can still be moved by the wheel")
+            # Most of these are filled by the runtime listing providers, so
+            # only the ones with room either side can be moved at all.
+            if combo.count() < 3:
+                continue
+            middle = combo.count() // 2
+            for delta in (-120, 120):
+                combo.setCurrentIndex(middle)
+                before = combo.currentIndex()
+                for _ in range(3):
+                    QApplication.sendEvent(combo, wheel_event(delta))
+                qt_app.processEvents()
+                assert combo.currentIndex() == before, (
+                    f"a {type(combo.parent()).__name__} dropdown moved "
+                    f"on a {delta:+d} notch")
+    finally:
+        for dialog in dialogs:
+            dialog.deleteLater()
+
+
+def test_a_checkbox_paints_nothing_behind_itself(window, qt_app) -> None:
+    """It used to inherit the page background and draw a panel.
+
+    The rule for QCheckBox set a colour but no background, so it fell
+    through to the shared QWidget rule and painted the window base on top
+    of the card it sat in. Sampled rather than read from the stylesheet,
+    because "the rule says transparent" and "nothing is painted" are not
+    the same claim.
+    """
+    window.navigate(win.SETTINGS_PAGE)
+    window.show()
+    end = time.time() + 0.5          # let the page fade finish
+    while time.time() < end:
+        qt_app.processEvents()
+        time.sleep(0.005)
+
+    for name in THEME_NAMES:
+        window.apply_theme(name)
+        qt_app.processEvents()
+        image = window.grab().toImage()
+        anchor = window.reduce_motion.mapTo(window, QPoint(0, 0))
+        sampled = image.pixelColor(
+            anchor.x() + window.reduce_motion.width() - 4,
+            anchor.y() + window.reduce_motion.height() // 2).name()
+
+        assert sampled.lower() != color(name, "surface_base").lower(), (
+            f"{name}: the checkbox is painting the page base behind itself")
+        assert sampled.lower() == color(name, "surface").lower(), (
+            f"{name}: expected the card surface behind the checkbox, "
+            f"found {sampled}")
+
+
+def test_a_checkbox_hugs_its_label(window, qt_app) -> None:
+    """It used to stretch the full width of the card it sat in.
+
+    A checkbox 857px wide takes any hover or focus background across the
+    whole row, which reads as a band rather than as a control.
+    """
+    window.navigate(win.SETTINGS_PAGE)
+    window.show()
+    qt_app.processEvents()
+
+    assert window.reduce_motion.width() < 400, (
+        f"the checkbox is {window.reduce_motion.width()}px wide, so it is "
+        f"filling the card instead of sitting beside its label")
+
 
 
 def test_the_user_panel_reaches_the_edges_of_the_sidebar(window, qt_app) -> None:

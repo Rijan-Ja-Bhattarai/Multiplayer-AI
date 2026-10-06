@@ -499,7 +499,8 @@ QPushButton#nav { background: transparent; text-align: left; color: @@text_nav@@
 QPushButton#nav:hover { background: @@surface_hover@@; color: @@text@@; }
 QPushButton#nav:checked { background: @@nav_checked_bg@@; color: @@text_strong@@; }
 QPushButton#workspace { background: @@workspace_btn_bg@@; border: 1px solid @@workspace_btn_border@@; border-radius: 16px; font-size: 20px; padding: 0; color: @@text@@; }
-QPushButton#workspace:hover, QPushButton#workspace:checked { background: @@accent@@; border-radius: 16px; color: @@on_accent@@; }
+    QPushButton#workspace[ink="success"] { color: @@success@@; }
+    QPushButton#workspace:hover, QPushButton#workspace:checked { background: @@accent@@; border-radius: 16px; color: @@on_accent@@; }
 QPushButton#ghost { background: transparent; color: @@text_nav@@; padding: 7px 10px; border: 1px solid @@ghost_border@@; }
 QPushButton#ghost:hover { background: @@surface_hover@@; }
 QPushButton#danger { background: @@danger_bg@@; color: @@error@@; }
@@ -507,7 +508,7 @@ QLineEdit, QPlainTextEdit, QComboBox { background: @@input_bg@@; color: @@text@@
 QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus { border: 1px solid @@accent@@; }
 QComboBox::drop-down { border: 0; width: 24px; }
 QComboBox QAbstractItemView { background: @@combo_popup_bg@@; color: @@text@@; selection-background-color: @@accent@@; padding: 5px; border: 1px solid @@border_strong@@; }
-QCheckBox { spacing: 8px; color: @@text_list@@; }
+QCheckBox { spacing: 8px; color: @@text_list@@; background: transparent; }
 QCheckBox::indicator { width: 16px; height: 16px; border-radius: 4px; background: @@checkbox_bg@@; border: 1px solid @@checkbox_border@@; }
 QCheckBox::indicator:checked { background: @@accent@@; border-color: @@accent_press@@; }
 QScrollArea { background: transparent; border: none; }

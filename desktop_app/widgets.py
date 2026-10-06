@@ -3,8 +3,8 @@ import math
 from PySide6.QtCore import (Property, QAbstractAnimation, QEasingCurve, QRectF,
                             QPropertyAnimation, Qt, Signal)
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
-from PySide6.QtWidgets import (QHBoxLayout, QLabel, QPushButton, QPlainTextEdit,
-                             QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QComboBox, QHBoxLayout, QLabel, QPushButton,
+                             QPlainTextEdit, QVBoxLayout, QWidget)
 
 from .theme import DARK, color
 
@@ -25,6 +25,24 @@ def action(text, callback=None, primary=False, name=None):
     if callback:
         widget.clicked.connect(callback)
     return widget
+
+
+class Select(QComboBox):
+    """A dropdown that only changes when it is actually used.
+
+    Qt's combo box advances on any wheel notch over it, so scrolling the
+    Settings page silently rewrote the stored theme, and kept rewriting it
+    for as long as the scroll continued. A wheel is not a deliberate pick
+    out of a closed list; the popup is opened with a click or the keyboard
+    and that is the only way to move.
+
+    Subclassed rather than filtered, so there is no event filter to keep
+    installed and remove again, and nothing to leak if the widget outlives
+    whoever installed it.
+    """
+
+    def wheelEvent(self, event):
+        event.ignore()
 
 
 class Composer(QPlainTextEdit):
@@ -257,6 +275,20 @@ class WorkspaceButton(QPushButton):
         self.animation = QPropertyAnimation(self, b"cornerRadius", self)
         self.animation.setDuration(160)
         self.animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+    def set_ink(self, token):
+        """Colour this button from a palette token, by property.
+
+        It used to take a widget stylesheet, which the hover animation
+        then overwrote: set_radius writes its own sheet to change the
+        corner, and that left the button stripped of everything the sheet
+        had been carrying for the rest of the hover. A property is read by
+        the application stylesheet instead, so the two cannot collide and
+        the colour survives a theme change as well.
+        """
+        self.setProperty("ink", token)
+        self.style().unpolish(self)
+        self.style().polish(self)
 
     def radius(self):
         return self._radius
