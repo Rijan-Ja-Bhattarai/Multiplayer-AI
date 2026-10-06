@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import time
 
-from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt, QTimer
+from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QRectF, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (QApplication, QGraphicsOpacityEffect, QLabel,
                                QVBoxLayout, QWidget)
@@ -49,6 +49,13 @@ class LaunchScreen(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAccessibleName("Multiplayer AI is starting")
         self.setFixedSize(400, 440)
+        # The rounded card is painted rather than laid out, because the only
+        # way to get rounded corners out of a frameless window is to paint
+        # them, and because the fill has to be opaque: left transparent the
+        # window underneath showed straight through and a loading screen
+        # that shows the loaded window through it reads as an error rather
+        # than as progress. See paintEvent.
+        self._radius = 20.0
 
         column = QVBoxLayout(self)
         column.setContentsMargins(24, 30, 24, 24)
@@ -127,6 +134,24 @@ class LaunchScreen(QWidget):
             on_done()
 
     # -- appearance -----------------------------------------------------
+
+    def paintEvent(self, event):
+        """Paint the card behind everything else.
+
+        Frameless and translucent, so the corners can be rounded, which
+        means nothing else will fill them. The fill is the card colour and
+        the edge is the same hairline every other card in the app uses, so
+        the splash reads as part of the app and follows the theme: dark by
+        default, and light for somebody who has chosen light.
+        """
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(QColor(color(self._theme, "border")), 1))
+        painter.setBrush(QColor(color(self._theme, "surface")))
+        painter.drawRoundedRect(QRectF(0.5, 0.5, self.width() - 1,
+                                       self.height() - 1),
+                                self._radius, self._radius)
+        painter.end()
 
     def set_theme(self, name):
         self._theme = name

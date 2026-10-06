@@ -13,7 +13,8 @@ from PySide6.QtGui import (QGuiApplication, QIcon, QKeySequence, QPixmap, QPaint
 from PySide6.QtWidgets import (QApplication, QCheckBox, QFileDialog,
     QFrame, QGraphicsOpacityEffect, QGridLayout, QHBoxLayout, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
-    QPlainTextEdit, QProgressBar, QScrollArea, QStackedWidget, QVBoxLayout,
+    QPlainTextEdit, QProgressBar, QScrollArea, QSizePolicy, QStackedWidget,
+    QVBoxLayout,
     QWidget)
 
 from network_a2a.persistence import HistoryStore, model_context
@@ -284,6 +285,12 @@ class MainWindow(QMainWindow):
         side.addLayout(chats)
         self.sidebar_agents = QListWidget()
         self.sidebar_agents.setMaximumHeight(245)
+        # A long agent name used to grow a horizontal scrollbar under the
+        # list, which reads as a control that has more to say sideways.
+        # The names wrap instead, and there is nothing to scroll to.
+        self.sidebar_agents.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.sidebar_agents.setWordWrap(True)
         self.sidebar_agents.setToolTip("Every conversation and agent you can open")
         self.sidebar_agents.itemClicked.connect(lambda item: self.select_agent(item.data(Qt.ItemDataRole.UserRole)))
         side.addWidget(self.sidebar_agents)
@@ -1776,7 +1783,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(label(
             "A workspace is a private network. This device belongs to one at a "
             "time, and you can move between them or bring in another device.",
-            "muted"))
+            "muted", True))
 
         current, column = frame("card")
         column.setContentsMargins(22, 20, 22, 20)
@@ -1792,9 +1799,11 @@ class MainWindow(QMainWindow):
         layout.addWidget(current)
 
         layout.addWidget(label("Add another", "heading"))
-        row = QHBoxLayout()
-        row.setSpacing(16)
-
+        # Stacked rather than side by side. Two cards with fields in them
+        # need about 950px together, and the window may be as narrow as
+        # 720px, so a row either clipped the second card or gave the page
+        # a horizontal scrollbar. One above the other fits every width, and
+        # the page already scrolls.
         create, column = frame("card")
         column.setContentsMargins(22, 20, 22, 20)
         column.addWidget(label("Create a workspace", "heading"))
@@ -1827,7 +1836,7 @@ class MainWindow(QMainWindow):
             "Create workspace", self.create_workspace, True)
         self.workspace_create_button.setEnabled(False)
         column.addWidget(self.workspace_create_button)
-        row.addWidget(create, 1)
+        layout.addWidget(create)
 
         join, column = frame("card")
         column.setContentsMargins(22, 20, 22, 20)
@@ -1847,13 +1856,21 @@ class MainWindow(QMainWindow):
         self.workspace_token.setPlaceholderText("Your device's relay token")
         self.workspace_token.setEchoMode(QLineEdit.EchoMode.Password)
         column.addWidget(self.workspace_token)
-        self.workspace_lan = QCheckBox("This is a trusted LAN connection (allow ws://)")
+        self.workspace_lan = QCheckBox("Trusted LAN, so ws:// is allowed")
+        # A checkbox's minimum is the width of its whole label and it has no
+        # word wrap to fall back on, so a long one sets the width of its
+        # card and of the page, and the page gains a horizontal scrollbar.
+        # The label is kept short for the reader's sake and the horizontal
+        # policy is Ignored so that a longer one in future cannot do it
+        # again; the checkbox then takes the width it is given and draws
+        # from the left like every other control here.
+        self.workspace_lan.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         column.addWidget(self.workspace_lan, 0, Qt.AlignmentFlag.AlignLeft)
         column.addSpacing(8)
         self.workspace_join_button = action("Join workspace", self.join_workspace, True)
         column.addWidget(self.workspace_join_button)
-        row.addWidget(join, 1)
-        layout.addLayout(row)
+        layout.addWidget(join)
         layout.addStretch()
         self.render_workspace_page()
         return page

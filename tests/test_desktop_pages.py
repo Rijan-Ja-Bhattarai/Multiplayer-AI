@@ -708,6 +708,59 @@ def test_the_launch_screen_leaves_at_once_when_ready(qt_app) -> None:
     assert screen.dismissed
 
 
+def test_the_launch_screen_has_a_background_of_its_own(qt_app) -> None:
+    """Left translucent with nothing behind it, it showed the window through.
+
+    The splash comes up over a main window that is already painted, so a
+    transparent one reads as an error dialog rather than as progress. It is
+    a card in the theme's own colour: opaque in the middle, rounded and so
+    transparent at the corners.
+    """
+    from desktop_app.splash import LaunchScreen
+
+    for name in THEME_NAMES:
+        screen = LaunchScreen(name)
+        screen.begin()
+        qt_app.processEvents()
+        image = screen.grab().toImage()
+        width, height = image.width(), image.height()
+
+        middle = image.pixelColor(width // 2, 8)
+        assert middle.alpha() == 255, (
+            f"{name}: the background is see-through, so the window shows "
+            f"through the loading screen")
+        assert middle.name().lower() == color(name, "surface").lower(), (
+            f"{name}: the background is {middle.name()}, not the theme's "
+            f"card colour {color(name, 'surface')}")
+
+        corner = image.pixelColor(1, 1)
+        assert corner.alpha() < 255, (
+            f"{name}: the card has square corners, so it reads as a plain "
+            f"rectangle rather than as a card")
+
+        edge = image.pixelColor(width // 2, 0)
+        assert edge.name().lower() == color(name, "border").lower(), (
+            f"{name}: the card has no hairline, so it has no edge against a "
+            f"busy window behind it")
+        screen.dismiss()
+        pump(qt_app, 0.3)
+
+
+def test_the_launch_screen_background_follows_a_theme_change(qt_app) -> None:
+    from desktop_app.splash import LaunchScreen
+
+    screen = LaunchScreen(DARK)
+    screen.begin()
+    screen.set_theme(LIGHT)
+    qt_app.processEvents()
+    image = screen.grab().toImage()
+    middle = image.pixelColor(image.width() // 2, 8)
+    assert middle.name().lower() == color(LIGHT, "surface").lower(), (
+        "the card kept the dark theme's colour after a theme change")
+    screen.dismiss()
+    pump(qt_app, 0.3)
+
+
 def test_the_launch_screen_takes_its_effect_off_when_it_goes(qt_app) -> None:
     """Left attached, every later paint goes through Qt's effect machinery.
 
@@ -776,6 +829,35 @@ def test_a_launch_screen_that_never_ran_leaves_cleanly(qt_app) -> None:
     screen = LaunchScreen("dark")
     screen.dismiss()
     assert screen.dismissed and not screen.isVisible()
+
+
+def test_the_workspaces_page_never_scrolls_sideways(window, qt_app) -> None:
+    """A wide label or a long checkbox label sets the width for the page.
+
+    The page's own intro was 129 unwrapped characters, which on its own
+    demanded more than the window had, and a checkbox's minimum is the
+    width of its whole label with no word wrap to fall back on. Both grew a
+    horizontal scrollbar under the content at the preferred window size,
+    which is the same fault the sidebar list had.
+    """
+    window.navigate(win.WORKSPACES_PAGE)
+    for width in (760, 1000, 1330, 1700):
+        window.resize(width, 800)
+        pump(qt_app, 0.25)
+        page = window.stack.currentWidget()
+        content = page.widget()
+        assert content.minimumSizeHint().width() <= page.viewport().width(), (
+            f"at {width}px the page needs {content.minimumSizeHint().width()}px "
+            f"but has {page.viewport().width()}px, so it scrolls sideways")
+
+
+def test_the_sidebar_list_does_not_scroll_sideways(window, qt_app) -> None:
+    """A long agent name used to grow a scrollbar under the list."""
+    window.agents = [{"id": "a-very-long-agent-name-for-testing-wrap", "online": True,
+                      "provider": "ollama", "model": "m"}]
+    window.render_agents()
+    assert not window.sidebar_agents.horizontalScrollBar().isVisible(), (
+        "the agent list has a horizontal scrollbar; the names should wrap")
 
 
 # --- the settings controls ----------------------------------------------
