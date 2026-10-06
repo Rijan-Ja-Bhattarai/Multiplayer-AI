@@ -1,6 +1,6 @@
 import math
 
-from PySide6.QtCore import (Property, QAbstractAnimation, QEasingCurve,
+from PySide6.QtCore import (Property, QAbstractAnimation, QEasingCurve, QRectF,
                             QPropertyAnimation, Qt, Signal)
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (QHBoxLayout, QLabel, QPushButton, QPlainTextEdit,
@@ -44,10 +44,26 @@ class OrbitArt(QWidget):
     Painted directly rather than styled, so it cannot be reached by a Qt
     Style Sheet. Its colours come from the theme palette and it repaints
     itself when the theme changes.
+
+    The chips used to move 0.03 of a pixel per frame and had their
+    coordinates rounded to whole pixels, so a movement smaller than a
+    pixel could only appear as still, still, jump: roughly one visible
+    one-pixel step every half second. It read as an image that had stopped
+    loading rather than as slow motion. The coordinates are now floats,
+    which the antialiasing render hint resolves to a soft edge, and the
+    travel and cycle are set so the movement is perceptible without being
+    hurried.
     """
     # (label, glyph, token) for the chips orbiting the centre mark.
     _CHIPS = (("Ollama", "O", "orbit_ollama"), ("Claude", "✳", "orbit_claude"),
               ("Gemini", "✦", "orbit_gemini"), ("OpenAI", "◎", "orbit_openai"))
+    # The ellipse the chips travel, the sway either side of their resting
+    # place in radians, and how long one full breath takes. At this sway a
+    # chip drifts about 40px across eight seconds.
+    _CHIP_RX = 111.0
+    _CHIP_RY = 98.0
+    _SWAY = 0.26
+    _CYCLE_MS = 16000
 
     def __init__(self, parent=None, theme=DARK, moving=True):
         super().__init__(parent)
@@ -57,10 +73,34 @@ class OrbitArt(QWidget):
         self.animation = QPropertyAnimation(self, b"phase", self)
         self.animation.setStartValue(0.0)
         self.animation.setEndValue(math.tau)
-        self.animation.setDuration(24000)
+        self.animation.setDuration(self._CYCLE_MS)
         self.animation.setLoopCount(-1)
         if moving:
             self.animation.start()
+
+    def chip_angle(self, index, phase):
+        """Where chip ``index`` sits, in radians, at ``phase``.
+
+        Each chip is a quarter of a cycle ahead of the one before it. In
+        lockstep they all reach the end of their travel in the same instant
+        and turn back together, which reads as a pulse rather than as
+        motion however smoothly any single one of them travels. Staggering
+        them means one is always slowing while another is picking up.
+        """
+        return (index * math.pi / 2 - math.pi / 4
+                + math.sin(phase + index * math.pi / 2) * self._SWAY)
+
+    def chip_position(self, index, phase):
+        """The centre of chip ``index`` at ``phase``, as floats.
+
+        Left unrounded on purpose. Snapping these to whole pixels is what
+        made the motion step, and it is kept in one place so a test can
+        measure the travel that is actually painted rather than a copy of
+        the formula.
+        """
+        angle = self.chip_angle(index, phase)
+        return (self.width() / 2 + math.cos(angle) * self._CHIP_RX,
+                self.height() / 2 + math.sin(angle) * self._CHIP_RY)
 
     def set_theme(self, name):
         """Adopt another theme and repaint with its colours."""
@@ -100,29 +140,31 @@ class OrbitArt(QWidget):
         cx, cy = self.width() / 2, self.height() / 2
         painter.setPen(QPen(accent("orbit_ring"), 1))
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawEllipse(int(cx - 72), int(cy - 72), 144, 144)
+        painter.drawRoundedRect(QRectF(cx - 72, cy - 72, 144, 144), 72, 72)
         painter.setPen(QPen(accent("orbit_ring_dashed"), 1, Qt.PenStyle.DashLine))
-        painter.drawEllipse(int(cx - 112), int(cy - 112), 224, 224)
+        painter.drawRoundedRect(QRectF(cx - 112, cy - 112, 224, 224), 112, 112)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(accent("orbit_tile"))
-        painter.drawRoundedRect(int(cx - 41), int(cy - 41), 82, 82, 23, 23)
+        painter.drawRoundedRect(QRectF(cx - 41, cy - 41, 82, 82), 23, 23)
         painter.setBrush(accent("accent"))
-        painter.drawRoundedRect(int(cx - 31), int(cy - 31), 62, 62, 18, 18)
+        painter.drawRoundedRect(QRectF(cx - 31, cy - 31, 62, 62), 18, 18)
         painter.setFont(QFont("Segoe UI", 25, QFont.Weight.Bold))
         painter.setPen(accent("on_accent"))
-        painter.drawText(int(cx - 31), int(cy - 31), 62, 62, Qt.AlignmentFlag.AlignCenter, "M")
+        painter.drawText(QRectF(cx - 31, cy - 31, 62, 62),
+                         Qt.AlignmentFlag.AlignCenter, "M")
         for index, (name, glyph, token) in enumerate(self._CHIPS):
-            angle = index * math.pi / 2 - math.pi / 4 + math.sin(self._phase) * .07
-            x, y = cx + math.cos(angle) * 111, cy + math.sin(angle) * 98
+            x, y = self.chip_position(index, self._phase)
             painter.setPen(QPen(accent("orbit_chip_ring"), 1))
             painter.setBrush(accent("orbit_chip_bg"))
-            painter.drawRoundedRect(int(x - 37), int(y - 33), 74, 66, 12, 12)
+            painter.drawRoundedRect(QRectF(x - 37, y - 33, 74, 66), 12, 12)
             painter.setPen(accent(token))
             painter.setFont(QFont("Segoe UI", 21))
-            painter.drawText(int(x - 35), int(y - 31), 70, 36, Qt.AlignmentFlag.AlignCenter, glyph)
+            painter.drawText(QRectF(x - 35, y - 31, 70, 36),
+                             Qt.AlignmentFlag.AlignCenter, glyph)
             painter.setPen(accent("orbit_chip_text"))
             painter.setFont(QFont("Segoe UI", 9))
-            painter.drawText(int(x - 35), int(y + 6), 70, 20, Qt.AlignmentFlag.AlignCenter, name)
+            painter.drawText(QRectF(x - 35, y + 6, 70, 20),
+                             Qt.AlignmentFlag.AlignCenter, name)
 
 
 class HoverRow(QWidget):

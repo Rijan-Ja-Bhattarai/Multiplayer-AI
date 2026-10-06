@@ -14,6 +14,7 @@ the developer's keyring every time the suite ran.
 
 from __future__ import annotations
 
+import math
 import os
 
 import pytest
@@ -139,13 +140,135 @@ def test_apply_theme_recolours_hand_styled_widgets(window) -> None:
 # --- pieces ---------------------------------------------------------------
 
 
-def test_orbit_art_accepts_a_theme() -> None:
-    """OrbitArt stores and repaints for the requested theme."""
+def test_orbit_art_accepts_a_theme(qt_app) -> None:
+    """OrbitArt stores and repaints for the requested theme.
+
+    Asks for qt_app rather than relying on another test having built the
+    QApplication first. Without it, running this test on its own takes the
+    whole process down instead of failing.
+    """
     art = OrbitArt(theme=LIGHT)
     assert art._theme == LIGHT
 
     art.set_theme(DARK)
     assert art._theme == DARK
+
+
+# --- the orbit's motion --------------------------------------------------
+#
+# Measured from the code that paints, through chip_position, rather than
+# from a formula copied into the test. That is the point: a test with its
+# own copy of the arithmetic would go on passing after the painting
+# changed, which is how the original motion survived every run.
+
+
+def orbit_samples(art, index, steps=400):
+    """Every position of one chip across a whole cycle, in seconds."""
+    cycle = art._CYCLE_MS / 1000.0
+    return [(step / steps * cycle,
+             art.chip_position(index, math.tau * step / steps)[0])
+            for step in range(steps + 1)]
+
+
+def test_the_chips_are_not_rounded_to_whole_pixels(qt_app) -> None:
+    """Rounding is what made the motion look like an image still loading.
+
+    A chip moving less than a pixel a frame could then only appear as
+    still, still, jump. The coordinates have to keep their fractions or the
+    antialiasing has nothing to soften.
+
+    Checked by painting rather than by reading the numbers back: two phases
+    a fraction of a pixel apart are rendered and compared. Snapped to the
+    grid they land on the same pixels and the two pictures are identical;
+    painted as floats the antialiasing resolves them differently.
+    """
+    art = OrbitArt(moving=False, theme=DARK)
+    art.resize(260, 240)
+
+    base = 1.0
+    nudge = base + 1e-4
+    moved = art.chip_position(0, nudge)[0] - art.chip_position(0, base)[0]
+    assert 0 < abs(moved) < 1.0, (
+        f"this check needs a shift smaller than a pixel, got {moved:.4f}px")
+
+    art.set_phase(base)
+    first = art.grab().toImage()
+    art.set_phase(nudge)
+    second = art.grab().toImage()
+
+    assert first != second, (
+        f"a shift of {abs(moved):.4f}px painted identically, so the chips are "
+        f"being snapped to the pixel grid and the motion can only step")
+
+
+def test_the_motion_is_visible_but_not_hurried(qt_app) -> None:
+    """The orbit drifted 11px over twelve seconds, which read as a still image.
+
+    Held between two bounds: enough travel that the movement is
+    unmistakable, not so much that it pulls the eye off the words beside
+    it. Both numbers are a judgement call, so they are written down rather
+    than left to whatever the painting happened to produce.
+    """
+    art = OrbitArt(moving=False)
+    art.resize(260, 240)
+    cycle = art._CYCLE_MS / 1000.0
+
+    for index in range(len(OrbitArt._CHIPS)):
+        samples = orbit_samples(art, index)
+        travel = max(x for _, x in samples) - min(x for _, x in samples)
+        speeds = [abs(samples[n + 1][1] - samples[n][1]) / (cycle / len(samples))
+                  for n in range(len(samples) - 1)]
+        peak = max(speeds)
+
+        assert travel >= 25.0, (
+            f"chip {index} travels {travel:.1f}px across the cycle, too little "
+            f"to read as motion rather than as a still image")
+        assert travel <= 70.0, (
+            f"chip {index} travels {travel:.1f}px, which is hurried for an "
+            f"illustration sitting beside a paragraph")
+        assert 3.0 <= peak <= 18.0, (
+            f"chip {index} peaks at {peak:.1f}px per second; it should be "
+            f"clearly moving but unhurried")
+
+
+def test_the_chips_do_not_trace_the_same_path(qt_app) -> None:
+    """Four chips, four phases, so no two of them move alike.
+
+    The chips used to share one phase, and two of the six pairs then
+    traced paths within 7% of each other, which is the same motion twice.
+    The other pairs already differed because the chips sit a quarter turn
+    apart around the ellipse, so it was the diametrically opposed pairs
+    that read as doubled up. A quarter cycle of phase between neighbours
+    takes the closest pair to 25% apart, which is the gap the geometry
+    allows: two chips half a cycle apart are exactly opposed, and an
+    opposed pair on an ellipse is as close to tracing one path as it gets.
+    """
+    art = OrbitArt(moving=False)
+    art.resize(260, 240)
+    steps = 400
+
+    def velocity(index):
+        xs = [art.chip_position(index, math.tau * step / steps)[0]
+              for step in range(steps + 1)]
+        return [xs[n + 1] - xs[n] for n in range(steps)]
+
+    paths = [velocity(index) for index in range(len(OrbitArt._CHIPS))]
+    for first in range(len(paths)):
+        for second in range(first + 1, len(paths)):
+            scale = max(abs(v) for v in paths[first])
+            apart = max(abs(x - y) for x, y in zip(paths[first], paths[second]))
+            assert apart > scale * 0.2, (
+                f"chips {first} and {second} trace the same path, within "
+                f"{apart / scale * 100:.0f}% of each other, so one looks "
+                f"like a copy of the other")
+
+
+def test_one_cycle_is_long_enough_to_breathe(qt_app) -> None:
+    """A full breath, not a fidget: the chip rests at each end of its travel."""
+    art = OrbitArt(moving=False)
+    cycle_ms = art._CYCLE_MS
+    assert 10000 <= cycle_ms <= 25000, (
+        f"a {cycle_ms}ms cycle is {'too quick to settle' if cycle_ms < 10000 else 'too slow to notice'}")
 
 
 @pytest.mark.parametrize("name", [LIGHT, MIKU, DARK])
@@ -179,7 +302,7 @@ def test_model_controls_use_the_stored_theme_on_first_paint(
         instance.network.wait(10000)
 
 
-def test_orbit_art_defaults_to_dark_for_a_caller_that_forgets() -> None:
+def test_orbit_art_defaults_to_dark_for_a_caller_that_forgets(qt_app) -> None:
     """The fallback stays, so a future hand-painted widget cannot crash.
 
     Dark is the palette every token has a value for, so a missing
