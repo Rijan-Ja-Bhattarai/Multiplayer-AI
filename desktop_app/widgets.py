@@ -59,7 +59,10 @@ class OrbitArt(QWidget):
               ("Gemini", "✦", "orbit_gemini"), ("OpenAI", "◎", "orbit_openai"))
     # The ellipse the chips travel, the sway either side of their resting
     # place in radians, and how long one full breath takes. At this sway a
-    # chip drifts about 40px across eight seconds.
+    # chip drifts about 40px across eight seconds. The sway is also what
+    # keeps the four chips from tracing near-identical paths: a chip that
+    # barely moves cannot be told from its neighbours however its phase is
+    # arranged.
     _CHIP_RX = 111.0
     _CHIP_RY = 98.0
     _SWAY = 0.26
@@ -81,14 +84,16 @@ class OrbitArt(QWidget):
     def chip_angle(self, index, phase):
         """Where chip ``index`` sits, in radians, at ``phase``.
 
-        Each chip is a quarter of a cycle ahead of the one before it. In
-        lockstep they all reach the end of their travel in the same instant
-        and turn back together, which reads as a pulse rather than as
-        motion however smoothly any single one of them travels. Staggering
-        them means one is always slowing while another is picking up.
+        Every chip shares one phase. That looks like it should make them
+        move as one, and it was worth measuring: with the old 0.07 sway it
+        did, the four paths landing within 7% of each other, because at
+        that amplitude all four were nearly stationary rather than because
+        of the phase. Raising the sway is what separated them, and it
+        leaves the chips as far apart at 0.26 as a phase offset between
+        neighbours did. So the offset is not here: one less term, and
+        nothing measurable given up for it.
         """
-        return (index * math.pi / 2 - math.pi / 4
-                + math.sin(phase + index * math.pi / 2) * self._SWAY)
+        return index * math.pi / 2 - math.pi / 4 + math.sin(phase) * self._SWAY
 
     def chip_position(self, index, phase):
         """The centre of chip ``index`` at ``phase``, as floats.

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 
 import pytest
 
@@ -967,6 +968,28 @@ def test_the_destructive_dialog_defaults_to_cancel(window) -> None:
     assert box.defaultButton() is box.button(QMessageBox.StandardButton.Cancel)
 
 
+def read_settings_resilient(path, attempts=8, pause=0.005):
+    """Read settings.json, tolerating a writer part way through a replace.
+
+    On Windows the reader is the side that loses: replacing a file takes
+    DELETE access on it and CPython opens files without FILE_SHARE_DELETE,
+    so a read issued while the runtime thread is moving the file into place
+    is refused with ERROR_ACCESS_DENIED. The writer retries now, which
+    settles that half, but this is the half a reader controls and the
+    writer's retries cannot help it.
+
+    Only the test needs this. Nothing in the app reads settings.json after
+    Storage has loaded it, so there is no product read to make robust.
+    """
+    for attempt in range(attempts):
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(pause * (attempt + 1))
+
+
 def test_follow_system_persists_immediately(window) -> None:
     """Removing the stored theme must reach the file, not just memory.
 
@@ -976,11 +999,11 @@ def test_follow_system_persists_immediately(window) -> None:
     """
     miku_index = [c[1] for c in THEME_CHOICES].index(MIKU)
     window.theme_picker.setCurrentIndex(miku_index)
-    assert json.loads(window.storage.path.read_text(encoding="utf-8"))["theme"] == MIKU
+    assert read_settings_resilient(window.storage.path)["theme"] == MIKU
 
     window.theme_picker.setCurrentIndex(0)
 
-    on_disk = json.loads(window.storage.path.read_text(encoding="utf-8"))
+    on_disk = read_settings_resilient(window.storage.path)
     assert "theme" not in on_disk
 
 

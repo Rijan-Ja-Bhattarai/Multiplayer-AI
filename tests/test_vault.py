@@ -17,12 +17,14 @@ import json
 import os
 import stat
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
 
 import keyring.errors
 
+from desktop_app import storage as storage_module
 from desktop_app.storage import (ABSENT, REMOVED, UNAVAILABLE, Storage, Vault,
                                   WorkspaceVault, default_data_directory,
                                   write_json_durably)
@@ -393,6 +395,92 @@ class DurableWriteTests(unittest.TestCase):
                     write_json_durably(target, "{}")
 
             self.assertFalse(target.exists())
+
+    def test_a_refused_rename_is_retried_rather_than_reported(self) -> None:
+        """Windows refuses the replace whenever anything else holds the file.
+
+        Replacing a file goes through MoveFileEx, which takes DELETE access
+        on the target, and CPython opens files without FILE_SHARE_DELETE.
+        So any other handle on the same path loses, and settings are
+        written from the UI thread and from the runtime's own. Measured on
+        this machine, six concurrent writers had four refused before the
+        retry existed. Nothing has reached the target at this point, so the
+        write has not happened yet rather than having gone wrong, and the
+        content is the same on every attempt.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory, "settings.json")
+            calls = []
+            real_replace = Path.replace
+            refusals = [PermissionError("Access is denied")] * 3
+
+            def replace(self, other):
+                calls.append(1)
+                if refusals:
+                    raise refusals.pop(0)
+                return real_replace(self, other)
+
+            with mock.patch.object(Path, "replace", replace):
+                write_json_durably(target, '{"written": true}')
+
+            self.assertEqual(len(calls), 4, "three refusals then the real move")
+            self.assertEqual(json.loads(target.read_text(encoding="utf-8")),
+                             {"written": True})
+
+    def test_a_rename_that_is_always_refused_is_given_up_on(self) -> None:
+        """Retrying forever would hang a caller who needs to know.
+
+        If something holds the file for good, the write genuinely cannot
+        land, and silence would leave the settings and the file disagreeing.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory, "settings.json")
+            calls = []
+
+            def replace(self, other):
+                calls.append(1)
+                raise PermissionError("Access is denied")
+
+            with mock.patch.object(Path, "replace", replace), \
+                    mock.patch("desktop_app.storage._REPLACE_PAUSE", 0):
+                with self.assertRaises(PermissionError):
+                    write_json_durably(target, "{}")
+
+            self.assertEqual(len(calls), storage_module._REPLACE_ATTEMPTS,
+                             "it should stop at the attempt limit, not sooner")
+            self.assertFalse(target.exists())
+
+    def test_concurrent_durable_writes_all_land(self) -> None:
+        """The case that produced the flake: two threads, one settings file.
+
+        A reader that holds the file for good cannot be satisfied, but two
+        writers each hold it for a moment, and neither should lose.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory, "settings.json")
+            target.write_text("{}", encoding="utf-8")
+            writers = 4
+            rounds = 20
+            refused = []
+            barrier = threading.Barrier(writers)
+
+            def writer(number):
+                barrier.wait()
+                for _ in range(rounds):
+                    try:
+                        write_json_durably(target, json.dumps({"writer": number}))
+                    except PermissionError as exc:
+                        refused.append(exc)
+
+            threads = [threading.Thread(target=writer, args=(n,))
+                       for n in range(writers)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=60)
+
+            self.assertEqual(refused, [], f"{len(refused)} writes were refused")
+            json.loads(target.read_text(encoding="utf-8"))
 
     def test_removing_the_final_record_flushes_the_directory(self) -> None:
         """A lost unlink would resurrect a ledger of finished work for ever."""

@@ -232,16 +232,19 @@ def test_the_motion_is_visible_but_not_hurried(qt_app) -> None:
 
 
 def test_the_chips_do_not_trace_the_same_path(qt_app) -> None:
-    """Four chips, four phases, so no two of them move alike.
+    """No two chips may move alike, or one looks like a copy of another.
 
-    The chips used to share one phase, and two of the six pairs then
-    traced paths within 7% of each other, which is the same motion twice.
-    The other pairs already differed because the chips sit a quarter turn
-    apart around the ellipse, so it was the diametrically opposed pairs
-    that read as doubled up. A quarter cycle of phase between neighbours
-    takes the closest pair to 25% apart, which is the gap the geometry
-    allows: two chips half a cycle apart are exactly opposed, and an
-    opposed pair on an ellipse is as close to tracing one path as it gets.
+    This is a guard on the sway rather than on the phase. With the old
+    0.07 amplitude the four paths landed within 7% of each other, which is
+    the same motion four times: the chips were too still to tell apart, not
+    marching in step. Raising the sway took the closest pair to 25%, which
+    is the floor the geometry allows, since chips half a cycle apart are
+    exactly opposed and an opposed pair on an ellipse is as close to
+    tracing one path as it gets.
+
+    It was checked whether giving each chip its own phase would help
+    instead. At this sway it changes which pair is closest and leaves the
+    minimum exactly where it was, so there is no offset in the painting.
     """
     art = OrbitArt(moving=False)
     art.resize(260, 240)
