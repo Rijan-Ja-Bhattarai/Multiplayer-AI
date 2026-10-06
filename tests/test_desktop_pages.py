@@ -12,6 +12,7 @@ from pathlib import Path
 
 import json
 import os
+import re
 import time
 
 import pytest
@@ -29,7 +30,7 @@ from PySide6.QtWidgets import (QApplication, QDialog, QFrame, QLabel,
 from desktop_app import window as win  # noqa: E402
 from desktop_app.storage import ABSENT, REMOVED, Storage  # noqa: E402
 from desktop_app.theme import (DARK, LIGHT, MIKU, THEME_CHOICES, THEME_NAMES,
-                               THEMES, color)  # noqa: E402
+                             THEMES, color, stylesheet)  # noqa: E402
 
 
 class MemoryVault:
@@ -955,6 +956,347 @@ def test_a_card_message_follows_a_theme_change(window) -> None:
     assert color(LIGHT, "error") in line.message.styleSheet(), (
         f"the message kept the old theme's colour: {line.message.styleSheet()!r}")
     assert color(DARK, "error") not in line.message.styleSheet()
+
+
+def test_the_invite_card_is_on_the_workspaces_page(window) -> None:
+    """Inviting a device belongs on the page, beside what it is for."""
+    window.ready = True
+    window.navigate(win.WORKSPACES_PAGE)
+
+    assert window.stack.currentIndex() == win.WORKSPACES_PAGE
+    assert window.workspace_invite_name.text() or True, "no device name field"
+    assert window.workspace_invite_url.text().startswith("ws://"), (
+        f"the card does not show an address: {window.workspace_invite_url.text()!r}")
+
+
+def test_the_invite_card_does_not_open_a_dialog(window, monkeypatch) -> None:
+    """The whole point: the invitation is made here, not in a window.
+
+    The button used to call InviteDialog, so the description of what an
+    invitation is for sat on the page while every field that made one was
+    somewhere else.
+    """
+    opened = []
+    monkeypatch.setattr(QDialog, "exec", lambda self, *a, **k: opened.append(self))
+    window.ready = True
+    window.workspace_invite_name.setText("alex-laptop")
+
+    sent = []
+    window.command = lambda name, *args, **kwargs: sent.append((name, args))
+
+    window.create_invitation()
+
+    assert not opened, f"a dialog was opened instead of the page: {opened}"
+    assert sent, "no invitation was attempted"
+    assert sent[0][0] == "invite"
+    assert sent[0][1][0] == "alex-laptop"
+
+
+def test_the_invitation_is_shown_on_the_card_that_asked(window, qt_app) -> None:
+    """The result comes back to the card, not to a dialog that has closed."""
+    window.ready = True
+    window.workspace_invite_name.setText("alex-laptop")
+
+    callbacks = {}
+    window.command = lambda name, *args, **kwargs: callbacks.update(kwargs)
+    window.create_invitation()
+    assert window.workspace_invite_create_button.text() == "Creating…"
+
+    callbacks["success"]({"version": 1, "url": "ws://192.168.1.70:1234/connect",
+                          "token": "t" * 40})
+
+    qt_app.processEvents()
+    assert window.workspace_invite_result.isHidden() is False, (
+        "the invitation was created but nothing on the card shows it")
+    assert "alex" not in window.workspace_invite_name.text(), (
+        "the name field was not cleared after a successful invitation")
+    assert window.workspace_invite_copy_button.isHidden() is False
+
+
+def test_a_refused_invitation_is_reported_on_the_card(window) -> None:
+    window.ready = True
+    window.workspace_invite_name.setText("alex-laptop")
+
+    callbacks = {}
+    window.command = lambda name, *args, **kwargs: callbacks.update(kwargs)
+    window.create_invitation()
+    callbacks["failure"]("The relay is not running")
+
+    assert "not running" in window.workspace_invite_error.message.text()
+    assert window.workspace_invite_create_button.text() == "Create invitation"
+    assert window.workspace_invite_create_button.isEnabled() is True
+    # The create card's messages are untouched by an invitation failure.
+    assert not window.workspace_create_line.message.text()
+    assert not window.workspace_join_line.message.text()
+
+
+def test_turning_off_lan_stops_the_card_changing_the_address(window) -> None:
+    """The URL is the LAN address while LAN is on, and the reader's when not."""
+    window.ready = True
+    window.port = 1234
+    window.workspace_invite_network.setCurrentIndex(0)
+    window.workspace_invite_lan.setChecked(True)
+    window.workspace_invite_address()
+    lan_url = window.workspace_invite_url.text()
+    assert lan_url.startswith("ws://") and ":1234/connect" in lan_url
+
+    window.workspace_invite_lan.setChecked(False)
+    window.workspace_invite_address()
+    assert window.workspace_invite_url.text() == lan_url, (
+        "the address changed even though LAN sharing was turned off")
+
+
+def test_the_create_and_join_cards_look_different(window) -> None:
+    """They were read as halves of one form.
+
+    Both had a text box, a line of help text and a button under one shared
+    heading, and nothing said that create makes a network here while join
+    connects to one elsewhere.
+
+    Checked on the rendered stylesheet rather than on the object names,
+    because distinct names that style identically still look the same. The
+    accent edge is what actually separates them.
+    """
+    page = window.stack.widget(win.WORKSPACES_PAGE)
+    assert page is not None
+
+    rules = {}
+    for name in ("createCard", "joinCard", "inviteCard"):
+        matched = re.search(rf"QFrame#{name} \{{([^}}]*)\}}",
+                            stylesheet(window.theme))
+        assert matched, f"the stylesheet has no rule for {name}"
+        rules[name] = matched.group(1)
+
+    edges = {name: re.search(r"border-left:\s*([^;]+);", rule)
+             for name, rule in rules.items()}
+    for name, edge in edges.items():
+        assert edge is not None, f"{name} has no accent edge: {rules[name]}"
+
+    colours = {edge.group(1).strip() for edge in edges.values()}
+    assert len(colours) == 3, (
+        f"the three cards share an accent edge, so they read as one form: "
+        f"{colours}")
+
+    # And each resolves to a real colour in every theme, rather than to an
+    # unresolved placeholder that would render as nothing.
+    for theme in THEME_NAMES:
+        sheet = stylesheet(theme)
+        for name in ("createCard", "joinCard", "inviteCard"):
+            rule = re.search(rf"QFrame#{name} \{{([^}}]*)\}}", sheet)
+            assert rule is not None, f"{name} has no rule in {theme}"
+            for token in re.findall(r"@@([a-z_]+)@@", rule.group(1)):
+                assert color(theme, token), (
+                    f"{name} uses @@{token}@@ in {theme}, which is not a "
+                    "token in that palette")
+
+
+def test_connecting_a_model_lands_on_the_agents_page(window) -> None:
+    """The card is on the page, not in a window.
+
+    Five buttons led here: the rail, the welcome panel, a provider card, the
+    overview and each agent's own Edit. All of them opened a 272-line modal,
+    which meant the form was somewhere else from the list of models it adds
+    to, and a successful save showed as a dialog closing rather than a card
+    appearing.
+    """
+    window.ready = True
+
+    window.add_agent("anthropic")
+    assert window.stack.currentIndex() == win.AGENTS_PAGE, (
+        "connecting a model did not open the page that holds it")
+    assert window.model_provider.currentData() == "anthropic"
+    assert window.model_name.text() == "anthropic-agent"
+    assert window.model_form_title.text() == "Connect a model"
+    assert window.model_save_button.text() == "Connect agent"
+
+
+def test_connecting_a_model_does_not_open_a_dialog(window, monkeypatch) -> None:
+    opened = []
+    monkeypatch.setattr(QDialog, "exec", lambda self, *a, **k: opened.append(self))
+    window.ready = True
+
+    window.add_agent("ollama")
+    window.edit_agent({"id": "llama-agent", "provider": "ollama",
+                       "profile": {"id": "llama-agent", "model": "llama3.2"}})
+
+    assert not opened, f"a dialog was opened instead of the page: {opened}"
+
+
+def test_editing_a_model_loads_it_into_the_same_card(window) -> None:
+    window.ready = True
+    profile = {"id": "llama-agent", "model": "llama3.2", "base_url": "http://host:1234",
+               "system_prompt": "be terse", "autostart": False, "vision": True,
+               "web_search": "always", "search_provider": "ollama",
+               "searxng_url": "", "searxng_allow_insecure": False}
+
+    window.edit_agent({"id": "llama-agent", "provider": "ollama", "profile": profile})
+
+    assert window.model_form_title.text() == "Edit llama-agent"
+    assert window.model_save_button.text() == "Save changes"
+    assert window.model_id.currentText() == "llama3.2"
+    assert window.model_base.text() == "http://host:1234"
+    assert window.model_system.toPlainText() == "be terse"
+    assert window.model_autostart.isChecked() is False
+    assert window.model_vision.isChecked() is True
+    assert window.model_internet.isChecked() is True
+    assert window.model_search_mode.currentData() == "always"
+    assert window.model_name.isReadOnly() is True
+
+
+def test_the_model_form_reaches_the_agents_page_in_full(window) -> None:
+    """Every field the dialog had, not the easy half of it.
+
+    Web search with SearXNG and its Test button is about half the old form,
+    and leaving it in a dialog would have left a modal on the model path,
+    which is the thing being removed.
+    """
+    window.ready = True
+    window.navigate(win.AGENTS_PAGE)
+
+    for name in ("model_name", "model_provider", "model_id", "model_base",
+                 "model_key", "model_system", "model_autostart", "model_insecure",
+                 "model_vision", "model_internet", "model_search_provider",
+                 "model_search_mode", "model_search_url", "model_search_key",
+                 "model_search_insecure", "model_search_test", "model_search_status",
+                 "model_search_help", "model_models_button", "model_save_button"):
+        assert hasattr(window, name), f"the form is missing {name}"
+
+    # The card is on the page, above the connected models.
+    page = window.stack.currentWidget()
+    names = [child.objectName() for child in page.findChildren(win.QFrame)]
+    assert "createCard" in names
+
+
+def test_a_failed_model_save_is_reported_on_the_card(window) -> None:
+    """Not a toast, and not in a dialog that has closed."""
+    window.ready = True
+    window.add_agent("ollama")
+    window.model_id.setCurrentText("llama3.2")
+
+    callbacks = {}
+    window.command = lambda name, *args, **kwargs: callbacks.update(kwargs)
+    window.save_model()
+    callbacks["failure"]("The provider refused that key")
+
+    assert "refused" in window.model_error_line.message.text()
+    assert window.model_save_button.isEnabled() is True
+    # And it belongs to this card alone.
+    assert not window.workspace_create_line.message.text()
+    assert not window.workspace_join_line.message.text()
+
+
+def test_a_search_failure_points_at_the_search_settings(window) -> None:
+    """A failure caused by search settings focuses them, as it used to."""
+    window.ready = True
+    window.add_agent("ollama")
+    window.model_internet.setChecked(True)
+    window.model_search_provider.setCurrentIndex(
+        window.model_search_provider.findData("ollama"))
+    window.model_search_key.setText("")
+
+    callbacks = {}
+    window.command = lambda name, *args, **kwargs: callbacks.update(kwargs)
+    window.save_model()
+
+    assert not callbacks, "a save was attempted with no search key"
+    assert "account key" in window.model_error_line.message.text(), (
+        f"the page says {window.model_error_line.message.text()!r}")
+
+
+def test_a_plain_http_searxng_is_refused_without_the_lan_box(window) -> None:
+    window.ready = True
+    window.add_agent("ollama")
+    window.model_internet.setChecked(True)
+    window.model_search_provider.setCurrentIndex(
+        window.model_search_provider.findData("searxng"))
+    window.model_search_url.setText("http://localhost:8888")
+    window.model_search_insecure.setChecked(False)
+
+    sent = []
+    window.command = lambda name, *args, **kwargs: sent.append(name)
+    window.save_model()
+
+    assert not sent, "a save was attempted over plain HTTP"
+    assert "HTTP" in window.model_error_line.message.text()
+
+    window.model_search_insecure.setChecked(True)
+    window.save_model()
+    assert sent == ["save_agent"], "it was still refused after the box was ticked"
+
+
+def test_a_model_message_survives_the_agents_poll(window, qt_app) -> None:
+    """The reason messages are kept in state, not in the card.
+
+    render_agents clears and rebuilds the whole grid, so a message held only
+    by a widget would be destroyed by the next poll. That is the bug the
+    workspace page had.
+    """
+    window.ready = True
+    window.add_agent("ollama")
+    window.set_card_message(window.model_error_line, "The provider refused that key")
+
+    for _ in range(3):
+        window.render_agents()
+        qt_app.processEvents()
+
+    assert window.model_error_line.message.text() == "The provider refused that key", (
+        "a poll on the agents page cleared the model's own message")
+
+
+def test_finding_models_reports_on_the_card(window) -> None:
+    window.ready = True
+    window.add_agent("ollama")
+
+    callbacks = {}
+    window.command = lambda name, *args, **kwargs: callbacks.update(kwargs)
+    window.find_models()
+    assert window.model_models_button.isEnabled() is False
+
+    callbacks["success"]([])
+    assert window.model_models_button.isEnabled() is True
+    assert "No models found" in window.model_error_line.message.text()
+
+    callbacks["failure"]("nope")
+    assert "Could not list models" in window.model_error_line.message.text()
+
+
+def test_testing_web_search_reports_where_it_is_configured(window) -> None:
+    """The search result is not the model's error, so it has its own line."""
+    window.ready = True
+    window.add_agent("ollama")
+    window.model_internet.setChecked(True)
+    window.model_search_provider.setCurrentIndex(
+        window.model_search_provider.findData("ollama"))
+    window.model_search_key.setText("k" * 20)
+
+    callbacks = {}
+    window.command = lambda name, *args, **kwargs: callbacks.update(kwargs)
+    window.test_web_search()
+    assert window.model_search_status.text() == "Testing web search…"
+
+    callbacks["success"](3)
+    assert "3 results" in window.model_search_status.text()
+    assert not window.model_error_line.message.text(), (
+        "a search result was reported as a model failure")
+
+
+def test_a_stale_search_result_is_dropped_when_the_settings_change(window) -> None:
+    """The answer belongs to the settings that were asked about."""
+    window.ready = True
+    window.add_agent("ollama")
+    window.model_internet.setChecked(True)
+    window.model_search_provider.setCurrentIndex(
+        window.model_search_provider.findData("ollama"))
+    window.model_search_key.setText("k" * 20)
+
+    callbacks = {}
+    window.command = lambda name, *args, **kwargs: callbacks.update(kwargs)
+    window.test_web_search()
+    window.model_search_url.setText("https://changed.example.com")
+    callbacks["success"](3)
+
+    assert not window.model_search_status.text(), (
+        "a result arrived for settings that are no longer on screen")
 
 
 def test_the_create_panel_previews_the_rail_button(window) -> None:

@@ -11,23 +11,26 @@ from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QSize, Qt, QTimer, 
 from PySide6.QtGui import (QGuiApplication, QIcon, QKeySequence, QPixmap, QPainter,
                            QColor, QDesktopServices, QFont, QPalette, QShortcut)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QFileDialog,
-    QFrame, QGraphicsOpacityEffect, QGridLayout, QHBoxLayout, QLabel,
-    QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
+    QFormLayout, QFrame, QGraphicsOpacityEffect, QGridLayout, QHBoxLayout,
+    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
     QPlainTextEdit, QProgressBar, QScrollArea, QSizePolicy, QStackedWidget,
     QVBoxLayout,
     QWidget)
 
 from network_a2a.persistence import HistoryStore, model_context
 from network_a2a.content import MAX_MESSAGE_BYTES, content_summary, validate_content
+from network_a2a.adapters import PROVIDERS
 
 from .bridge import NetworkThread
-from .dialogs import AgentDialog, InviteDialog, parse_invitation
+from .dialogs import InviteDialog, parse_invitation
 from .icons import navigation_icon, provider_logo, provider_pixmap
+from .lan import lan_addresses
 from .layout import minimum_size, sidebar_should_collapse, window_size
 from .markdown import MarkdownMessage
 from .resources import ResourceSampler
-from .theme import (DARK, LIGHT, THEME_CHOICES, color, provider_entry, provider_names,
-                    resolve_theme, stylesheet, system_theme)
+from .theme import (DARK, LIGHT, PROVIDER_NAMES, THEME_CHOICES, color,
+                   provider_entry, provider_names, resolve_theme, stylesheet,
+                   system_theme)
 from .widgets import (Composer, ErrorLine, HoverRow, OrbitArt, Select, WorkspaceButton,
                      action, app_mark, label)
 
@@ -85,6 +88,7 @@ PAGE_HELP = {
 RESOURCES_PAGE = PAGE_INDEX["resources"]
 SETTINGS_PAGE = PAGE_INDEX["settings"]
 WORKSPACES_PAGE = PAGE_INDEX["workspaces"]
+AGENTS_PAGE = PAGE_INDEX["agents"]
 # The mark beside a message, and the width a grouped message is indented by
 # when it follows its own speaker's earlier message.
 SPEAKER_AVATAR = 34
@@ -565,6 +569,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(label("YOUR DISTRIBUTED TEAM", "eyebrow"))
         layout.addWidget(label("Agents", "title"))
         layout.addWidget(label("Models connected to this workspace.", "muted"))
+        self.model_card, self.model_column = self.model_connection_card()
+        layout.addWidget(self.model_card)
+        layout.addWidget(label("CONNECTED", "eyebrow"))
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search agents or models…")
         self.search.textChanged.connect(self.render_agents)
@@ -574,6 +581,146 @@ class MainWindow(QMainWindow):
         layout.addLayout(self.agent_cards)
         layout.addStretch()
         return page
+
+    def model_connection_card(self):
+        """The whole model form, on the page, above the connected models.
+
+        This is AgentDialog's 272 lines moved into the content area. It was a
+        separate window for a form with no reason to be one: the fields were
+        somewhere else from the list of models they add to, and the result of
+        a save was a dialog closing rather than a new card appearing above.
+
+        Built once and reused. Edit loads a profile into these same fields,
+        so there is one place that knows what a model is, rather than a card
+        and a dialog between them.
+        """
+        card, column = frame("createCard")
+        column.setContentsMargins(22, 20, 22, 20)
+        self.model_form_title = label("Connect a model", "heading")
+        column.addWidget(self.model_form_title)
+        column.addWidget(label(
+            "Your model runs on this device. Its key stays in your OS "
+            "credential store.", "muted", True))
+        column.addSpacing(12)
+
+        form = QFormLayout()
+        form.setVerticalSpacing(12)
+        self.model_name = QLineEdit()
+        form.addRow("Agent name", self.model_name)
+        self.model_provider = Select()
+        for key, info in PROVIDER_NAMES.items():
+            self.model_provider.addItem(info[0], key)
+        form.addRow("Provider", self.model_provider)
+        self.model_id = Select()
+        self.model_id.setEditable(True)
+        self.model_id.lineEdit().setPlaceholderText("Model ID, e.g. llama3.2")
+        self.model_models_button = action("Find models", self.find_models)
+        model_row = QHBoxLayout()
+        model_row.addWidget(self.model_id, 1)
+        model_row.addWidget(self.model_models_button)
+        form.addRow("Model", model_row)
+        self.model_base = QLineEdit()
+        form.addRow("API root", self.model_base)
+        self.model_key = QLineEdit()
+        self.model_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.model_key.setPlaceholderText("API key · leave blank to keep a saved key")
+        form.addRow("API key", self.model_key)
+        self.model_system = QPlainTextEdit()
+        self.model_system.setMaximumHeight(90)
+        self.model_system.setPlaceholderText("Optional instructions for this agent")
+        form.addRow("Instructions", self.model_system)
+        column.addLayout(form)
+
+        self.model_autostart = QCheckBox("Start this agent automatically when the app opens")
+        self.model_autostart.setChecked(True)
+        self.model_autostart.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        column.addWidget(self.model_autostart, 0, Qt.AlignmentFlag.AlignLeft)
+        self.model_insecure = QCheckBox("Allow a provider's HTTP endpoint on a trusted LAN")
+        self.model_insecure.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        column.addWidget(self.model_insecure, 0, Qt.AlignmentFlag.AlignLeft)
+        self.model_vision = QCheckBox("Enable image support for this model")
+        self.model_vision.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        column.addWidget(self.model_vision, 0, Qt.AlignmentFlag.AlignLeft)
+        column.addWidget(label(
+            "Select a vision-capable model to understand images and scanned "
+            "PDFs. Text PDFs work with any model.", "muted", True))
+
+        column.addWidget(label("Internet access", "heading"))
+        self.model_internet = QCheckBox("Allow this model to search the web")
+        self.model_internet.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        column.addWidget(self.model_internet, 0, Qt.AlignmentFlag.AlignLeft)
+        self.model_search_settings = QWidget()
+        search_layout = QVBoxLayout(self.model_search_settings)
+        search_layout.setContentsMargins(0, 0, 0, 0)
+        self.model_search_form = QFormLayout()
+        self.model_search_provider = Select()
+        self.model_search_provider.addItem("Ollama web search · no server setup", "ollama")
+        self.model_search_provider.addItem("SearXNG · use your own server", "searxng")
+        self.model_search_mode = Select()
+        self.model_search_mode.addItem(
+            "Automatic · when the model needs outside information", "auto")
+        self.model_search_mode.addItem("Always · search for every question", "always")
+        self.model_search_url = QLineEdit()
+        self.model_search_url.setPlaceholderText(
+            "https://your-server.example.com or http://localhost:8888")
+        self.model_search_key = QLineEdit()
+        self.model_search_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.model_search_key.setPlaceholderText(
+            "Ollama account key · leave blank to keep a saved search key")
+        self.model_search_form.addRow("Search provider", self.model_search_provider)
+        self.model_search_form.addRow("Search mode", self.model_search_mode)
+        self.model_search_form.addRow("Search API key", self.model_search_key)
+        self.model_search_form.addRow("SearXNG server", self.model_search_url)
+        search_layout.addLayout(self.model_search_form)
+        self.model_search_insecure = QCheckBox("Allow SearXNG over HTTP on a trusted LAN")
+        self.model_search_insecure.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        search_layout.addWidget(self.model_search_insecure, 0, Qt.AlignmentFlag.AlignLeft)
+        self.model_search_help = label("", "muted", True)
+        self.model_search_help.setTextFormat(Qt.TextFormat.RichText)
+        self.model_search_help.setOpenExternalLinks(True)
+        search_layout.addWidget(self.model_search_help)
+        self.model_search_test = action("Test web search", self.test_web_search)
+        self.model_search_testing = False
+        search_layout.addWidget(self.model_search_test)
+        self.model_search_status = label("", "muted", True)
+        self.model_search_status.setWordWrap(True)
+        search_layout.addWidget(self.model_search_status)
+        search_layout.addWidget(label(
+            "Automatic mode lets the model request a search for current or "
+            "uncertain facts. Some models may miss when a search is needed; "
+            "choose Always to search before every answer. Queries go to the "
+            "search provider you select, and source links are included in the "
+            "answer.", "muted", True))
+        column.addWidget(self.model_search_settings)
+
+        # Keyed model:connect, so a save failure belongs to this card alone
+        # and survives the poll that rebuilds the grid below it.
+        self.model_error_line = self.message_line("model:connect")
+        column.addWidget(self.model_error_line)
+        self.model_save_button = action("Connect agent", self.save_model, True)
+        column.addWidget(self.model_save_button)
+
+        # None means connecting a new model rather than editing one, which
+        # decides whether the provider change may rename the field.
+        self.model_profile_id = None
+        self.model_provider.currentIndexChanged.connect(self.change_model_provider)
+        self.model_internet.toggled.connect(self.change_model_internet)
+        self.model_search_provider.currentIndexChanged.connect(
+            self.change_model_internet)
+        for signal in (self.model_search_url.textChanged,
+                       self.model_search_key.textChanged,
+                       self.model_search_insecure.toggled,
+                       self.model_search_provider.currentIndexChanged,
+                       self.model_internet.toggled):
+            signal.connect(lambda *args: self.model_search_status.setText(""))
+        self.change_model_provider()
+        self.change_model_internet()
+        return card, column
 
     def chat_page(self):
         page = QWidget()
@@ -1761,16 +1908,261 @@ class MainWindow(QMainWindow):
                 member["online"] = False
             self.render_agents()
 
+    def change_model_provider(self):
+        """Point the form at whichever provider is selected.
+
+        Same rule the dialog used, so the model it can reach and the key it
+        needs are decided in one place.
+        """
+        key = self.model_provider.currentData()
+        spec = PROVIDERS[key]
+        if self.model_profile_id is None:
+            self.model_name.setText(f"{key}-agent")
+        if self.remote:
+            self.model_name.setText(self.identity)
+            self.model_name.setReadOnly(True)
+        self.model_base.setText(spec.base_url or "")
+        self.model_base.setPlaceholderText("https://your-deployment.example.com/v1")
+        self.model_models_button.setVisible(key not in ("anthropic", "gemini"))
+        self.model_key.setPlaceholderText(
+            "Optional for local Ollama" if not spec.key_required
+            else "API key · leave blank to keep a saved key")
+
+    def change_model_internet(self):
+        """Show the chosen search provider's fields and allow a test."""
+        enabled = self.model_internet.isChecked()
+        hosted = self.model_search_provider.currentData() == "ollama"
+        self.model_search_settings.setVisible(enabled)
+        self.model_search_form.setRowVisible(self.model_search_key, hosted)
+        self.model_search_form.setRowVisible(self.model_search_url, not hosted)
+        self.model_search_insecure.setVisible(not hosted)
+        self.model_search_test.setEnabled(enabled and not self.model_search_testing)
+        self.model_search_help.setText(
+            f'Get a key from <a href="https://ollama.com/settings/keys" '
+            f'style="color: {color(self.theme, "accent")}">your Ollama account</a> '
+            'and paste it into Search API key. It works with any connected model, '
+            'including local Ollama. The key stays in your OS credential store.'
+            if hosted else
+            "SearXNG needs a running search server; it is separate from your "
+            "model's API root. Enter its address above. The server owner must "
+            "enable JSON search results. Choose Ollama web search if you do not "
+            "have a server.")
+
+    def model_search_state(self):
+        """Everything that would make a test result out of date."""
+        return (self.model_search_provider.currentData(), self.model_search_mode.currentData(),
+                self.model_search_url.text().strip(), self.model_search_key.text().strip(),
+                self.model_search_insecure.isChecked())
+
+    def validate_model_search(self):
+        """Refuse an incomplete search setup, saying what is missing."""
+        if not self.model_internet.isChecked():
+            return True
+        if self.model_search_provider.currentData() == "ollama":
+            if not self.model_search_key.text().strip() and self.model_search_mode.currentData() != "off":
+                self.focus_model_search()
+                self.set_card_message(
+                    self.model_error_line,
+                    "Ollama web search needs an account key in Search API key.")
+                return False
+            return True
+        url = self.model_search_url.text().strip()
+        if not url:
+            self.focus_model_search()
+            self.set_card_message(
+                self.model_error_line,
+                "SearXNG needs the address of your search server.")
+            return False
+        if not url.startswith(("https://", "http://")):
+            self.focus_model_search()
+            self.set_card_message(
+                self.model_error_line, "The SearXNG address must start with http:// or https://")
+            return False
+        if url.startswith("http://") and not self.model_search_insecure.isChecked():
+            self.focus_model_search()
+            self.set_card_message(
+                self.model_error_line,
+                "That SearXNG address is plain HTTP. Tick the trusted-LAN box "
+                "to allow it, or use https://")
+            return False
+        return True
+
+    def focus_model_search(self):
+        """Put the caret in the search field the problem is about."""
+        hosted = self.model_search_provider.currentData() == "ollama"
+        (self.model_search_key if hosted else self.model_search_url).setFocus()
+
+    def find_models(self):
+        """List the provider's models without blocking the page."""
+        self.model_models_button.setEnabled(False)
+
+        def success(models):
+            self.model_models_button.setEnabled(True)
+            selected = self.model_id.currentText()
+            self.model_id.clear()
+            self.model_id.addItems(models)
+            if selected:
+                self.model_id.setCurrentText(selected)
+            if not models:
+                self.set_card_message(
+                    self.model_error_line,
+                    "No models found. Pull a model in Ollama or enter your "
+                    "provider's model ID directly.")
+
+        def failure(message):
+            self.model_models_button.setEnabled(True)
+            self.set_card_message(
+                self.model_error_line,
+                "Could not list models. Check the API root and key, or enter "
+                "the model ID directly.")
+
+        self.command("provider_models", self.model_provider.currentData(),
+                     self.model_base.text().strip(), self.model_key.text() or None,
+                     self.model_insecure.isChecked(), self.model_profile_id,
+                     success=success, failure=failure)
+
+    def test_web_search(self):
+        """Test the configured search service, and report it where it is set."""
+        self.clear_card_message(self.model_error_line)
+        if not self.validate_model_search():
+            return
+        self.model_search_testing = True
+        self.change_model_internet()
+        state = self.model_search_state()
+        self.model_search_status.setText("Testing web search…")
+
+        def success(count):
+            self.model_search_testing = False
+            self.change_model_internet()
+            if self.model_search_state() == state:
+                self.model_search_status.setText(
+                    f"Web search is reachable · {count} results returned" if count else
+                    "Connected to the search service, but no results were returned. "
+                    "Try again before relying on web search.")
+
+        def failure(message):
+            self.model_search_testing = False
+            self.change_model_internet()
+            if self.model_search_state() == state:
+                self.model_search_status.setText(message)
+                self.focus_model_search()
+
+        self.command("test_web_search", self.model_search_url.text().strip(),
+                     self.model_search_insecure.isChecked(),
+                     self.model_search_provider.currentData(),
+                     self.model_search_key.text().strip() or None,
+                     self.model_profile_id, success=success, failure=failure)
+
+    def save_model(self):
+        """Validate and save the profile, with separate model and search keys."""
+        self.clear_card_message(self.model_error_line)
+        if not self.validate_model_search():
+            return
+        profile = {"id": self.model_name.text().strip(),
+                   "provider": self.model_provider.currentData(),
+                   "model": self.model_id.currentText().strip(),
+                   "base_url": self.model_base.text().strip(),
+                   "system_prompt": self.model_system.toPlainText().strip(),
+                   "autostart": self.model_autostart.isChecked(),
+                   "allow_insecure": self.model_insecure.isChecked(),
+                   "vision": self.model_vision.isChecked(),
+                   "web_search": self.model_search_mode.currentData()
+                   if self.model_internet.isChecked() else "off",
+                   "search_provider": self.model_search_provider.currentData(),
+                   "searxng_url": self.model_search_url.text().strip(),
+                   "searxng_allow_insecure": self.model_search_insecure.isChecked()}
+        self.model_save_button.setEnabled(False)
+
+        def success(result):
+            self.model_key.clear()
+            self.model_search_key.clear()
+            self.model_profile_id = None
+            self.model_save_button.setEnabled(True)
+            self.model_form_title.setText("Connect a model")
+            self.model_save_button.setText("Connect agent")
+            self.clear_model_form()
+            self.navigate(AGENTS_PAGE)
+            self.notice(f"{profile['id']} is connected.")
+
+        def failure(message):
+            self.model_save_button.setEnabled(True)
+            self.set_card_message(self.model_error_line, message)
+            if self.model_internet.isChecked() and (
+                    "search" in message.lower() or "searxng" in message.lower()):
+                self.focus_model_search()
+
+        search_key = (self.model_search_key.text().strip() or None) \
+            if self.model_search_provider.currentData() == "ollama" else None
+        self.command("save_agent", profile, self.model_key.text() or None,
+                     search_key, success=success, failure=failure)
+
+    def clear_model_form(self):
+        """Back to a blank connect form after a save."""
+        self.model_key.clear()
+        self.model_search_key.clear()
+        self.model_system.clear()
+        self.model_search_url.clear()
+        self.model_search_status.setText("")
+        self.model_name.setReadOnly(False)
+        self.model_provider.setCurrentIndex(
+            self.model_provider.findData("ollama"))
+        self.change_model_provider()
+        self.model_autostart.setChecked(True)
+        self.model_insecure.setChecked(False)
+        self.model_vision.setChecked(False)
+        self.model_internet.setChecked(False)
+        self.change_model_internet()
+
     def add_agent(self, provider="ollama"):
+        """Open the page's own card, set to this provider.
+
+        Every one of the five entry points lands here now, so connecting a
+        model happens in one place. A dialog was a separate window for a form
+        that has no reason to be one, and it meant the model you connected
+        appeared in a different part of the app from the card that made it.
+        """
         if not self.ready:
-            self.notice("Your network is still starting.")
+            self.notice("Your network is still starting. Please wait a moment.")
             return
         if not isinstance(provider, str):
             provider = "ollama"
-        AgentDialog(self, provider).exec()
+        self.model_profile_id = None
+        self.model_form_title.setText("Connect a model")
+        self.model_save_button.setText("Connect agent")
+        self.model_provider.setCurrentIndex(self.model_provider.findData(provider))
+        self.navigate(AGENTS_PAGE)
+        self.model_name.setFocus()
 
     def edit_agent(self, agent):
-        AgentDialog(self, agent["provider"], agent["profile"]).exec()
+        """Load this model into the same card, so there is one form."""
+        if not self.ready:
+            self.notice("Your network is still starting. Please wait a moment.")
+            return
+        profile = agent.get("profile") or {}
+        self.model_profile_id = profile.get("id") or agent["id"]
+        self.model_form_title.setText(f"Edit {self.model_profile_id}")
+        self.model_save_button.setText("Save changes")
+        self.model_provider.setCurrentIndex(
+            self.model_provider.findData(agent.get("provider") or "ollama"))
+        self.change_model_provider()
+        self.model_name.setText(self.model_profile_id)
+        self.model_name.setReadOnly(True)
+        self.model_id.setCurrentText(profile.get("model") or "")
+        self.model_base.setText(profile.get("base_url") or "")
+        self.model_system.setPlainText(profile.get("system_prompt") or "")
+        self.model_autostart.setChecked(profile.get("autostart", True))
+        self.model_insecure.setChecked(profile.get("allow_insecure", False))
+        self.model_vision.setChecked(profile.get("vision", False))
+        self.model_search_provider.setCurrentIndex(max(0, self.model_search_provider.findData(
+            profile.get("search_provider", "searxng"))))
+        self.model_internet.setChecked(profile.get("web_search", "off") != "off")
+        self.model_search_mode.setCurrentIndex(max(0, self.model_search_mode.findData(
+            profile.get("web_search", "auto"))))
+        self.model_search_url.setText(profile.get("searxng_url", ""))
+        self.model_search_insecure.setChecked(profile.get("searxng_allow_insecure", False))
+        self.change_model_internet()
+        self.navigate(AGENTS_PAGE)
+        self.model_id.setFocus()
 
     def name_rule(self):
         """The one wording for the workspace-name limit, used in both places."""
@@ -1858,18 +2250,86 @@ class MainWindow(QMainWindow):
         column.addWidget(self.workspace_invite_button, 0, Qt.AlignmentFlag.AlignLeft)
         layout.addWidget(current)
 
-        layout.addWidget(label("Add another", "heading"))
+        # The invitation generator, on the page rather than in a dialog.
+        # This used to open InviteDialog, which is a separate window for a
+        # short form: the fields were somewhere else from the description of
+        # what an invitation is for, and the JSON it produces appeared in the
+        # dialog while the card it belongs to stayed empty.
+        layout.addWidget(label("BRING IN ANOTHER DEVICE", "eyebrow"))
+        invite, column = frame("inviteCard")
+        column.setContentsMargins(22, 20, 22, 20)
+        column.addWidget(label("Invite a device", "heading"))
+        column.addWidget(label(
+            "Creates an invitation to share with another laptop or desktop. "
+            "Each device gets its own identity, and the invitation is private: "
+            "send it only to the machine you mean.", "muted", True))
+        column.addSpacing(12)
+        self.workspace_invite_name = QLineEdit()
+        self.workspace_invite_name.setPlaceholderText("Device name · e.g. alex-laptop")
+        self.workspace_invite_name.textChanged.connect(
+            self.workspace_invite_typed)
+        self.workspace_invite_name.returnPressed.connect(self.create_invitation)
+        column.addWidget(self.workspace_invite_name)
+        self.workspace_invite_lan = QCheckBox("Share this relay on my local network")
+        self.workspace_invite_lan.setChecked(True)
+        self.workspace_invite_lan.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        column.addWidget(self.workspace_invite_lan, 0, Qt.AlignmentFlag.AlignLeft)
+        column.addWidget(label(
+            "Host network · choose the Wi-Fi or hotspot the other device is on",
+            "muted", True))
+        self.workspace_invite_network = Select()
+        for name, ip in lan_addresses():
+            self.workspace_invite_network.addItem(f"{name} · {ip}", ip)
+        self.workspace_invite_network.currentIndexChanged.connect(
+            self.workspace_invite_address)
+        column.addWidget(self.workspace_invite_network)
+        column.addWidget(label("Address the other device can reach", "muted", True))
+        self.workspace_invite_url = QLineEdit()
+        column.addWidget(self.workspace_invite_url)
+        column.addWidget(label(
+            "Keep the host app open and allow Multiplayer AI through its "
+            "firewall. After changing Wi-Fi or hotspot, create a new "
+            "invitation with the current address. Campus and guest Wi-Fi may "
+            "block devices from reaching each other even on the same name; for "
+            "those, use a reachable WSS relay.", "muted", True))
+        self.workspace_invite_error = self.message_line("workspace:invite")
+        column.addWidget(self.workspace_invite_error)
+        self.workspace_invite_create_button = action(
+            "Create invitation", self.create_invitation, True)
+        self.workspace_invite_create_button.setEnabled(False)
+        column.addWidget(self.workspace_invite_create_button)
+        self.workspace_invite_result = QPlainTextEdit()
+        self.workspace_invite_result.setReadOnly(True)
+        self.workspace_invite_result.setMaximumHeight(180)
+        self.workspace_invite_result.hide()
+        column.addWidget(self.workspace_invite_result)
+        self.workspace_invite_copy_button = action(
+            "Copy private invitation", self.copy_invitation)
+        self.workspace_invite_copy_button.hide()
+        column.addWidget(self.workspace_invite_copy_button, 0, Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(invite)
+        self.workspace_invite_address()
+
+        # One heading per section with the name of the job in it, because two
+        # cards under a shared "Add another" heading read as one form split
+        # in half: both had a text box, a line of help text and a button, and
+        # nothing said that create makes a network here while join connects
+        # to one somewhere else.
+        layout.addWidget(label("MAKE A NEW ONE HERE", "eyebrow"))
         # Stacked rather than side by side. Two cards with fields in them
         # need about 950px together, and the window may be as narrow as
         # 720px, so a row either clipped the second card or gave the page
         # a horizontal scrollbar. One above the other fits every width, and
-        # the page already scrolls.
-        create, column = frame("card")
+        # the page already scrolls. Each has its own accent edge so they
+        # cannot be read as halves of a single form.
+        create, column = frame("createCard")
         column.setContentsMargins(22, 20, 22, 20)
         column.addWidget(label("Create a workspace", "heading"))
         column.addWidget(label(
-            "A new private network on this device. You can invite other "
-            "devices to it afterwards.", "muted", True))
+            "Starts a new private network on this device. Nothing to connect "
+            "to, and no invitation needed — you can bring in other devices "
+            "once it exists.", "muted", True))
         column.addSpacing(12)
         self.workspace_name_input = QLineEdit()
         self.workspace_name_input.setPlaceholderText("Workspace name")
@@ -1903,11 +2363,13 @@ class MainWindow(QMainWindow):
         column.addWidget(self.workspace_create_button)
         layout.addWidget(create)
 
-        join, column = frame("card")
+        layout.addWidget(label("OR CONNECT TO ONE SOMEWHERE ELSE", "eyebrow"))
+        join, column = frame("joinCard")
         column.setContentsMargins(22, 20, 22, 20)
         column.addWidget(label("Join a workspace", "heading"))
         column.addWidget(label(
-            "Someone has to invite this device first. Paste their invitation, "
+            "Connects this device to a network hosted on another machine. "
+            "Someone has to invite this device first — paste their invitation, "
             "or enter their relay address and your device token.", "muted", True))
         column.addSpacing(12)
         self.workspace_invitation = QPlainTextEdit()
@@ -1969,6 +2431,10 @@ class MainWindow(QMainWindow):
             summary += " · joined from another device"
         self.workspace_members_label.setText(summary)
         self.workspace_invite_button.setEnabled(self.ready and not self.remote)
+        self.workspace_invite_create_button.setEnabled(
+            self.ready and bool(self.workspace_invite_name.text().strip()))
+        self.workspace_invite_error.setVisible(bool(
+            self.workspace_invite_error.message.text()))
         self.workspace_name_input.setEnabled(self.ready)
         self.workspace_create_button.setEnabled(
             self.ready and bool(self.workspace_name_input.text().strip()))
@@ -2109,6 +2575,62 @@ class MainWindow(QMainWindow):
             self.workspace_join_button.setEnabled(True)
             self.workspace_join_button.setText("Join workspace")
             self.set_card_message(self.workspace_join_line, str(exc))
+
+    def workspace_invite_typed(self, text):
+        """Keep the button honest, and say what the network address will be.
+
+        The address is shown as soon as the card exists rather than after the
+        invitation is made, because the wrong Wi-Fi is the usual reason a
+        device cannot reach this one.
+        """
+        self.workspace_invite_create_button.setEnabled(
+            bool(self.ready and text.strip()))
+        self.workspace_invite_address()
+
+    def workspace_invite_address(self):
+        """Point the URL at whichever network is selected, while LAN is on."""
+        if not self.workspace_invite_lan.isChecked():
+            return
+        address = self.workspace_invite_network.currentData() or "YOUR_LAN_IP"
+        self.workspace_invite_url.setText(f"ws://{address}:{self.port}/connect")
+
+    def create_invitation(self):
+        """Make the invitation from the page, and show it here.
+
+        The command is asynchronous, so the result arrives after this returns;
+        it is put back on the card that asked for it rather than in a dialog
+        that has already closed.
+        """
+        if not self.ready:
+            self.set_card_message(self.workspace_invite_error,
+                                  "Your network is still starting.")
+            return
+        self.clear_card_message(self.workspace_invite_error)
+        self.workspace_invite_create_button.setEnabled(False)
+        self.workspace_invite_create_button.setText("Creating…")
+
+        def failure(message):
+            self.workspace_invite_create_button.setEnabled(True)
+            self.workspace_invite_create_button.setText("Create invitation")
+            self.set_card_message(self.workspace_invite_error, message)
+
+        def success(data):
+            self.workspace_invite_create_button.setText("Create invitation")
+            self.workspace_invite_create_button.setEnabled(
+                bool(self.ready and self.workspace_invite_name.text().strip()))
+            self.workspace_invite_name.clear()
+            self.workspace_invite_result.setPlainText(json.dumps(data, indent=2))
+            self.workspace_invite_result.show()
+            self.workspace_invite_copy_button.show()
+
+        self.command("invite", self.workspace_invite_name.text().strip(),
+                     self.workspace_invite_url.text().strip(),
+                     self.workspace_invite_lan.isChecked(),
+                     None, None, None, success=success, failure=failure)
+
+    def copy_invitation(self):
+        QApplication.clipboard().setText(self.workspace_invite_result.toPlainText())
+        self.notice("Private invitation copied. Send it only to the intended device.")
 
     def add_workspace(self):
         """The rail's plus goes to the page, where both routes are offered."""

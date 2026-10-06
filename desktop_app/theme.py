@@ -473,6 +473,9 @@ QFrame#profile { background: @@surface_profile@@; border: none; border-top: 1px 
     QWidget#sidebarBody { background: transparent; }
 QFrame#card, QFrame#stat, QFrame#settings { background: @@surface@@; border: 1px solid @@border@@; border-radius: 12px; }
 QFrame#hero { background: @@surface_hero@@; border: 1px solid @@border_hero@@; border-radius: 16px; }
+QFrame#createCard { background: @@surface@@; border: 1px solid @@border@@; border-left: 3px solid @@accent@@; border-radius: 12px; }
+QFrame#joinCard { background: @@surface@@; border: 1px solid @@border@@; border-left: 3px solid @@success@@; border-radius: 12px; }
+QFrame#inviteCard { background: @@surface@@; border: 1px solid @@border@@; border-left: 3px solid @@eyebrow@@; border-radius: 12px; }
 QLabel { background: transparent; }
     QWidget#messageRow { background: transparent; border-radius: 8px; }
     QWidget#messageRow:hover { background: @@surface_row_hover@@; }
