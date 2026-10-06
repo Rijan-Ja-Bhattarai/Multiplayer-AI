@@ -35,6 +35,22 @@ def startup_flow(monkeypatch, tmp_path):
     return storage, app, lock, window, messages
 
 
+def window_is_going_to_be_shown(window, splash=None):
+    """Whether the window is shown now, or handed over once the card has gone.
+
+    These tests are about a crash log that cannot be opened still letting
+    the app start, so what matters is that the window is on its way, not
+    whether it is on screen yet. When the launch screen is up the window is
+    shown from the card's handover, which has not happened by the time
+    main() returns.
+    """
+    if window.show.call_count:
+        return True
+    if splash is None:
+        return False
+    return splash.begin.call_args.kwargs.get("on_done") == window.show
+
+
 @pytest.mark.parametrize("error", [PermissionError("Access denied"),
                                  IsADirectoryError("Crash log is a directory"),
                                  OSError(errno.ENOSPC, "No space left on device")])
@@ -49,7 +65,7 @@ def test_crash_log_open_failure_still_starts_window(monkeypatch, startup_flow, e
     assert startup.main() == 0
 
     startup.MainWindow.assert_called_once_with(storage)
-    window.show.assert_called_once_with()
+    assert window_is_going_to_be_shown(window, startup.LaunchScreen.return_value)
     app.exec.assert_called_once_with()
     lock.unlock.assert_called_once_with()
     messages.critical.assert_not_called()
@@ -108,8 +124,14 @@ def test_the_launch_screen_is_shown_by_default(monkeypatch, startup_flow):
     assert startup.main() == 0
 
     startup.LaunchScreen.assert_called_once()
-    startup.LaunchScreen.return_value.begin.assert_called_once_with()
-    window.show.assert_called_once_with()
+    splash = startup.LaunchScreen.return_value
+    # Shown from the card's handover rather than straight away, so the
+    # window is never on screen behind it.
+    splash.begin.assert_called_once_with(on_done=window.show)
+    assert not window.show.called, (
+        "the window is shown before the card, so it peeks out from behind it")
+    # And painted while hidden, so the frame it appears with is complete.
+    window.grab.assert_called()
 
 
 def test_the_launch_screen_can_be_turned_off(monkeypatch, startup_flow):

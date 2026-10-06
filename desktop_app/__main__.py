@@ -9,7 +9,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 from .storage import Storage
 from .window import MainWindow, app_icon
 from .diagnostics import CrashDiagnostics
-from .splash import LaunchScreen
+from .splash import LaunchScreen, StartupStatus
 from .theme import resolve_theme
 
 
@@ -57,23 +57,36 @@ def main():
             window.network.event.connect(checked)
             window.network.finished.connect(app.quit)
         else:
+            # MainWindow connects its own handler to this signal in its
+            # constructor, so only the splash's needs adding here.
             splash = None
+            status = None
             if launch_screen_wanted(storage.settings):
+                status = StartupStatus()
                 splash = LaunchScreen(resolve_theme(storage.settings))
-                splash.begin()
-            # The window is shown behind the splash rather than after it,
-            # so the handover is a cross-fade between two painted things
-            # instead of a gap where neither exists. The splash has already
-            # been given its floor, so it stays up long enough to be worth
-            # having shown.
-            window.show()
+                splash.set_status(status)
+                # The window is never shown while the card is up. It is
+                # built, populated by the runtime and painted off screen
+                # underneath, so the reveal is a fully formed window rather
+                # than one that fills in while you look at it. Showing it
+                # first and covering it is what made it peek out from
+                # behind the card.
+                splash.begin(on_done=window.show)
+                window.grab()
+            else:
+                window.show()
 
             def hand_over(event=None, data=None):
-                # Nothing should be able to leave a logo on screen over a
-                # broken app, so a fatal error tears it down at once rather
-                # than waiting its turn.
+                # Nothing should be able to leave a card on screen over a
+                # broken app, so a fatal error dismisses it at once rather
+                # than waiting out the hold.
                 if splash is None or splash.dismissed:
                     return
+                # Pushed on every change, not only once the startup has
+                # settled: the lines before that are the ones that show
+                # the app is doing something.
+                if status.observe(event, data):
+                    splash.set_status(status)
                 if event == "fatal":
                     splash.dismiss()
                 else:

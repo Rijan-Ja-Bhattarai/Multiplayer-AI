@@ -660,7 +660,186 @@ def test_the_page_opens_usable_once_the_runtime_is_up(window) -> None:
     assert window.workspace_join_button.isEnabled()
 
 
+from desktop_app.splash import LAUNCH_CAP_MS, LAUNCH_FLOOR_MS  # noqa: E402
+
 # --- the launch screen --------------------------------------------------
+
+
+@pytest.mark.parametrize("events,expected,warnings", [
+    # Nothing wrong: one plain line and no complaint.
+    ([("ready", {"port": 1}), ("workspace", {"name": "Mine"}),
+      ("agents", {"agents": [1, 2], "connected": True})],
+     "Getting things ready", []),
+    # The relay being down is worth saying, and it is not a reason to hold.
+    ([("ready", {"port": 1}), ("agents", {"agents": [], "connected": False})],
+     "Working without the relay", ["the relay is not connected"]),
+    # A cleanup still owed outranks however many agents turned up, so the
+    # later signal must not overwrite the more important line.
+    ([("ready", {"port": 1}), ("pending_cleanup", {"credentials": 2, "files": 1}),
+      ("agents", {"agents": [1], "connected": True})],
+     "Finishing an earlier cleanup", ["2 credential(s) still owed"]),
+    ([("ready", {"port": 1}), ("fatal", "the relay refused the connection")],
+     "Could not start", ["the relay refused the connection"]),
+])
+def test_the_status_line_says_what_actually_happened(events, expected, warnings) -> None:
+    from desktop_app.splash import HOLD_TEXT, StartupStatus
+
+    status = StartupStatus()
+    for event, data in events:
+        status.observe(event, data)
+
+    assert status.settled, "the startup never settled, so the card waits out its cap"
+    assert status.line == expected
+    assert status.warnings == warnings
+    if not warnings:
+        assert status.line == HOLD_TEXT
+
+
+def test_cleanup_with_nothing_owed_is_not_a_warning() -> None:
+    """Reported on every single start, including when there is nothing to do.
+
+    Treating it as a warning made every launch open with a line about a
+    cleanup that did not exist.
+    """
+    from desktop_app.splash import StartupStatus
+
+    status = StartupStatus()
+    status.observe("pending_cleanup", {"credentials": 0, "files": 0})
+    status.observe("agents", {"agents": [], "connected": True})
+
+    assert status.warnings == []
+    assert status.tone == "normal"
+
+
+def test_startup_facts_do_not_flicker_past_on_the_card() -> None:
+    """Each fact arrives about 200ms after the last one.
+
+    Showing them meant three lines changed in the time it takes to read a
+    single one, which looks like a fault rather than like progress. They
+    are recorded, but only the held line is displayed.
+    """
+    from desktop_app.splash import StartupStatus
+
+    status = StartupStatus()
+    seen = []
+    for event, data in (("ready", {"port": 1}), ("workspace", {"name": "Mine"}),
+                        ("agents", {"agents": [1], "connected": True})):
+        if status.observe(event, data):
+            seen.append(status.line)
+
+    assert len(seen) == 1, f"the displayed line changed {len(seen)} times: {seen}"
+    assert any("port 1" in f for f in status.facts), status.facts
+    assert any("Mine" in f for f in status.facts), status.facts
+    assert any("1 agent(s)" in f for f in status.facts), (
+        "the facts are still recorded even though they are not displayed")
+
+
+def test_the_window_is_hidden_until_the_card_has_gone(qt_app, storage) -> None:
+    """It used to be shown first and covered, so it peeked out from behind.
+
+    Now the window is built and painted off screen underneath the card, and
+    only shown when the card has faded out.
+    """
+    from desktop_app.splash import LaunchScreen, StartupStatus
+
+    window = win.MainWindow(storage)
+    try:
+        status = StartupStatus()
+        screen = LaunchScreen(DARK)
+        screen.set_status(status)
+        revealed = []
+        screen.begin(on_done=lambda: (revealed.append(True), window.show()))
+        window.grab()
+
+        assert not window.isVisible(), (
+            "the window is on screen behind the card, so the card is "
+            "overlaying it rather than replacing it")
+
+        status.observe("ready", {"port": 1})
+        status.observe("agents", {"agents": [], "connected": True})
+        screen.runtime_ready()
+        assert not revealed, "the window was revealed before the hold was over"
+
+        pump(qt_app, (LAUNCH_FLOOR_MS + 1200) / 1000)
+        assert revealed, "the window was never revealed"
+        assert window.isVisible()
+    finally:
+        window.network.shutdown()
+        window.network.wait(10000)
+        window.hide()
+
+
+def test_a_hidden_window_can_be_painted_before_it_is_shown(qt_app, storage) -> None:
+    """The reason the reveal can be instant.
+
+    Shown for the first time, a window paints its first frame after it
+    appears, which reads as a flash of something unfinished. Rendering it
+    off screen first means the frame the user sees is already complete.
+    """
+    window = win.MainWindow(storage)
+    try:
+        assert not window.isVisible()
+        image = window.grab().toImage()
+        assert not image.isNull()
+        colours = {image.pixelColor(x, y).name()
+                   for x in range(0, image.width(), 40)
+                   for y in range(0, image.height(), 40)}
+        assert len(colours) > 3, (
+            "the hidden window rendered as a blank, so showing it would flash")
+    finally:
+        window.network.shutdown()
+        window.network.wait(10000)
+
+
+def test_the_card_releases_even_if_the_runtime_goes_quiet(qt_app, storage) -> None:
+    """The one failure this screen is not allowed to have.
+
+    A runtime that reported ready and then never listed its agents would
+    otherwise hold a card over an app that is entirely usable. The status
+    is left unsettled deliberately: a startup with nothing owed settles at
+    once and would release at the floor whether or not the cap existed.
+    """
+    from desktop_app.splash import LAUNCH_CAP_MS, LaunchScreen, StartupStatus
+
+    window = win.MainWindow(storage)
+    try:
+        status = StartupStatus()
+        status.observe("ready", {"port": 1})   # ready, and then nothing
+        assert not status.settled, "the status settled on its own"
+
+        screen = LaunchScreen(DARK)
+        screen.set_status(status)
+        screen.begin(on_done=window.show)
+        screen.runtime_ready()
+
+        pump(qt_app, (LAUNCH_FLOOR_MS + LAUNCH_CAP_MS) / 1000 + 0.6)
+        assert screen.dismissed, (
+            "the card is still up although the runtime never reported again")
+    finally:
+        window.network.shutdown()
+        window.network.wait(10000)
+
+
+def test_closing_the_card_cancels_the_launch(qt_app, storage) -> None:
+    """It has no title bar, so Alt+F4 on it is the only way to dismiss it.
+
+    Showing a window nobody asked to see because they dismissed its card
+    would be worse than quitting.
+    """
+    from desktop_app.splash import LaunchScreen
+
+    window = win.MainWindow(storage)
+    try:
+        revealed = []
+        screen = LaunchScreen(DARK)
+        screen.begin(on_done=lambda: revealed.append(True))
+        screen.close()
+        qt_app.processEvents()
+        assert screen.cancelled
+        assert not revealed, "closing the card revealed the window anyway"
+    finally:
+        window.network.shutdown()
+        window.network.wait(10000)
 
 
 def pump(qt_app, seconds):
@@ -695,13 +874,15 @@ def test_the_launch_screen_waits_for_a_floor(qt_app) -> None:
 
 
 def test_the_launch_screen_leaves_at_once_when_ready(qt_app) -> None:
-    """Ready well after the floor has passed means no waiting."""
+    """Once the hold has passed, readiness releases it with nothing left to wait for."""
     from desktop_app.splash import LaunchScreen
 
     screen = LaunchScreen("dark")
     screen.begin()
-    pump(qt_app, 1.2)
-    assert not screen.dismissed, "the floor let go on its own, which it should not"
+    # Wait out the hold first, so this is asking whether readiness releases
+    # it rather than whether the hold does.
+    pump(qt_app, LAUNCH_FLOOR_MS / 1000 + 0.4)
+    assert not screen.dismissed, "the hold let go on its own, which it should not"
 
     screen.runtime_ready()
     pump(qt_app, 0.5)
