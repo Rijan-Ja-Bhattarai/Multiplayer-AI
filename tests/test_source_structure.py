@@ -21,10 +21,18 @@ def accessor_companion(item):
     idiom rather than a mistake: ``@http.setter def http(self, value)`` attaches
     to the property built by the first one. Only an undecorated repeat is a
     real redefinition.
+
+    The decorator has to name *this* function. ``@other.setter def http`` is a
+    plain redefinition that happens to carry an accessor decorator, and letting
+    it through on the strength of the word "setter" hides exactly the sort of
+    shadowing this check exists to catch.
     """
     for decorator in item.decorator_list:
-        if isinstance(decorator, ast.Attribute) \
-                and decorator.attr in ("setter", "getter", "deleter"):
+        if not isinstance(decorator, ast.Attribute):
+            continue
+        if decorator.attr not in ("setter", "getter", "deleter"):
+            continue
+        if isinstance(decorator.value, ast.Name) and decorator.value.id == item.name:
             return True
     return False
 
@@ -53,6 +61,50 @@ def test_no_class_defines_the_same_method_twice(path):
                     f"so the first one cannot be reached")
             seen[item.name] = item.lineno
     assert not clashes, "\n".join(clashes)
+
+
+ACCESOR_CASES = {
+    # The idiom: a property and the accessor that completes it.
+    "class T:\n    def http(self): pass\n    @http.setter\n    def http(self, v): pass": [],
+    "class T:\n    def http(self): pass\n    @http.getter\n    def http(self): pass": [],
+    "class T:\n    def http(self): pass\n    @http.deleter\n    def http(self): pass": [],
+    # The same words, a different name: a plain redefinition wearing an
+    # accessor decorator, which is what letting any ".setter" through hides.
+    "class T:\n    def http(self): pass\n    @other.setter\n    def http(self, v): pass": ["http"],
+    # A dotted target is not a name this function could own either.
+    "class T:\n    def http(self): pass\n    @a.b.setter\n    def http(self, v): pass": ["http"],
+    # No decorator at all.
+    "class T:\n    def http(self): pass\n    def http(self, v): pass": ["http"],
+    # Two different names are two different methods, decorator or not.
+    "class T:\n    def http(self): pass\n    @x.setter\n    def other(self, v): pass": [],
+}
+
+
+@pytest.mark.parametrize("source", ACCESOR_CASES,
+                         ids=[f"case{index}" for index in range(len(ACCESOR_CASES))])
+def test_the_accessor_exemption_needs_the_matching_name(source):
+    """An accessor only excuses a repeat when it names the function itself.
+
+    ``@other.setter def http`` shadows the earlier ``http`` and is not an
+    accessor of anything called ``http``; exempting it on the strength of the
+    word "setter" lets exactly the shadowing this check exists to find pass
+    through. A dotted target is no better: ``@a.b.setter`` attaches to whatever
+    ``a.b`` is, which is not the name being defined.
+    """
+    tree = ast.parse(source)
+    names = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        seen = set()
+        for item in node.body:
+            if not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if item.name in seen and not accessor_companion(item):
+                names.append(item.name)
+            seen.add(item.name)
+    assert names == ACCESOR_CASES[source], (
+        f"expected {ACCESOR_CASES[source]} to be reported, got {names}")
 
 
 @pytest.mark.parametrize("path", SOURCES, ids=lambda path: path.name)

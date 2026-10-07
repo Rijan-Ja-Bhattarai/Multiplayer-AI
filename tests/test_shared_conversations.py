@@ -82,10 +82,16 @@ class SharedConversationTests(unittest.IsolatedAsyncioTestCase):
     async def test_a_relay_without_the_endpoint_is_treated_as_agreeing(self):
         """An older relay is tolerated, not reported as a failed delete.
 
-        The same statuses delete_workspace already accepts: a room that is not
-        there, a token that is gone, or a relay that predates the endpoint. All
-        three mean the conversation is not here any more, which is what was
-        asked for, so the local copy is forgotten and nothing is shown.
+        The same statuses delete_workspace already accepts, minus the one that
+        does not transfer: 404 for a room that is not there, and 501 for a relay
+        that predates the endpoint. Both mean the conversation is not here any
+        more, which is what was asked for, so the local copy is forgotten and
+        nothing is shown.
+
+        401 is not among them. On a workspace a revoked token means the
+        membership is already gone and forgetting it locally is right; on a
+        conversation it means this device may not make the change, while the
+        room and everyone else's messages of it are still on the relay.
         """
         async def model(payload, source):
             return {"text": "AI: " + payload["messages"][-1]["content"], "provider": "test"}
@@ -103,7 +109,34 @@ class SharedConversationTests(unittest.IsolatedAsyncioTestCase):
         async def call(url, headers=None, timeout=None):
             return Response(status)
 
-        for status in (401, 404, 501):
+        # 401 first, while the room record is still in place, so what follows
+        # is down to the 401 and not to the tolerated deletes that come after.
+        # 401 is a refusal, not a done job: it must not be read as a delete.
+        engine = self.guest.connected_engine()
+        stub = MagicMock()
+
+        async def unauthorized(url, headers=None, timeout=None):
+            return Response(401)
+
+        stub.delete = unauthorized
+        stub.post = unauthorized
+        with patch.object(engine, "relay_http", return_value=stub):
+            with self.assertRaises(RuntimeError) as message:
+                await self.guest.delete_conversation(room_id)
+            self.assertIn("not a member", str(message.exception))
+            with self.assertRaises(RuntimeError):
+                await self.guest.leave_conversation(room_id)
+        self.assertIn(room_id, self.host.engine.history_store.load("rooms"), (
+            "a 401 was treated as a delete, so the room went from the relay "
+            "while it still has everyone else's messages of it"))
+
+        await self.guest.refresh()
+        rooms = [data for kind, data in self.events if kind == "conversations"][-1]
+        self.assertEqual([room["id"] for room in rooms], [room_id], (
+            "a 401 left the conversation missing from the relay, so it was "
+            "treated as deleted rather than refused"))
+
+        for status in (404, 501):
             with self.subTest(status=status):
                 engine = self.guest.connected_engine()
                 stub = MagicMock()

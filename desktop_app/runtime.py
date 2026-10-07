@@ -400,12 +400,18 @@ class DesktopRuntime:
     async def _conversation_request(self, conversation_id, path, method):
         """Ask the relay to change a shared conversation, tolerating an old one.
 
-        The tolerated statuses are the same ones delete_workspace accepts: 401
-        means the token is already gone, 404 that the room is not there, and 501
-        that this relay predates the endpoint. All three mean the same thing to
-        a caller who asked to remove a conversation from their own device, which
-        it can do without the relay's agreement. Anything else is a real refusal
-        and its own sentence is shown instead.
+        404 means the room is not there and 501 that this relay predates the
+        endpoint. Both mean the conversation is not here any more, which is what
+        was asked for, so the local copy is forgotten.
+
+        401 is *not* tolerated, though delete_workspace does tolerate it. There
+        the token being gone means the membership is already gone, so forgetting
+        it locally is right. On a conversation it means this device is not
+        allowed to make the change, and the room is still on the relay with
+        everyone else's messages in it. Reporting that as success makes the
+        window forget a conversation that has not gone anywhere, and the next
+        poll brings it straight back -- a delete that looks like it worked and
+        did not. So it is a refusal, and says so.
         """
         engine = self.connected_engine()
         base = relay_http_url(engine.active_url, True)
@@ -418,7 +424,12 @@ class DesktopRuntime:
             # The host is unreachable. A local device cannot change a shared
             # room, so this is reported rather than quietly faked.
             raise RuntimeError("Could not reach the host, so the conversation was not changed.") from None
-        if response.status_code in (200, 401, 404, 501):
+        if response.status_code == 401:
+            raise RuntimeError(
+                "This device is not a member of that conversation any more, so "
+                "it was not changed. Ask the host to remove your device and "
+                "reconnect.")
+        if response.status_code in (200, 404, 501):
             return True
         try:
             reason = response.json().get("error")
