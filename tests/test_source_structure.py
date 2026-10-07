@@ -70,3 +70,41 @@ def test_a_module_defines_no_function_twice_either(path):
                 f"and again at line {node.lineno}")
         seen[node.name] = node.lineno
     assert not clashes, "\n".join(clashes)
+
+
+IDENTITY_OPERATORS = (ast.Is, ast.IsNot)
+
+
+@pytest.mark.parametrize("path", SOURCES, ids=lambda path: path.name)
+def test_no_dialog_result_is_compared_with_is(path):
+    """Never ask a dialog whether the answer was No using ``is``.
+
+    ``QMessageBox.question`` returns a plain ``int``; ``StandardButton.Yes`` is
+    a Shiboken flag enum. They are equal by value and are never the same
+    object, so ``is not Yes`` is always true and every confirmation behind it
+    silently returns before doing anything -- the dialog opens, the answer is
+    given, and nothing happens.
+
+    It reads as a harmless way to say "not yes", it fails no test and raises
+    nothing, and it cost three confirmations here before anyone noticed that
+    Clear and Delete had never once worked. Compared with ``==`` it is always
+    wrong and never says so.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    offenders = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Compare):
+            continue
+        operands = [node.left] + list(node.comparators)
+        mentions_standard_button = any(
+            isinstance(child, ast.Attribute) and child.attr == "StandardButton"
+            for operand in operands for child in ast.walk(operand))
+        if not mentions_standard_button:
+            continue
+        for operator in node.ops:
+            if isinstance(operator, IDENTITY_OPERATORS):
+                word = "is" if isinstance(operator, ast.Is) else "is not"
+                offenders.append(
+                    f"{path.name}: line {node.lineno} compares a StandardButton "
+                    f"with '{word}'")
+    assert not offenders, "\n".join(offenders)

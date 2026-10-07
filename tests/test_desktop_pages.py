@@ -233,7 +233,7 @@ def test_deleting_a_conversation_removes_only_that_one(window, qt_app, monkeypat
     window.persist_history()
 
     monkeypatch.setattr(win.QMessageBox, "question",
-                        lambda *args, **kwargs: win.QMessageBox.StandardButton.Yes)
+                        lambda *args, **kwargs: int(win.QMessageBox.StandardButton.Yes))
     window.delete_conversation("gone")
 
     assert "gone" not in window.chats, "the deleted conversation is still open in memory"
@@ -388,9 +388,13 @@ def test_a_conversation_action_survives_the_polling(window, qt_app, monkeypatch)
     assert window.manage_button.isEnabled(), (
         "the conversation button is disabled while there are messages to clear")
 
-    # And the menu it opens really does the work.
+    # And the menu it opens really does the work. The dialog is replaced with
+    # one that answers the way a real dialog answers: QMessageBox.question
+    # returns a plain int, not the StandardButton enum member. Returning the
+    # enum here instead is what let an identity test pass against code that
+    # could never work.
     monkeypatch.setattr(win.QMessageBox, "question",
-                        lambda *args, **kwargs: win.QMessageBox.StandardButton.Yes)
+                        lambda *args, **kwargs: int(win.QMessageBox.StandardButton.Yes))
     menu = window.build_conversation_menu(window.selected)
     assert [entry.text() for entry in menu.actions()] == [
         "Clear messages", "Delete conversation"]
@@ -414,6 +418,94 @@ def test_a_conversation_action_survives_the_polling(window, qt_app, monkeypatch)
     window.update_chat_controls()
     assert window.manage_button.isEnabled() is False, (
         "the conversation button is still offered with no conversation open")
+
+
+def test_answering_yes_really_does_the_thing(window, qt_app) -> None:
+    """A confirmation that returns Yes must not quietly do nothing.
+
+    This is why clear and delete appeared broken for so long. The comparison
+    was ``is not QMessageBox.StandardButton.Yes``, and a dialog returns a plain
+    ``int`` -- 16384 -- while that constant is a Shiboken flag enum. The two are
+    equal by value and are never the same object, so the test for "did they say
+    no" was always true and the function returned before doing anything. The
+    dialog opened, the answer was given, and nothing happened, every time.
+
+    Every test of it had passed because they replaced the dialog with one
+    returning the very enum member being compared against. This one answers the
+    way a real dialog answers.
+    """
+    window.identity = "me"
+    window.agents = [{"id": "local-llama", "kind": "model", "online": True,
+                      "provider": "ollama", "model": "llama3"}]
+    window.selected = "local-llama"
+    window.chats = {"local-llama": {"messages": [("user", "hello world")]}}
+    window.navigate(win.CONVERSATIONS_PAGE)
+    window.show()
+    window.render_messages()
+
+    assert window.answered_yes(int(win.QMessageBox.StandardButton.Yes)) is True, (
+        "a dialog answering with the plain int Qt returns is being read as No, "
+        "so every confirmation is a no-op")
+    assert window.answered_yes(int(win.QMessageBox.StandardButton.Cancel)) is False, (
+        "a dialog answering Cancel is being read as Yes")
+    assert isinstance(int(win.QMessageBox.StandardButton.Yes), int), (
+        "Qt no longer returns a plain int; this guard and its tests need "
+        "revisiting")
+
+    # The whole path, with the dialog answering the way a real one does.
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(win.QMessageBox, "question",
+                   lambda *args, **kwargs: int(win.QMessageBox.StandardButton.Yes))
+    try:
+        window.clear_conversation_confirm("local-llama")
+        assert window.chats["local-llama"]["messages"] == [], (
+            "answering Yes did not clear the messages")
+
+        window.chats["local-llama"]["messages"] = [("user", "hello world")]
+        window.render_messages()
+        window.delete_conversation("local-llama")
+        assert "local-llama" not in window.chats, (
+            "answering Yes did not delete the conversation")
+    finally:
+        monkey.undo()
+
+
+def test_the_confirmation_says_the_row_will_stay(window, qt_app, monkeypatch) -> None:
+    """A successful delete must not read as a failed one.
+
+    A row is rebuilt from the connected devices and agents on every poll, so one
+    naming a live device cannot be taken away by emptying its messages. The
+    conversation empties and the row sits there still, which looks like nothing
+    happened. The count and the reason are both in the dialog, which is the one
+    place the reader actually looks.
+    """
+    window.identity = "me"
+    window.agents = [{"id": "device-me", "kind": "model", "online": True,
+                      "local": True, "provider": "ollama", "model": "llama3"}]
+    window.selected = "device-me"
+    window.chats = {"device-me": {"messages": [("user", "a"), ("assistant", "b"),
+                                               ("user", "c")]}}
+    asked = []
+    monkeypatch.setattr(win.QMessageBox, "question",
+                        lambda *args, **kwargs: asked.append(args[2])
+                        or int(win.QMessageBox.StandardButton.Yes))
+    window.clear_conversation_confirm("device-me")
+
+    assert asked, "no confirmation was shown"
+    body = asked[0]
+    assert "3 messages" in body, f"the dialog does not say how many: {body!r}"
+    assert "row will stay" in body, (
+        f"the dialog does not warn that the row remains: {body!r}")
+    assert "connected" in body, (
+        f"the dialog does not say why the row remains: {body!r}")
+
+    # And a conversation with no row of its own is not told about one.
+    window.chats["saved-only"] = {"messages": [("user", "x")]}
+    window.selected = "saved-only"
+    asked.clear()
+    window.clear_conversation_confirm("saved-only")
+    assert "row will stay" not in asked[0], (
+        f"a conversation with no row was warned about one: {asked[0]!r}")
 
 
 def test_the_rows_built_on_demand_explain_themselves(window) -> None:

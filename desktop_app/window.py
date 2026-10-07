@@ -1509,23 +1509,54 @@ class MainWindow(QMainWindow):
         self.render_agents()
         self.persist_history()
 
+    def row_note(self, target):
+        """Why a conversation's row will still be in the list after it is emptied.
+
+        A row is rebuilt from the connected devices and agents on every poll, so
+        one that names a live device cannot be taken away by emptying its
+        messages. Without saying so, a delete that worked looks exactly like one
+        that did not: the conversation empties and the row sits there still.
+        """
+        if target not in {agent["id"] for agent in self.agents}:
+            return ""
+        return ("\n\nIts row will stay in the list: it is there because the "
+                "device is connected, so only the messages are removed.")
+
+    def answered_yes(self, answer):
+        """Whether a confirmation dialog was answered Yes.
+
+        Compared with ``!=``, never with ``is not``. A dialog returns a plain
+        ``int`` -- 16384 -- while ``QMessageBox.StandardButton.Yes`` is a
+        Shiboken flag enum. The two are equal by value and are never the same
+        object, so an identity test always said no and the confirmation became a
+        no-op: the dialog opened, the answer was given, and the action quietly
+        did nothing. Every test of it passed, because they all replaced the
+        dialog with one returning the very enum member being compared against.
+        """
+        return answer == QMessageBox.StandardButton.Yes
+
     def delete_conversation(self, target):
         """Remove a conversation's history from this device, after asking."""
         room = self.conversations.get(target)
+        count = len((self.chats.get(target) or {}).get("messages") or [])
+        note = self.row_note(target)
         if room:
             title = room["title"]
-            question = ("Delete this conversation from this device?\n\n"
-                        "It is shared, so it stays on the relay for the other "
-                        "devices and will come back at the next poll. Deleting "
-                        "it for everyone needs the conversation's owner.")
+            question = (f"Delete this conversation from this device?\n\n"
+                        f"Its {count} messages will be removed and cannot be "
+                        f"read again.\n\nIt is shared, so it stays on the relay "
+                        f"for the other devices and will come back at the next "
+                        f"poll. Deleting it for everyone needs the "
+                        f"conversation's owner." + note)
         else:
             title = target
-            question = ("Delete this conversation from this device?\n\n"
-                        "Its messages will be removed and cannot be read again.")
-        if QMessageBox.question(self, "Delete conversation",
-                                f"{title}\n\n{question}",
-                                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-                                QMessageBox.StandardButton.Cancel) is not QMessageBox.StandardButton.Yes:
+            question = (f"Delete this conversation from this device?\n\n"
+                        f"Its {count} messages will be removed and cannot be "
+                        f"read again." + note)
+        if not self.answered_yes(QMessageBox.question(
+                self, "Delete conversation", f"{title}\n\n{question}",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel)):
             return
         # Forgot before anything is drawn, because render_messages() ends by
         # saving the history: redrawing first would write the conversation back
@@ -1535,26 +1566,33 @@ class MainWindow(QMainWindow):
         self.render_messages()
         self.render_attachments()
         self.persist_history()
-        self.notice(f"{title} deleted from this device.")
+        self.notice(f"{count} messages deleted from this device. " + (
+            "The row stays while the device is connected."
+            if note else "The conversation is gone from this device."))
 
     def clear_conversation_confirm(self, target):
         """Ask before emptying a conversation, saying what it will and will not do."""
         room = self.conversations.get(target)
         title = room["title"] if room else target
+        count = len((self.chats.get(target) or {}).get("messages") or [])
+        note = self.row_note(target)
         if room:
-            detail = ("This clears your copy of the conversation on this device.\n\n"
-                      "It is shared, so the messages stay on the relay for the "
-                      "other devices and reappear here the next time somebody "
-                      "posts in it.")
+            detail = (f"This clears your copy of the conversation on this device.\n\n"
+                      f"Its {count} messages will be removed. It is shared, so "
+                      f"they stay on the relay for the other devices and reappear "
+                      f"here the next time somebody posts in it." + note)
         else:
-            detail = ("This removes the messages in this conversation on this "
-                      "device. They cannot be read again.")
-        if QMessageBox.question(self, "Clear conversation", f"{title}\n\n{detail}",
-                                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-                                QMessageBox.StandardButton.Cancel) is not QMessageBox.StandardButton.Yes:
+            detail = (f"This removes the {count} messages in this conversation "
+                      f"on this device. They cannot be read again." + note)
+        if not self.answered_yes(QMessageBox.question(
+                self, "Clear conversation", f"{title}\n\n{detail}",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel)):
             return
         self.clear_conversation(target)
-        self.notice("Messages cleared on this device.")
+        self.notice(f"{count} messages cleared. " + (
+            "The row stays while the device is connected."
+            if note else "The conversation is still open."))
 
     def conversation_actions(self, target):
         """What can be done to a conversation, as ``(text, tooltip, callback)``.
@@ -1601,18 +1639,20 @@ class MainWindow(QMainWindow):
         """
         room = self.conversations.get(target)
         title = room["title"] if room else target
+        count = len((self.chats.get(target) or {}).get("messages") or [])
         if delete:
-            question = ("Delete this conversation for every device in it?\n\n"
-                        "Its messages will be removed from the relay and cannot "
-                        "be read again by anyone.")
+            question = (f"Delete this conversation for every device in it?\n\n"
+                        f"Its {count} messages will be removed from the relay "
+                        f"and cannot be read again by anyone.")
         else:
-            question = ("Leave this conversation?\n\n"
-                        "You will stop seeing it, and it stays for everyone "
-                        "else in it.")
-        if QMessageBox.question(self, "Delete conversation" if delete else "Leave conversation",
-                                f"{title}\n\n{question}",
-                                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-                                QMessageBox.StandardButton.Cancel) is not QMessageBox.StandardButton.Yes:
+            question = (f"Leave this conversation?\n\n"
+                        f"You will stop seeing it, and its {count} messages stay "
+                        f"for everyone else in it.")
+        if not self.answered_yes(QMessageBox.question(
+                self, "Delete conversation" if delete else "Leave conversation",
+                f"{title}\n\n{question}",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel)):
             return
         method = "delete_conversation" if delete else "leave_conversation"
         self.chat_busy = True
