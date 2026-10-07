@@ -761,6 +761,7 @@ class MainWindow(QMainWindow):
         self.coordinator_picker.setToolTip("Choose the model that reads general-chat requests and assigns work using model purposes")
         coordinator_row.addWidget(self.coordinator_picker, 1)
         self.coordinator_save = action("Use coordinator", self.save_coordinator)
+        self.coordinator_save.setToolTip("Approve this model to receive General chat history and attachments across this workspace.")
         self.coordinator_save.setToolTip("Save the selected coordinator for this workspace")
         coordinator_row.addWidget(self.coordinator_save)
         self.general_chat_button = action("General chat", lambda: self.select_agent(GENERAL_TARGET))
@@ -1258,6 +1259,7 @@ class MainWindow(QMainWindow):
             room = self.conversations.get(self.selected)
             target = room["target"] if room else self.selected
             if target == GENERAL_TARGET:
+                agents = [agent for agent in agents if agent.get("orchestration_authorized", True)]
                 routing = (room or self.chats.get(self.selected, {})).get("routing", {})
                 coordinator = general_chat_state(agents, self.workspace_meta.get("coordinator"))["coordinator"]
                 identities = {coordinator["id"] if coordinator else None,

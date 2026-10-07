@@ -122,6 +122,13 @@ sets it; invited members use the same coordinator. The choice is saved per works
 For automatic delegation, choose a model that follows JSON planning instructions
 reliably. Basic General chat does not require JSON planning.
 
+Automatic routing uses only models imported by the workspace owner or explicitly
+selected by the owner as coordinator. These actions approve the model to receive
+General chat context across the workspace, including retained text and attachments.
+An invited device's published purpose and delegation preferences do not grant
+this access. Other invited models remain available through explicitly targeted
+chats; joining the workspace or a conversation alone does not approve automatic routing.
+
 Write requests naturally: "Code a parser", "Debug this function", or "Solve this"
 followed by code. Jev reads the conversation and your model-purpose descriptions
 to select a worker, or up to three ordered tasks for a compound request. Later

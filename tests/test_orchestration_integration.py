@@ -86,6 +86,22 @@ class OrchestrationIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(self.calls[0]["messages"], [{"role": "user", "content": "Make a hello world program"}])
 
+    async def test_connected_guest_model_is_not_an_automatic_history_recipient(self):
+        invitation = await self.host.invite("guest", self.host.active_url)
+        await self.guest.join(invitation["url"], invitation["token"])
+        await self.guest.save_agent({**self.profile, "id": "guest"}, "guest-key")
+        relay = self.host.app.state.relay
+        self.assertTrue(relay.agent_description("guest")["online"])
+        self.assertTrue(relay.agent_description("guest")["delegation_enabled"])
+        self.assertFalse(relay.agent_description("guest")["orchestration_authorized"])
+        room = relay.conversations.create(self.host.active_id, GENERAL_TARGET,
+            [{"role": "user", "content": "Private retained code"}])
+        self.assertIsNone(relay.conversations.get(room["id"], "guest"))
+        await self.host.send_conversation(room["id"], "Debug this private code")
+        prompt = self.calls[0]["messages"][-1]["content"]
+        roster = json.loads(prompt[prompt.index('{"models"'):])["models"]
+        self.assertEqual([model["id"] for model in roster], ["specialist"])
+
     async def test_coordinator_and_purpose_preferences_survive_restart(self):
         room = self.host.app.state.relay.conversations.create(self.host.active_id, GENERAL_TARGET)
         room["title"] = "General chat · Jev"

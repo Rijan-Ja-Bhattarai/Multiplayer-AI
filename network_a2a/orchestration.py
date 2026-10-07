@@ -17,7 +17,8 @@ TASK_TYPES = {
 
 def general_chat_state(models, preferred=None):
     """Use a connected model for chat before any delegation is configured."""
-    models = [model for model in models if model.get("kind") == "model" or model.get("model") or model.get("provider")]
+    models = [model for model in models if model.get("orchestration_authorized", True)
+              and (model.get("kind") == "model" or model.get("model") or model.get("provider"))]
     coordinator = next((model for model in models if model["id"] == preferred), None)
     if coordinator is None:
         coordinator = next((model for model in models if model.get("online")), models[0] if models else None)
@@ -89,7 +90,14 @@ class Orchestrator:
 
     def models(self, source):
         return [profile for identity in self.relay.credentials if self.relay.allowed(source, identity)
+                and self.relay.orchestration_authorized(identity)
                 and (profile := self.relay.agent_description(identity))["kind"] == "model"]
+
+    async def invoke(self, source, target, payload, conversation_id):
+        # Recheck the operator's recipient grant after waits and model calls.
+        if not self.relay.allowed(source, target) or not self.relay.orchestration_authorized(target):
+            raise PermissionError("This model is no longer authorized to receive General chat history")
+        return await self.relay.invoke(source, target, payload, conversation_id)
 
     def candidates(self, source, needs_vision=False):
         return [profile for profile in self.models(source)
@@ -140,7 +148,7 @@ class Orchestrator:
                 on_plan(routing)
             async with asyncio.timeout(ORCHESTRATION_TIMEOUT):
                 async with self.slots:
-                    result = await self.relay.invoke(source, coordinator, {"messages": messages}, conversation_id)
+                    result = await self.invoke(source, coordinator, {"messages": messages}, conversation_id)
             answer = self.reply_text(result)
             return {**(result if isinstance(result, dict) else {}), "text": answer,
                     "provider": (result.get("provider") or "model") if isinstance(result, dict) else "model",
@@ -159,7 +167,7 @@ class Orchestrator:
             raise ValueError("The conversation and model purposes are too large to plan. Shorten the request or model purposes.")
         async with asyncio.timeout(ORCHESTRATION_TIMEOUT):
             async with self.slots:
-                result = await self.relay.invoke(source, coordinator, {"text": prompt}, conversation_id)
+                result = await self.invoke(source, coordinator, {"text": prompt}, conversation_id)
                 plan = self.validate_plan(result, roster)
                 routing = {"coordinator": coordinator, "assignments": plan["tasks"], "reason": plan["reason"]}
                 if on_plan:
@@ -177,7 +185,7 @@ class Orchestrator:
                     work = model_context([*messages, {"role": "user", "content": instruction}], byte_limit=190000)
                     if messages[-1] not in work:
                         raise ValueError("The request and worker results exceed the context limit. Split this request into smaller tasks.")
-                    reply = await self.relay.invoke(source, task["agent_id"], {"messages": work}, conversation_id)
+                    reply = await self.invoke(source, task["agent_id"], {"messages": work}, conversation_id)
                     outputs.append({"agent_id": task["agent_id"], "task_type": task["task_type"], "text": self.reply_text(reply)})
                 if not outputs:
                     answer = plan["reply"]
@@ -188,7 +196,7 @@ class Orchestrator:
                     if len(prompt.encode()) > 195000:
                         raise ValueError("Worker results exceed the synthesis limit. Split this request into smaller tasks.")
                     self.coordinator(source)
-                    answer = self.reply_text(await self.relay.invoke(source, coordinator, {"text": prompt}, conversation_id))
+                    answer = self.reply_text(await self.invoke(source, coordinator, {"text": prompt}, conversation_id))
                 return {"text": answer, "provider": "jev", "model": coordinator, "routing": routing}
 
     @staticmethod

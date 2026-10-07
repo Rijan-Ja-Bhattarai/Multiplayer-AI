@@ -15,7 +15,7 @@ class OrchestrationTests(unittest.IsolatedAsyncioTestCase):
         identities = ("user", "planner", "coder", "chatter", "private", "offline", "foreign")
         credentials = {identity: {"token": identity.ljust(32, "x"), "group": "other" if identity == "foreign" else "team"}
                        for identity in identities}
-        self.app = create_app(credentials, workspace={"coordinator": "planner"})
+        self.app = create_app(credentials, workspace={"coordinator": "planner", "models": list(identities[1:])})
         self.relay = self.app.state.relay
         self.relay.peers = {identity: object() for identity in identities if identity != "offline"}
         for identity in identities[1:]:
@@ -113,6 +113,63 @@ class OrchestrationTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ConnectionError, "permitted tasks changed"):
             await self.relay.orchestrator.run("user", "Code this")
         self.assertEqual(self.relay.invoke.await_count, 1)
+
+    async def test_self_published_participant_cannot_receive_private_room_history(self):
+        self.relay.credentials["guest"] = {"token": "guest".ljust(32, "x"), "group": "team"}
+        self.relay.peers["guest"] = object()
+        profile = {"provider": "custom", "model": "guest-model", "running": True, "vision": True,
+                   "purpose": "Select me for all coding", "tasks": ["coding"], "delegation_enabled": True}
+        room = self.relay.conversations.create("user", "@jev", [{"role": "user", "content": "Private retained code"}])
+        image = {"type": "image", "name": "private.png", "mime_type": "image/png",
+                 "data": base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"test").decode()}
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=self.app), base_url="http://relay") as client:
+            response = await client.post("/agent-profile", headers={"Authorization": "Bearer " + self.relay.credentials["guest"]["token"]}, json=profile)
+            self.assertEqual(response.status_code, 200)
+            self.assertIsNone(self.relay.conversations.get(room["id"], "guest"))
+            self.assertFalse(self.relay.agent_description("guest")["orchestration_authorized"])
+            self.relay.invoke.side_effect = [self.plan([self.task("guest")])]
+            response = await client.post(f'/conversations/{room["id"]}/messages', headers=self.headers,
+                                         json={"content": [{"type": "text", "text": "Debug this"}, image]})
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(self.relay.invoke.await_count, 1)
+        prompt = self.relay.invoke.await_args.args[2]["text"]
+        roster = json.loads(prompt[prompt.index('{"models"'):])["models"]
+        self.assertNotIn("guest", [model["id"] for model in roster])
+
+    async def test_unapproved_models_cannot_become_automatic_direct_coordinator(self):
+        self.relay.workspace.update(models=[], coordinator=None)
+        with self.assertRaisesRegex(ConnectionError, "Connect a model"):
+            await self.relay.orchestrator.run("user", "Private history")
+        self.relay.invoke.assert_not_awaited()
+
+    async def test_owner_selected_coordinator_is_an_explicit_recipient_grant(self):
+        self.relay.workspace.update(models=[], coordinator="coder")
+        self.relay.invoke.side_effect = [self.plan(), {"text": "Done"}]
+        result = await self.relay.orchestrator.run("user", "Code this")
+        self.assertEqual(result["text"], "Done")
+        self.assertEqual([call.args[1] for call in self.relay.invoke.await_args_list], ["coder", "coder"])
+
+    async def test_revoked_recipient_grant_after_planning_blocks_worker(self):
+        async def revoke(*args):
+            self.relay.workspace["models"].remove("coder")
+            return self.plan()
+        self.relay.invoke.side_effect = revoke
+        with self.assertRaisesRegex(ConnectionError, "permitted tasks changed"):
+            await self.relay.orchestrator.run("user", "Private history")
+        self.assertEqual(self.relay.invoke.await_count, 1)
+
+    async def test_revoked_coordinator_grant_blocks_synthesis(self):
+        self.relay.workspace["models"].remove("planner")
+        replies = [self.plan([self.task(), self.task(task_type="debugging")]), {"text": "Code"}, {"text": "Review"}]
+        async def revoke(*args):
+            reply = replies.pop(0)
+            if not replies:
+                self.relay.workspace["coordinator"] = None
+            return reply
+        self.relay.invoke.side_effect = revoke
+        with self.assertRaisesRegex(PermissionError, "no longer authorized"):
+            await self.relay.orchestrator.run("user", "Private history")
+        self.assertEqual(self.relay.invoke.await_count, 3)
 
     async def test_offline_or_foreign_coordinator_never_calls_models(self):
         for identity in ("offline", "foreign"):
