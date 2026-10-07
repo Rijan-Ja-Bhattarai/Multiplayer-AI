@@ -202,6 +202,10 @@ class MainWindow(QMainWindow):
         # While a shared conversation is being ended at the relay, so its
         # actions cannot be fired twice from two places at once.
         self.chat_busy = False
+        # The header's conversation buttons, and what they were last built for.
+        # Kept so the three-second poll cannot replace them mid-click.
+        self.chat_manage_buttons = []
+        self.chat_manage_signature = None
         self.toast_error = False
         self.request_count = 0
         self.ready = False
@@ -1645,15 +1649,27 @@ class MainWindow(QMainWindow):
         subtitle = "Your agent is working…" if pending else "Online · Ready to collaborate" if agent and agent["online"] else "Start this agent on its device to continue" if agent else "Choose a connected agent to begin"
         self.chat_subtitle.setText((f"Shared with {len(room['members'])} devices · " if room else "") + subtitle)
         self.share_conversation_button.setEnabled(bool(self.ready and not self.remote and agent and agent["online"] and not pending))
-        # Rebuilt rather than shown or hidden, so the set on offer always matches
-        # what this conversation can actually have done to it.
-        clear_layout(self.chat_manage)
-        for text, tip, callback in self.conversation_actions(self.selected):
-            control = action(text, lambda checked=False, run=callback: run(),
-                             name="danger" if text.startswith("Delete") else "ghost")
-            control.setToolTip(tip)
+        # Rebuilt only when the set of actions actually changes. This runs on
+        # every agents poll, three seconds apart, and clearing the layout threw
+        # the buttons away and made new ones each time: a click whose mouse-up
+        # landed after a swap was delivered to a widget that no longer existed,
+        # so the buttons appeared dead and worked only if you were lucky with
+        # the timing. Held as widgets so they stay the same objects between
+        # polls, and only their enabled state is touched.
+        actions = self.conversation_actions(self.selected)
+        signature = (self.selected, tuple(text for text, _, _ in actions))
+        if signature != self.chat_manage_signature:
+            clear_layout(self.chat_manage)
+            self.chat_manage_buttons = []
+            for text, tip, callback in actions:
+                control = action(text, lambda checked=False, run=callback: run(),
+                                 name="danger" if text.startswith("Delete") else "ghost")
+                control.setToolTip(tip)
+                self.chat_manage.addWidget(control)
+                self.chat_manage_buttons.append(control)
+            self.chat_manage_signature = signature
+        for control in self.chat_manage_buttons:
             control.setEnabled(not self.chat_busy)
-            self.chat_manage.addWidget(control)
 
     def select_agent(self, agent_id):
         self.selected = agent_id

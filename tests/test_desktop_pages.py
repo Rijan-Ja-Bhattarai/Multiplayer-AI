@@ -278,6 +278,59 @@ def test_a_conversation_that_disappears_elsewhere_is_forgotten_here(window) -> N
         "a room disappearing took a direct conversation with it")
 
 
+def test_a_conversation_action_survives_the_polling(window, qt_app, monkeypatch) -> None:
+    """The header's buttons must still be the same widgets three seconds later.
+
+    The runtime polls the agents list every three seconds, and each poll used to
+    rebuild these buttons from scratch. A click whose mouse-up landed after a
+    rebuild was delivered to a widget that had already been thrown away, so
+    both buttons looked dead and worked only when the timing happened to fall
+    right. They are now held and only their enabled state changes.
+
+    Clicking through several polls is the point: the earlier version passed a
+    test that clicked straight after building them.
+    """
+    window.identity = "me"
+    window.agents = [{"id": "local-llama", "kind": "model", "online": True,
+                      "provider": "ollama", "model": "llama3"}]
+    window.selected = "local-llama"
+    window.chats = {"local-llama": {"messages": [("user", "hi"), ("assistant", "hello")]}}
+    window.render_agents()
+
+    def buttons():
+        return [window.chat_manage.itemAt(index).widget()
+                for index in range(window.chat_manage.count())]
+
+    def poll():
+        window.network_event("agents", {"agents": window.agents, "connected": True})
+
+    before = buttons()
+    for _ in range(5):
+        poll()
+    assert buttons() == before, (
+        "the agents poll replaced the conversation buttons, so a click can be "
+        "delivered to a widget that no longer exists")
+
+    # And they still act on the conversation they were built for.
+    monkeypatch.setattr(win.QMessageBox, "question",
+                        lambda *args, **kwargs: win.QMessageBox.StandardButton.Yes)
+    for _ in range(5):
+        poll()
+    [button for button in buttons() if button.text() == "Clear messages"][0].click()
+    assert window.chats["local-llama"]["messages"] == [], (
+        "Clear messages did nothing when clicked after a poll")
+
+    window.chats["local-llama"]["messages"] = [("user", "again")]
+    window.render_agents()
+    for _ in range(5):
+        poll()
+    [button for button in buttons() if button.text().startswith("Delete")][0].click()
+    assert "local-llama" not in window.chats, (
+        "Delete conversation did nothing when clicked after a poll")
+    assert window.selected is None, (
+        "the deleted conversation is still selected")
+
+
 def test_the_rows_built_on_demand_explain_themselves(window) -> None:
     """Agent cards and attachments appear only once there is something to show.
 
