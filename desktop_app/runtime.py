@@ -148,8 +148,8 @@ class DesktopRuntime:
                 store = self.engines[workspace_id].history_store
                 state = store.load("ui").get("state", {})
                 chat = state.setdefault("chats", {}).setdefault(data["from"], {"messages": [], "history": [], "pending": False})
-                role = "peer" if event == "incoming" else "error" if data.get("error") else "local_agent"
-                chat["messages"].append([role, data["text"] if event == "incoming" else data["to"] + ":\n" + data["text"]])
+                role = "peer" if event == "incoming" else "error" if data.get("error") else "local_agent:" + data["to"]
+                chat["messages"].append([role, data["text"]])
                 chat["unread"] = chat.get("unread", 0) + (event == "incoming")
                 store.save("ui", "state", state)
             elif event == "conversations" and self.engines[workspace_id].remote == (self.entry(workspace_id)["kind"] == "remote"):

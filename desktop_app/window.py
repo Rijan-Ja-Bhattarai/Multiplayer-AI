@@ -1555,6 +1555,14 @@ class MainWindow(QMainWindow):
             return ("Request unsuccessful", "", None, "error")
         if role == "local_agent":
             return self.agent_identity(room["target"] if room else self.selected)
+        if role.startswith("local_agent:"):
+            # This device's own agent answering a peer's request. The responder
+            # is named in the role, so it is read from there rather than
+            # resolved. The fallback below could not do it: there is no room in
+            # a peer conversation, so ``self.selected`` is the peer who asked
+            # the question, and the reply came out headed by the asker with the
+            # real responder left inline in the body text.
+            return self.agent_identity(role.removeprefix("local_agent:"))
         if role == "peer":
             # Another device. It has no provider of ours and no avatar, so it
             # is named by its own identity and tinted as a peer.
@@ -1695,6 +1703,33 @@ class MainWindow(QMainWindow):
             self.cap_message_widths()
         return super().eventFilter(watched, event)
 
+    def split_legacy_responder(self, role, text):
+        """Recover the responder from replies saved before the role carried it.
+
+        Those replies arrived with this device's agent id glued onto the front
+        of the text as ``id:\\n``, because there was nowhere else to put it. With
+        no room to resolve, the only identity available was the chat's key,
+        which is the peer who asked, so those conversations render with the
+        asker heading a reply their own agent wrote.
+
+        Split only when that first line is an agent currently in the list. The
+        old prefix and an ordinary opening line are both bare words within the
+        same character set, so the shape alone cannot tell them apart, and a
+        reply that begins "Note:" must not lose its first line. The colon the
+        old prefix ended with is kept as a second test, so a first line with no
+        colon is never split at all.
+
+        Rendering only: the stored message is left as it was, so saving the
+        history again writes the same bytes and this reapplies cleanly.
+        """
+        if role != "local_agent" or "\n" not in text:
+            return role, text
+        head, _, rest = text.partition("\n")
+        identity = head[:-1] if head.endswith(":") else ""
+        if rest and identity and any(agent["id"] == identity for agent in self.agents):
+            return "local_agent:" + identity, rest
+        return role, text
+
     def render_messages(self):
         clear_layout(self.messages)
         chat = self.chats.get(self.selected, {})
@@ -1716,7 +1751,8 @@ class MainWindow(QMainWindow):
         room = self.conversations.get(self.selected)
         self.message_bubbles = []
         previous = None
-        messages = chat.get("messages", [])
+        messages = [self.split_legacy_responder(role, text)
+                    for role, text in chat.get("messages", [])]
         # Every speaker, resolved once up front. The run a message belongs to
         # is decided by what comes after it, so the whole history has to be
         # known before the first row can be laid out.
@@ -1767,7 +1803,12 @@ class MainWindow(QMainWindow):
                     detail.setAlignment(Qt.AlignmentFlag.AlignRight if mine
                                         else Qt.AlignmentFlag.AlignLeft)
                     bubble.add_content(detail)
-            if role in ("assistant", "local_agent"):
+            # ``local_agent:<id>`` is a reply from an agent too, so it is matched
+            # by prefix rather than by equality. Compared exactly, it would stop
+            # matching the moment the responder's id rode along in the role, and
+            # the reply would quietly fall back to being drawn as raw text with
+            # its markdown left in it.
+            if role == "assistant" or role.startswith("local_agent"):
                 body = MarkdownMessage(text, theme_name=self.theme)
             else:
                 body = label(text, wrap=True)
@@ -2152,7 +2193,15 @@ class MainWindow(QMainWindow):
                 self.add_activity(f"Message from {source}", f"Received by {data['to']}")
                 self.notice(f"Message from {source}. Open their conversation to view it.")
             else:
-                chat["messages"].append(("error" if data.get("error") else "local_agent", data["to"] + ":\n" + data["text"]))
+                # ``data["to"]`` is this device's own agent, which is the one
+                # that answered: ``data["from"]`` is the peer that asked, and
+                # is the chat we are filing this under. The responder's id
+                # travels in the role rather than glued onto the front of the
+                # text, so the reply is headed by whoever actually replied
+                # instead of by the peer who asked. A role with an id in it is
+                # the same shape as ``member:<id>`` has always used.
+                role = "error" if data.get("error") else "local_agent:" + data["to"]
+                chat["messages"].append((role, data["text"]))
             self.render_agents()
             self.persist_history()
             if self.selected == source:

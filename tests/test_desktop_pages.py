@@ -27,7 +27,8 @@ from PySide6.QtGui import QPalette, QShortcut, QWheelEvent  # noqa: E402
 from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog, QFrame,  # noqa: E402
                              QLabel, QMessageBox, QPushButton, QWidget)
 from PySide6.QtCore import QAbstractAnimation  # noqa: E402
-from PySide6.QtCore import QEvent  # noqa: E402
+from PySide6.QtCore import QEvent, QSize  # noqa: E402
+from PySide6.QtGui import QResizeEvent  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 
 from desktop_app import window as win  # noqa: E402
@@ -523,6 +524,89 @@ def test_a_peer_message_is_named_as_a_peer(window) -> None:
     assert member[3] == "peer", f"a member was treated as {member[3]}"
 
 
+def test_a_local_agents_reply_is_not_headed_by_the_peer_that_asked(window) -> None:
+    """The responder is this device's own agent, not whoever asked it a question.
+
+    A peer's request is answered by the local agent, and the reply comes back
+    with ``from`` as the peer who asked and ``to`` as the agent that replied.
+    The reply used to be headed by ``selected``, which in a peer conversation is
+    the peer, so it rendered under the asker's name with the real responder left
+    inline in the body text.
+    """
+    window.identity = "my-laptop"
+    window.agents = [
+        {"id": "my-local-agent", "kind": "model", "online": True, "local": True,
+         "provider": "ollama", "model": "llama3"},
+        {"id": "guest-laptop", "kind": "device", "online": True},
+    ]
+    window.selected = "guest-laptop"
+
+    window.network_event("incoming_reply", {
+        "from": "guest-laptop", "to": "my-local-agent",
+        "text": "## Heading\n\n**Hello** from my agent."})
+
+    assert window.chats["guest-laptop"]["messages"] == [
+        ("local_agent:my-local-agent", "## Heading\n\n**Hello** from my agent.")], (
+        f"the responder's id should travel in the role, not be glued onto the "
+        f"text: {window.chats['guest-laptop']['messages']}")
+
+    name, subtitle, provider, kind = window.speaker_identity(
+        "local_agent:my-local-agent", None)
+    assert name == "Ollama", f"the reply is headed by {name!r}"
+    assert subtitle == "my-local-agent", f"the agent id was dropped: {subtitle!r}"
+    assert provider == "ollama", "the local responder lost its provider"
+    assert kind == "agent", f"the local responder was treated as {kind}"
+
+    # The bare role still falls back the old way, which is what a saved
+    # conversation nobody can attribute relies on.
+    assert window.speaker_identity("local_agent", {"target": "some-agent"})[0] == "some-agent"
+
+
+def test_a_failed_local_reply_is_still_an_error(window) -> None:
+    """The error path is unchanged: it names no responder, because none replied."""
+    window.identity = "my-laptop"
+    window.agents = [{"id": "my-local-agent", "kind": "model", "online": True,
+                      "local": True, "provider": "ollama", "model": "llama3"}]
+    window.selected = "guest-laptop"
+
+    window.network_event("incoming_reply", {
+        "from": "guest-laptop", "to": "my-local-agent",
+        "text": "The local agent could not complete this request.", "error": True})
+
+    assert window.chats["guest-laptop"]["messages"] == [
+        ("error", "The local agent could not complete this request.")]
+
+
+def test_saved_replies_are_unwrapped_only_when_the_prefix_is_a_known_agent(window) -> None:
+    """The old shape put ``id:\\n`` on the front, and is read back apart.
+
+    Splitting on the newline alone would eat the first line of any reply that
+    happens to begin with a colon, because an agent id and an ordinary word are
+    both bare characters from the same set. So it splits only for an agent
+    currently in the list, and only when the line ends in the colon the old
+    prefix always had.
+    """
+    window.agents = [{"id": "my-local-agent", "kind": "model", "online": True,
+                      "local": True, "provider": "ollama", "model": "llama3"}]
+
+    assert window.split_legacy_responder(
+        "local_agent", "my-local-agent:\n**Hi** there") == (
+            "local_agent:my-local-agent", "**Hi** there")
+
+    for text in ("Note:\ncheck the second run",     # an ordinary opening line
+                 "my-local-agent\n**Hi**",          # no colon, so not the old shape
+                 "my-local-agent:\n",               # nothing left to show
+                 "no colon or newline here",
+                 "ghost-agent:\nfrom a device that is gone"):
+        assert window.split_legacy_responder("local_agent", text) == ("local_agent", text), (
+            f"a reply that was never stored this way was rewritten: {text!r}")
+
+    # Only the reply role is touched.
+    assert window.split_legacy_responder(
+        "assistant", "my-local-agent:\n**Hi**") == (
+            "assistant", "my-local-agent:\n**Hi**")
+
+
 def test_resizing_the_window_re_caps_the_bubbles(window, qt_app) -> None:
     """Narrowing the panel re-wraps the messages rather than clipping them.
 
@@ -543,10 +627,13 @@ def test_resizing_the_window_re_caps_the_bubbles(window, qt_app) -> None:
     qt_app.processEvents()
     wide = window.message_bubbles[0].width()
 
-    # The filter has to run at all, and only for the viewport's own resize.
+    # The filter has to run at all. No chat is needed for this half, which is
+    # the point of checking it on its own: the runtime polls the relay on a
+    # timer, and letting the event loop turn here hands it the chance to replace
+    # the chats below with whatever the relay says, which is nothing.
     called = []
     original = window.cap_message_widths
-    window.cap_message_widths = lambda: called.append(True) or original()
+    window.cap_message_widths = lambda: called.append(True)
     try:
         window.resize(760, 900)
         qt_app.processEvents()
@@ -554,21 +641,29 @@ def test_resizing_the_window_re_caps_the_bubbles(window, qt_app) -> None:
     finally:
         window.cap_message_widths = original
 
-    # A different event on the viewport is not a reason to redo the layout.
-    # Only a real resize of an unrelated widget is left out of this: delivering
-    # a QResizeEvent without resizing anything can cascade a genuine relayout,
-    # which moves the viewport and so legitimately re-caps the bubbles. That
-    # would be testing Qt's layout rather than the filter.
+    # The guard has to be narrow. Called directly rather than delivered, because
+    # posting these for real lets Qt relayout in response -- a focus change can
+    # move a scrollbar, which resizes the viewport, which legitimately re-caps.
+    # That would be measuring Qt's layout rather than the filter's condition.
     called.clear()
     window.cap_message_widths = lambda: called.append(True)
     try:
-        QApplication.sendEvent(window.messages_scroll.viewport(),
-                               QEvent(QEvent.Type.FocusIn))
-        qt_app.processEvents()
+        window.eventFilter(window, QResizeEvent(QSize(100, 100), QSize(100, 100)))
+        window.eventFilter(window.messages_scroll.viewport(),
+                           QEvent(QEvent.Type.FocusIn))
     finally:
         window.cap_message_widths = original
-    assert not called, "the cap ran for an event that was not a viewport resize"
+    assert not called, "the cap ran for something that was not the viewport resizing"
 
+    # And the narrower panel really does produce a narrower bubble. Seeded again
+    # here because the poll above has had its turn and replaced the chats.
+    window.selected = "local-llama"
+    window.chats = {"local-llama": {"messages": [
+        ("assistant", "a reply long enough that the ceiling matters " * 12)]}}
+    window.render_messages()
+    qt_app.processEvents()
+    assert window.message_bubbles, (
+        "the reply is gone, so the poller replaced the chats after all")
     assert window.message_bubbles[0].width() < wide, (
         "a narrower panel did not narrow the bubble, so the reply runs off "
         "the edge")
