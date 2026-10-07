@@ -7,7 +7,8 @@ import sys
 from pathlib import Path
 from datetime import datetime
 
-from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QSize, Qt, QTimer, QUrl, Slot
+from PySide6.QtCore import (QEasingCurve, QEvent, QPropertyAnimation, QSize, Qt,
+                            QTimer, QUrl, Slot)
 from PySide6.QtGui import (QGuiApplication, QIcon, QKeySequence, QPixmap, QPainter,
                            QColor, QDesktopServices, QFont, QPalette, QShortcut)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QFileDialog,
@@ -29,11 +30,11 @@ from .lan import lan_addresses
 from .layout import minimum_size, sidebar_should_collapse, window_size
 from .markdown import MarkdownMessage
 from .resources import ResourceSampler
-from .theme import (DARK, LIGHT, PROVIDER_NAMES, THEME_CHOICES, color,
-                   provider_entry, provider_names, resolve_theme, stylesheet,
-                   system_theme)
-from .widgets import (Composer, ErrorLine, HoverRow, OrbitArt, Select, WorkspaceButton,
-                     action, app_mark, label)
+from .theme import (DARK, LIGHT, PROVIDER_NAMES, THEME_CHOICES, color, mix,
+                   provider_color, provider_entry, provider_names, resolve_theme,
+                   stylesheet, system_theme)
+from .widgets import (Composer, ErrorLine, HoverRow, MessageBubble, OrbitArt,
+                    Select, WorkspaceButton, action, app_mark, label)
 
 
 def frame(name, layout_type=QVBoxLayout):
@@ -181,6 +182,9 @@ class MainWindow(QMainWindow):
         # rebuild of the page can find it again. Lines hold no message of
         # their own.
         self.card_lines = {}
+        # The bubbles from the last render, so their width can be recapped
+        # when the panel is resized.
+        self.message_bubbles = []
         # Whether each Workspaces operation is still in flight. The poll runs
         # every three seconds and this page re-enables its buttons from it, so
         # without this a join could be submitted a second time while the first
@@ -770,6 +774,11 @@ class MainWindow(QMainWindow):
         self.messages.setSpacing(16)
         self.messages.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.messages_scroll.setWidget(self.messages_widget)
+        # A bubble that hugs its text has to be told where to stop, and the
+        # ceiling moves with the panel. Recapped on every viewport resize
+        # rather than only on render, so dragging the window narrower wraps
+        # the next message instead of leaving it running off the edge.
+        self.messages_scroll.viewport().installEventFilter(self)
         column.addWidget(self.messages_scroll, 1)
         self.composer = Composer()
         self.composer.setPlaceholderText("What would you like to work on?")
@@ -1478,16 +1487,22 @@ class MainWindow(QMainWindow):
             button.setToolTip(entry["name"])
             button.setChecked(entry["id"] == self.workspace_id)
 
-    def speaker_avatar(self, speaker, role):
+    def speaker_avatar(self, speaker, role, provider=None, kind=None):
         """The mark beside a message.
 
         The provider's own logo when the speaker is a known model agent, so
-        a conversation between providers can be read at a glance, and the
-        shared device mark otherwise. Both are painted rather than styled,
-        so they follow the theme on the same terms as the orbit art.
+        a conversation can be read at a glance, and the shared device mark
+        otherwise. Both are painted rather than styled, so they follow the
+        theme on the same terms as the orbit art.
+
+        The provider is passed in rather than looked up again, because the
+        caller has already resolved it and looking it up by the speaker's
+        display name fails as soon as that name is the provider's.
         """
         if role == "user":
             return device_avatar(self.theme, self.identity, SPEAKER_AVATAR)
+        if provider:
+            return provider_logo(provider, self.theme, SPEAKER_AVATAR)
         agent = next((entry for entry in self.agents if entry["id"] == speaker), None)
         if agent and agent.get("provider"):
             return provider_logo(agent["provider"], self.theme, SPEAKER_AVATAR)
@@ -1501,6 +1516,146 @@ class MainWindow(QMainWindow):
         """
         QApplication.clipboard().setText(text)
         self.notice("Message copied.")
+
+    def speaker_identity(self, role, room=None):
+        """Who is speaking, as ``(name, subtitle, provider, kind)``.
+
+        Resolved in one place because it used to be spread across the role map
+        and a fallback that labelled a message with whatever conversation
+        happened to be open. Two roles fell through that fallback: ``peer``,
+        which named another device's message after the agent, and any
+        assistant whose id the reader then had to decode.
+
+        ``kind`` drives the layout rather than the role string, so a peer's
+        message and an agent's are told apart by the bubble and not by the
+        text alone.
+
+        The subtitle carries the agent's own id when it differs from the
+        provider name, which is what tells two Ollama agents apart.
+        """
+        if role == "user":
+            return ("You", "", None, "user")
+        if role == "error":
+            return ("Request unsuccessful", "", None, "error")
+        if role == "local_agent":
+            return self.agent_identity(room["target"] if room else self.selected)
+        if role == "peer":
+            # Another device. It has no provider and no avatar of ours, so it
+            # is named by its identity and tinted as a peer.
+            return ("This device", "", None, "peer")
+
+        speaker = role.removeprefix("member:") if role.startswith("member:") else None
+        if speaker is not None:
+            return (speaker, "", None, "peer")
+
+        return self.agent_identity(room["target"] if room else self.selected)
+
+    def agent_identity(self, agent_id):
+        """An agent's display name, subtitle and provider.
+
+        Falls back to the raw id when the agent is not in the current list,
+        which is the honest thing to show rather than a placeholder.
+        """
+        entry = next((agent for agent in self.agents if agent["id"] == agent_id), None)
+        if entry is None:
+            return (agent_id, "", None, "agent")
+        provider = entry.get("provider")
+        name = provider_names(self.theme).get(provider, (agent_id,))[0] if provider else agent_id
+        subtitle = agent_id if agent_id and agent_id != name else ""
+        return (name, subtitle, provider, "agent")
+
+    def message_bubble_fill(self, provider, kind):
+        """The fill behind a message, which is what tells them apart.
+
+        Your own messages get the neutral raised surface. An agent's is tinted
+        toward that provider's own accent, so which model is answering reads
+        without the name. A failure is tinted with the theme's danger colour
+        rather than a provider's, because a failed call is not that model's
+        fault to be branded with.
+        """
+        surface = color(self.theme, "surface")
+        if kind == "user":
+            return color(self.theme, "surface_raised")
+        if kind == "error":
+            return color(self.theme, "danger_bg")
+        if provider:
+            return mix(provider_color(self.theme, provider), surface, 0.14)
+        return color(self.theme, "surface")
+
+    def message_title_colour(self, provider, kind):
+        if kind == "error":
+            return color(self.theme, "error")
+        if provider:
+            return provider_color(self.theme, provider)
+        return color(self.theme, "agent_title")
+
+    def cap_message_widths(self):
+        """Give every bubble its own size: as wide as its text, up to a share of the panel.
+
+        Set explicitly rather than left to the layout's size policy. A bubble
+        has to be told where to stop or one long line runs off the edge, and
+        it has to be told how big it is as well: relying on the box layout
+        inside a freshly built row left it at the widget's default 640x480,
+        which is the full-bleed slab this replaced.
+
+        The width is ``min(preferred, limit)``: a short reply gets the width of
+        its text and reads as a bubble, a long one gets the ceiling and wraps.
+
+        The height is read back from the bubble's column *after* the width is
+        set, because it depends on how the reply wrapped. Measured the other
+        way round, against the previous width, a long reply claimed to be
+        24000px tall. It is pinned because the scrolling panel squeezes its
+        rows to fit rather than scrolling them, which left every bubble one
+        line high no matter how much text was in it.
+        """
+        available = self.messages_scroll.viewport().width()
+        limit = max(240, int(available * 0.74)) if available > 0 else 240
+        for bubble in self.message_bubbles:
+            width = bubble.preferred_width()
+            bubble.setFixedWidth(max(1, min(width if width > 0 else limit, limit)))
+            # The column first, so the body is handed the new width and its
+            # resize handler can set the wrap; the reply works its height out
+            # from that, but does so on the next event-loop turn, so it is
+            # asked again afterwards. Measuring before the layout ran gave the
+            # height of one enormous line: 24000px for a paragraph.
+            bubble.column.activate()
+            for index in range(bubble.column.count()):
+                child = bubble.column.itemAt(index).widget()
+                refit = getattr(child, "fit_height", None)
+                if callable(refit):
+                    refit()
+            bubble.setFixedHeight(max(1, bubble.column.sizeHint().height()))
+
+    def settle_message_layout(self):
+        """Force the chat's layout to run now.
+
+        A render leaves rows at their default size until the event loop gets
+        round to them, so anything reading the geometry straight afterwards
+        sees an unlaid-out widget. Invalidating alone only resizes the row, it
+        does not reach inside it, so each row's own layout is activated too,
+        and the bubbles are sized before the pass that places them.
+        """
+        for row in self.messages_widget.findChildren(HoverRow):
+            row.outer.invalidate()
+        self.messages.invalidate()
+        self.messages.activate()
+        self.cap_message_widths()
+        for row in self.messages_widget.findChildren(HoverRow):
+            row.outer.activate()
+            row.content.activate()
+            for bubble in row.findChildren(MessageBubble):
+                # The bubble's own column, or the title and body keep their
+                # default 640x480 geometry and the bubble ends up one line
+                # tall whatever its size hint says.
+                bubble.column.activate()
+
+    def eventFilter(self, watched, event):
+        if (watched is getattr(self, "messages_scroll", None) and
+                hasattr(self, "messages_scroll") and
+                watched is self.messages_scroll.viewport() and
+                event.type() == QEvent.Type.Resize):
+            self.cap_message_widths()
+        return super().eventFilter(watched, event)
 
     def render_messages(self):
         clear_layout(self.messages)
@@ -1520,47 +1675,83 @@ class MainWindow(QMainWindow):
                 self.messages.addWidget(
                     label("Pick a conversation or an agent on the left, or connect a "
                           "model from Providers to start one.", "muted", True))
-        names = {"user": "You", "error": "Request unsuccessful", "local_agent": "Agent on this device"}
         room = self.conversations.get(self.selected)
+        self.message_bubbles = []
         previous = None
         for role, text in chat.get("messages", []):
-            speaker = role.removeprefix("member:") if role.startswith("member:") else names.get(role, room["target"] if room else self.selected)
+            name, subtitle, provider, kind = self.speaker_identity(role, room)
             # Discord groups consecutive messages from one speaker under a
             # single header rather than boxing each one. A row per message
             # with a card around it reads as a stack of documents, which is
             # what this used to look like.
-            grouped = speaker == previous
+            #
+            # The identity is the name, the subtitle and the provider together,
+            # not the name on its own. Two agents on the same provider are both
+            # called "Ollama", so grouping on the name alone tucked one
+            # agent's reply under another agent's header and dropped the
+            # subtitle that tells them apart.
+            identity = (name, subtitle, provider, kind)
+            grouped = identity == previous
+            mine = kind == "user"
             row = HoverRow()
+            mark = None
             if grouped:
-                # Keep the text aligned under the first message's text
-                # rather than sliding it left under the absent avatar.
-                spacer = QWidget()
-                spacer.setFixedWidth(SPEAKER_AVATAR)
-                row.add_content(spacer, 0, Qt.AlignmentFlag.AlignTop)
+                # Hold the place the mark would take, so a follow-on message
+                # lines up under the one above instead of sliding across.
+                mark = QWidget()
+                mark.setFixedWidth(SPEAKER_AVATAR)
             else:
-                row.add_content(self.speaker_avatar(speaker, role), 0,
-                                Qt.AlignmentFlag.AlignTop)
-            column = QVBoxLayout()
-            column.setSpacing(4)
-            row.add_content(column, 1)
+                mark = self.speaker_avatar(name, role, provider, kind)
+
+            bubble = MessageBubble()
+            bubble.set_background(self.message_bubble_fill(provider, kind))
+            bubble.setAccessibleName(f"{name}: {text[:60]}")
             if not grouped:
-                title = label(speaker)
+                title = label(name)
                 title.setStyleSheet("font-weight:650; color:"
-                                    + color(self.theme, "error" if role == "error" else "agent_title") + ";")
-                column.addWidget(title)
+                                    + self.message_title_colour(provider, kind) + ";")
+                title.setAlignment(Qt.AlignmentFlag.AlignRight if mine
+                                   else Qt.AlignmentFlag.AlignLeft)
+                bubble.add_content(title)
+                if subtitle:
+                    detail = label(subtitle, "muted", True)
+                    detail.setAlignment(Qt.AlignmentFlag.AlignRight if mine
+                                        else Qt.AlignmentFlag.AlignLeft)
+                    bubble.add_content(detail)
             if role in ("assistant", "local_agent"):
                 body = MarkdownMessage(text, theme_name=self.theme)
             else:
                 body = label(text, wrap=True)
                 body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            column.addWidget(body)
+            bubble.add_content(body)
+            self.message_bubbles.append(bubble)
+
+            # Your messages sit on the right with the mark beside them, an
+            # agent's on the left. The stretch is what carries the bubble to
+            # that side, so the row itself still spans the panel and the
+            # hover actions cannot change its width.
+            if mine:
+                row.content.addStretch(1)
+                row.add_content(bubble, 0, Qt.AlignmentFlag.AlignTop)
+                row.add_content(mark, 0, Qt.AlignmentFlag.AlignTop)
+            else:
+                row.add_content(mark, 0, Qt.AlignmentFlag.AlignTop)
+                row.add_content(bubble, 0, Qt.AlignmentFlag.AlignTop)
+                row.content.addStretch(1)
+
             copy = action("Copy", lambda checked=False, value=text: self.copy_message(value), name="ghost")
             copy.setToolTip("Copy this message")
             row.add_action(copy)
             self.messages.addWidget(row)
-            previous = speaker
+            previous = identity
+        self.cap_message_widths()
         if chat.get("pending") or chat.get("local_pending"):
             self.messages.addWidget(label("● ● ●   Waiting for your agent…", "muted"))
+        # Force the layout now rather than on the next event-loop turn. A
+        # bubble that has not been laid out has no width, so the width cap
+        # below it and anything that reads the geometry afterwards would be
+        # working from a widget still sitting at its default size.
+        self.settle_message_layout()
         self.update_chat_controls()
         self.persist_history()
         QTimer.singleShot(0, lambda: self.messages_scroll.verticalScrollBar().setValue(self.messages_scroll.verticalScrollBar().maximum()))

@@ -3,10 +3,11 @@ import math
 from PySide6.QtCore import (Property, QAbstractAnimation, QEasingCurve, QRectF,
                             QPropertyAnimation, Qt, Signal)
 from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import (QComboBox, QHBoxLayout, QLabel, QPushButton,
-                             QPlainTextEdit, QSizePolicy, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QComboBox, QFrame, QHBoxLayout, QLabel,
+                             QPushButton, QPlainTextEdit, QSizePolicy,
+                             QVBoxLayout, QWidget)
 
-from .theme import DARK, color
+from .theme import DARK, color, mix
 
 
 def app_mark(theme_name=DARK, initial="M", size=64):
@@ -110,6 +111,84 @@ class ErrorLine(QWidget):
     def clear(self):
         self.message.setText("")
         self.hide()
+
+
+def _lighten(colour):
+    """A fill slightly lighter than ``colour``, for the bubble's hairline.
+
+    Derived rather than tokenised so it follows the fill, which for an agent
+    bubble is already derived from that provider's accent. A border the same
+    value as the fill would be invisible, which is what made the old slab look
+    unfinished.
+    """
+    return mix("#ffffff", colour, 0.10)
+
+
+class MessageBubble(QFrame):
+    """One message's fill: the title, the body, and the background behind them.
+
+    A child of HoverRow rather than a replacement for it. The row spans the
+    panel and keeps the hover action slot, so revealing the actions cannot
+    change the row's width; the bubble inside it hugs its own text instead.
+
+    Horizontal size policy is Maximum, which is what makes it hug: it takes
+    its size hint up to a ceiling rather than filling whatever it is given.
+    Without that a bubble either runs the full width of the panel as a slab,
+    or the layout has to be told the width by hand.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("bubble")
+        self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Minimum)
+        self.column = QVBoxLayout(self)
+        self.column.setContentsMargins(14, 10, 14, 10)
+        self.column.setSpacing(3)
+        self.set_background("#2b2d31")
+
+    def set_background(self, colour):
+        """Fill and outline the bubble.
+
+        Set per widget rather than through the application sheet, because the
+        agent fill is derived from that provider's accent and so is not one of
+        the three themes' tokens.
+        """
+        self.setStyleSheet(
+            "QFrame#bubble { background: " + colour + "; border: 1px solid "
+            + _lighten(colour) + "; border-radius: 14px; }")
+
+    def add_content(self, widget):
+        self.column.addWidget(widget)
+        return widget
+
+    def preferred_width(self):
+        """How wide this bubble would like to be, before the panel's ceiling.
+
+        The layout's own hint is not enough, because a Markdown reply reports
+        the width it is currently laid out at rather than the width of its
+        text. Without this a long reply is measured against the width of the
+        first short one and never grows to fill the space it should have.
+        """
+        width = self.column.sizeHint().width()
+        for index in range(self.column.count()):
+            child = self.column.itemAt(index).widget()
+            measure = getattr(child, "natural_width", None)
+            if not callable(measure):
+                continue
+            try:
+                natural = measure()
+            except (RuntimeError, ValueError):
+                continue
+            # Replace the reply's contribution rather than taking the larger of
+            # the two. It reports the width it is currently laid out at, which
+            # is the panel's, so a short reply would otherwise inherit the
+            # width of a long one and every reply would come out the same.
+            hint = child.sizeHint().width()
+            if hint:
+                width -= hint
+            width += int(natural) + self.column.contentsMargins().left() \
+                + self.column.contentsMargins().right()
+        return width
 
 
 class Select(QComboBox):

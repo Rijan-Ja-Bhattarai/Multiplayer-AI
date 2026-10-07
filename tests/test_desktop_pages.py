@@ -23,7 +23,7 @@ pytest.importorskip("PySide6", reason="PySide6 is needed for the desktop page te
 pytest.importorskip("psutil", reason="psutil backs the Resources page")
 
 from PySide6.QtCore import QEasingCurve, QPoint, QPointF, Qt, QTimer  # noqa: E402
-from PySide6.QtGui import QShortcut, QWheelEvent  # noqa: E402
+from PySide6.QtGui import QPalette, QShortcut, QWheelEvent  # noqa: E402
 from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog, QFrame,  # noqa: E402
                              QLabel, QMessageBox, QPushButton)
 from PySide6.QtCore import QAbstractAnimation  # noqa: E402
@@ -31,7 +31,7 @@ from PySide6.QtCore import QAbstractAnimation  # noqa: E402
 from desktop_app import window as win  # noqa: E402
 from desktop_app.storage import ABSENT, REMOVED, Storage  # noqa: E402
 from desktop_app.theme import (DARK, LIGHT, MIKU, THEME_CHOICES, THEME_NAMES,
-                             THEMES, color, stylesheet)  # noqa: E402
+                             THEMES, color, contrast_ratio, stylesheet)  # noqa: E402
 
 
 class MemoryVault:
@@ -318,6 +318,17 @@ def conversation_window(window):
     return window
 
 
+def row_marks(row):
+    """Every painted mark in a row, wherever it sits.
+
+    Used to read ``content.itemAt(0)``, which assumed the mark is the first
+    thing in the row. Your own messages put theirs on the right, so the
+    leading slot is a stretch instead and the positional helper stopped
+    finding anything. Scanning is what the helper should have done all along.
+    """
+    return [child for child in row.findChildren(QLabel) if not child.pixmap().isNull()]
+
+
 def row_lead(row):
     """The widget holding a row's leading slot: an avatar, or the indent."""
     return row.content.itemAt(0).widget()
@@ -325,12 +336,22 @@ def row_lead(row):
 
 def row_has_mark(row):
     """A mark is a label carrying a painted pixmap; the indent is a bare widget."""
-    lead = row_lead(row)
-    return isinstance(lead, QLabel) and not lead.pixmap().isNull()
+    return bool(row_marks(row))
 
 
 def row_labels(row):
     return [child.text() for child in row.findChildren(QLabel) if child.text()]
+
+
+def row_bubbles(row):
+    return row.findChildren(win.MessageBubble)
+
+
+def bubble_box(window, row):
+    """A row's bubble in the panel's coordinates, so rows are comparable."""
+    bubble = row_bubbles(row)[0]
+    origin = bubble.mapTo(window.messages_widget, bubble.rect().topLeft())
+    return origin.x(), origin.x() + bubble.width()
 
 
 def test_messages_are_rows_and_not_cards(window) -> None:
@@ -358,30 +379,243 @@ def test_consecutive_messages_from_one_speaker_are_grouped(window) -> None:
     assert "You" not in row_labels(rows[1]), (
         "a follow-on message repeats the name above it")
 
+    # The speaker is named by the provider now, with the agent's own id as a
+    # subtitle when it differs. The raw id was the only label before, so two
+    # different providers were told apart by decoding "local-llama".
+    assert "Ollama" in row_labels(rows[2]), (
+        f"the agent is not named by its provider: {row_labels(rows[2])}")
     assert "local-llama" in row_labels(rows[2]), (
-        "a new speaker should be named")
+        "the agent id is lost, so two Ollama agents are indistinguishable")
     assert "local-llama" not in row_labels(rows[3]), (
         "a follow-on message repeats the name above it")
 
 
 def test_a_grouped_message_lines_up_under_the_one_above(window, qt_app) -> None:
-    """Without the indent the text slides left under the absent mark."""
+    """Without the held place, a follow-on message slides across.
+
+    Checked on whichever edge the bubble sits against rather than on the left,
+    because your own messages are right-aligned and an agent's are on the
+    left. What has to hold either way is that a follow-on message shares an
+    edge with the one above it.
+    """
     conversation_window(window)
     window.show()
     qt_app.processEvents()
     rows = window.messages_widget.findChildren(win.HoverRow)
 
-    def text_indent(row):
-        # Any label with text is body copy; the speaker's name is a label
-        # too, but it only appears on an ungrouped row and sits at the same
-        # indent, so it does not disturb the comparison.
-        bodies = [child for child in row.findChildren(QLabel) if child.text()]
-        return min((b.mapTo(row, b.rect().topLeft()).x() for b in bodies),
-                   default=None)
+    for above, below in ((rows[0], rows[1]), (rows[2], rows[3])):
+        top_left, top_right = bubble_box(window, above)
+        low_left, low_right = bubble_box(window, below)
+        assert top_left == low_left or top_right == low_right, (
+            f"a grouped message sits at {low_left}-{low_right} while the one "
+            f"above it sits at {top_left}-{top_right}, so neither edge lines up")
 
-    assert text_indent(rows[0]) == text_indent(rows[1]), (
-        f"a grouped message sits at {text_indent(rows[1])} while the one above "
-        f"it sits at {text_indent(rows[0])}")
+
+def test_your_messages_go_right_and_an_agents_go_left(window, qt_app) -> None:
+    """The two sides are what tell your input from a reply at a glance."""
+    conversation_window(window)
+    window.show()
+    qt_app.processEvents()
+    rows = window.messages_widget.findChildren(win.HoverRow)
+    panel = window.messages_scroll.viewport().width()
+
+    yours = bubble_box(window, rows[0])
+    theirs = bubble_box(window, rows[2])
+
+    assert yours[0] > theirs[0], (
+        f"your message starts at {yours[0]} and the agent's at {theirs[0]}, so "
+        "they are on the same side")
+    assert yours[1] >= theirs[1], (
+        "your message does not reach as far across as the agent's")
+    assert theirs[0] < panel * 0.5 < yours[1], (
+        f"your message ends at {yours[1]} and the agent's at {theirs[0]} of a "
+        f"{panel}px panel, so they are not on opposite sides")
+
+
+def test_a_short_message_hugs_and_a_long_one_is_capped(window, qt_app) -> None:
+    """A bubble sized to the panel is a slab, which is the fault being fixed.
+
+    The window is shown before the messages are put in place. Once the real
+    runtime is up it reports its workspace, and that restores the saved chat
+    list over whatever the test set, so anything staged beforehand is gone.
+    """
+    window.resize(1330, 910)
+    window.show()
+    pump(qt_app, 0.3)
+    window.selected = "local-llama"
+    window.agents = [{"id": "local-llama", "online": True, "provider": "ollama",
+                     "model": "llama3.2"}]
+    window.chats = {"local-llama": {"messages": [
+        ("user", "hi"),
+        ("assistant", "word " * 400),
+    ]}}
+    window.render_messages()
+    pump(qt_app, 0.3)
+
+    rows = window.messages_widget.findChildren(win.HoverRow)
+    assert len(rows) == 2, f"expected two rows, got {len(rows)}"
+    panel = window.messages_scroll.viewport().width()
+    short = row_bubbles(rows[0])[0].width()
+    long = row_bubbles(rows[1])[0].width()
+
+    assert short < panel * 0.5, (
+        f"a two-word message filled {short}px of a {panel}px panel, so the "
+        "bubble is a slab rather than a bubble")
+    assert long <= int(panel * 0.74) + 1, (
+        f"a long message ran to {long}px of a {panel}px panel")
+    assert not window.messages_scroll.horizontalScrollBar().isVisible(), (
+        "a long message made the chat scroll sideways")
+
+
+def test_each_provider_gets_its_own_bubble_colour(window) -> None:
+    """Which model is answering reads without the name."""
+    window.agents = [
+        {"id": "a", "online": True, "provider": "ollama", "model": "llama3.2"},
+        {"id": "b", "online": True, "provider": "anthropic", "model": "claude-opus"},
+        {"id": "c", "online": True, "provider": "gemini", "model": "gemini-2"},
+    ]
+    for name in THEME_NAMES:
+        window.apply_theme(name)
+        fills = {window.message_bubble_fill(agent["provider"], "agent")
+                 for agent in window.agents}
+        assert len(fills) == 3, (
+            f"{name}: three providers share {len(fills)} bubble colours")
+
+
+def test_a_failure_is_not_painted_in_a_providers_colour(window) -> None:
+    """A failed call is not that model's fault to be branded with."""
+    window.apply_theme(DARK)
+    for provider in ("ollama", "anthropic", "gemini"):
+        assert window.message_bubble_fill(provider, "error") == color(DARK, "danger_bg"), (
+            f"a {provider} failure was tinted with that provider's colour")
+    assert window.message_bubble_fill(None, "user") == color(DARK, "surface_raised"), (
+        "your own messages carry a provider tint")
+
+
+def test_a_peer_message_is_named_as_a_peer(window) -> None:
+    """It was labelled with the agent's name and rendered its markdown raw."""
+    window.selected = "local-llama"
+    window.agents = [{"id": "local-llama", "online": True, "provider": "ollama",
+                      "model": "llama3.2"}]
+    name, subtitle, provider, kind = window.speaker_identity("peer", None)
+    assert kind == "peer", f"a peer was treated as {kind}"
+    assert provider is None, "a peer was given a provider, so it is tinted as one"
+
+    member = window.speaker_identity("member:guest-laptop", None)
+    assert member[0] == "guest-laptop", f"a member was named {member[0]!r}"
+    assert member[3] == "peer", f"a member was treated as {member[3]}"
+
+
+def test_body_text_stays_readable_on_every_bubble_fill(window) -> None:
+    """A tint is close enough to the surface that the checked pair still holds."""
+    for name in THEME_NAMES:
+        window.apply_theme(name)
+        body = color(name, "text")
+        for provider in ("ollama", "anthropic", "gemini", "openai"):
+            fill = window.message_bubble_fill(provider, "agent")
+            ratio = contrast_ratio(body, fill)
+            assert ratio >= 4.5, (
+                f"{name}/{provider}: text on {fill} is {ratio:.2f}:1, under 4.5")
+        for kind in ("user", "error"):
+            fill = window.message_bubble_fill(None, kind)
+            ratio = contrast_ratio(body, fill)
+            assert ratio >= 4.5, (
+                f"{name}/{kind}: text on {fill} is {ratio:.2f}:1, under 4.5")
+
+
+def test_a_markdown_reply_is_transparent_so_the_bubble_shows_through(window, qt_app) -> None:
+    """It used to paint an opaque surface of its own, which is the slab."""
+    from desktop_app.markdown import MarkdownMessage
+
+    # Pump first, build the chat second. The runtime polls the relay on a
+    # timer and replaces ``window.chats`` with whatever the relay says, which
+    # is nothing, so a fake chat set before the pump is simply erased by it
+    # and there is no reply left to look at.
+    pump(qt_app, 0.2)
+    conversation_window(window)
+    body = window.messages_widget.findChild(MarkdownMessage)
+    assert body is not None, "the reply is not rendered as markdown"
+
+    base = body.palette().color(QPalette.ColorRole.Base)
+    assert base.alpha() == 0 or "background: transparent" in body.styleSheet(), (
+        f"a markdown reply still paints an opaque background ({base.name()}), "
+        "so the bubble behind it is invisible")
+    assert "background: transparent" in body.styleSheet(), (
+        "the reply's own stylesheet still fills the widget")
+    # And the bubble it sits in really does have a fill, so the transparency
+    # is showing a background rather than showing the panel.
+    bubble = body.parent()
+    assert isinstance(bubble, win.MessageBubble), (
+        f"a reply is not inside a bubble, it is inside {type(bubble).__name__}")
+
+    # The palette alone would not prove it: the app-level ``QWidget`` rule
+    # resolves the Base role back to an opaque colour on any widget under
+    # this stylesheet, whatever the widget's own palette says. What decides
+    # what is seen is the rule on the reply itself, so read what it paints.
+    # Every pixel is counted rather than one being sampled: the reply is full
+    # of text, and a single probe lands on a glyph or on the background
+    # depending on the message. The surface colour must be absent, because
+    # that opaque slab is the thing being removed, and the bubble's own fill
+    # must be present, because that is what has to show through.
+    qt_app.processEvents()
+    surface = color(window.theme, "surface")
+    fill = window.message_bubble_fill("ollama", "assistant")
+    # Grab the bubble, not the reply. Grabbing the reply on its own gives a
+    # pixmap whose transparent regions read as black, which is the reply's
+    # transparency showing up as a colour rather than the bubble behind it.
+    painted = bubble.grab().toImage()
+    colours = {painted.pixelColor(x, y).name().lower()
+               for y in range(painted.height()) for x in range(painted.width())}
+    assert surface.lower() not in colours, (
+        f"the reply still paints the {surface} surface, so it is an opaque "
+        f"slab over the bubble again")
+    assert fill.lower() in colours, (
+        f"the reply never shows the bubble behind it; {fill} is absent from "
+        f"what it paints")
+
+
+def test_a_renamed_agent_does_not_inherit_the_previous_replys_header(window, qt_app) -> None:
+    """Two replies both called "Ollama" are not the same speaker.
+
+    A reconnect can bring an agent back under a new id. Both ids read as
+    "Ollama", so grouping on the name alone ran the two runs together under
+    one header, and the id that tells them apart was dropped from every reply
+    after the first. The identity is the name, the id, the provider and the
+    kind together.
+    """
+    window.navigate(win.PAGE_INDEX["conversations"])
+    window.agents = [{"id": "llama3-old", "kind": "model", "online": True,
+                      "provider": "ollama", "model": "llama3"}]
+    window.selected = "llama3-old"
+    window.chats = {"llama3-old": {"messages": [
+        ("local_agent", "before the reconnect"),
+        ("local_agent", "still the first run"),
+    ]}}
+    window.render_messages()
+    first = [row_labels(row) for row in window.messages_widget.findChildren(win.HoverRow)]
+
+    # The agent comes back under a new id, and the history follows it.
+    window.agents = [{"id": "llama3-new", "kind": "model", "online": True,
+                      "provider": "ollama", "model": "llama3"}]
+    window.selected = "llama3-new"
+    window.chats = {"llama3-new": {"messages": [
+        ("local_agent", "before the reconnect"),
+        ("local_agent", "after the reconnect"),
+    ]}}
+    window.render_messages()
+    qt_app.processEvents()
+
+    # Only the rows from this render are of interest: the previous render's
+    # rows are still parented until the event loop deletes them, so the whole
+    # set is searched rather than counted.
+    headers = [row_labels(row) for row in window.messages_widget.findChildren(win.HoverRow)]
+    assert headers.count(["Ollama", "llama3-new"]) == 1, (
+        f"the reply after the reconnect never headed itself: {headers}")
+    assert headers.count(["Ollama", "llama3-old"]) == 1, (
+        f"the reply before it lost its own header: {headers}")
+    assert ["Ollama", "llama3-new"] in headers and ["Ollama", "llama3-old"] in headers, (
+        "both runs are called Ollama, so neither id may be dropped: "
+        f"{headers}")
 
 
 def test_the_action_slot_keeps_its_place_when_revealed(window, qt_app) -> None:
