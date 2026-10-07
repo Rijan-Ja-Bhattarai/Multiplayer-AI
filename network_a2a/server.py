@@ -17,6 +17,7 @@ from starlette.websockets import WebSocketDisconnect
 from .conversations import Conversations
 from .content import MAX_FRAME_BYTES
 from .web_search import SEARCH_ERRORS
+from .orchestration import Orchestrator, general_chat_state, routing_profile
 
 
 MAX_BYTES = MAX_FRAME_BYTES
@@ -58,9 +59,10 @@ class Relay:
         self.profile_store = conversation_store
         self.agent_profiles = conversation_store.load("agent_profiles").get("profiles", {}) if conversation_store else {}
         self.agent_profiles.update(self.workspace.get("agent_profiles", {}))
+        self.orchestrator = Orchestrator(self)
 
     def set_agent_profile(self, identity, profile):
-        self.agent_profiles[identity] = dict(profile)
+        self.agent_profiles[identity] = {**profile, **routing_profile(profile)}
         if self.profile_store:
             self.profile_store.save("agent_profiles", "profiles", self.agent_profiles)
 
@@ -69,7 +71,8 @@ class Relay:
         model = bool(profile.get("model") or identity in self.workspace.get("models", []))
         return {"id": identity, "kind": "model" if model else "device",
                 "online": identity in self.peers and (not model or profile.get("running", True)),
-                "provider": profile.get("provider"), "model": profile.get("model"), "vision": profile.get("vision", False)}
+                "provider": profile.get("provider"), "model": profile.get("model"), "vision": profile.get("vision", False),
+                **routing_profile(profile)}
 
     async def describe_self(self, request):
         source = self.authenticate(request.headers.get("authorization", ""))
@@ -78,15 +81,17 @@ class Relay:
         raw = bytearray()
         async for chunk in request.stream():
             raw.extend(chunk)
-            if len(raw) > 2048:
+            if len(raw) > 8192:
                 return JSONResponse({"error": "Profile is too large"}, 413)
         try:
             profile = json.loads(raw)
-            if (not isinstance(profile, dict) or set(profile) != {"provider", "model", "vision", "running"}
+            if (not isinstance(profile, dict) or not {"provider", "model", "vision", "running"} <= set(profile)
+                    or set(profile) - {"provider", "model", "vision", "running", "purpose", "tasks", "delegation_enabled"}
                     or not isinstance(profile["provider"], str) or not re.fullmatch(r"[a-z0-9-]{1,64}", profile["provider"])
                     or not isinstance(profile["model"], str) or not 1 <= len(profile["model"]) <= 256
                     or type(profile["vision"]) is not bool or type(profile["running"]) is not bool):
                 raise ValueError()
+            profile.update(routing_profile(profile))
         except (ValueError, TypeError):
             return JSONResponse({"error": "Use a valid model profile"}, 400)
         self.set_agent_profile(source, profile)
@@ -228,7 +233,9 @@ class Relay:
         if not source:
             return JSONResponse({"error": "Unauthorized"}, 401)
         owner = self.workspace.get("owner")
+        coordinator = general_chat_state(self.orchestrator.models(source), self.workspace.get("coordinator"))["coordinator"]
         return JSONResponse({"id": self.workspace.get("id"), "name": self.workspace.get("name", "Shared workspace"),
+            "coordinator": coordinator["id"] if coordinator else None,
             "owner": owner, "self": source, "members": [{"id": member, "online": self.agent_description(member)["online"],
                 "role": "Owner" if member == owner else "Model" if self.agent_description(member)["kind"] == "model" else "Member"}
                 for member in self.credentials if self.allowed(source, member)]}, headers={"Cache-Control": "no-store"})
@@ -269,6 +276,27 @@ class Relay:
         except TimeoutError:
             return JSONResponse({"error": "Request timed out"}, 504)
 
+    async def http_orchestrate(self, request):
+        source = self.authenticate(request.headers.get("authorization", ""))
+        if not source:
+            return JSONResponse({"error": "Unauthorized"}, 401)
+        raw = bytearray()
+        async for chunk in request.stream():
+            raw.extend(chunk)
+            if len(raw) > MAX_BYTES:
+                return JSONResponse({"error": "Payload too large"}, 413)
+        try:
+            result = await self.orchestrator.run(source, json.loads(raw))
+            return JSONResponse(result)
+        except (ValueError, TypeError):
+            return JSONResponse({"error": "Send a valid message within the orchestration limits"}, 400)
+        except PermissionError as exc:
+            return JSONResponse({"error": str(exc)}, 403)
+        except (ConnectionError, OverflowError) as exc:
+            return JSONResponse({"error": str(exc)}, 503)
+        except TimeoutError:
+            return JSONResponse({"error": "Jev timed out; this request was not replayed"}, 504)
+
 
 def create_app(credentials, timeout=60, max_pending=256, conversation_store=None, workspace=None):
     relay = Relay(credentials, timeout, max_pending, conversation_store, workspace)
@@ -276,6 +304,7 @@ def create_app(credentials, timeout=60, max_pending=256, conversation_store=None
         Route("/agent-profile", relay.describe_self, methods=["POST"]),
         Route("/workspace", relay.workspace_info), Route("/workspace/leave", relay.leave_workspace, methods=["POST"]),
         Route("/agents/{agent}/invoke", relay.http_invoke, methods=["POST"]),
+        Route("/orchestrate", relay.http_orchestrate, methods=["POST"]),
         Route("/conversations", relay.conversations.listing),
         Route("/conversations/{conversation_id}", relay.conversations.detail),
         Route("/conversations/{conversation_id}/messages", relay.conversations.send, methods=["POST"]),

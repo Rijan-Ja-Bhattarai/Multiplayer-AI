@@ -93,6 +93,61 @@ model, instructions, image support, or internet access. Models running on anothe
 device are edited on that device. Model names stay fixed so existing chats and
 invitations keep their identity.
 
+## General chat and Jev orchestration
+
+General chat works as soon as a model connects. It replies through the selected
+model directly until you configure automatic delegation. You can send requests
+such as "Make a hello world program" without entering a purpose, selecting task
+types, or enabling delegation. An empty saved coordinator is repaired automatically.
+
+Each imported model has its own purpose and permitted tasks, regardless of its
+provider or model ID. In **Connect a model** or **Edit model**, describe what you
+want it used for, select tasks such as **Coding**, **Debugging**, **Reasoning /
+problem solving**, or **General chat**, and enable **Allow Jev to assign work to
+this model**. For example, permit coding and debugging on your chosen specialist
+and only general chat on a conversational model. Existing profiles remain outside
+automatic delegation until you configure them. Direct model chats remain available.
+
+Connecting a model opens **General chat** automatically. The first connected
+model becomes the default coordinator; additional models join the same chat
+without replacing its history or coordinator. Saved models also open General chat
+on startup when no conversation was previously selected.
+New connections get an unused agent name, such as `ollama-agent-2`, so importing
+another model from the same provider preserves the first model.
+
+In **Conversations**, you can change the model in **Jev coordinator** and click
+**Use coordinator**. The coordinator is a model you
+choose, not a built-in model or a provider-specific agent. The workspace owner
+sets it; invited members use the same coordinator. The choice is saved per workspace.
+For automatic delegation, choose a model that follows JSON planning instructions
+reliably. Basic General chat does not require JSON planning.
+
+Write requests naturally: "Code a parser", "Debug this function", or "Solve this"
+followed by code. Jev reads the conversation and your model-purpose descriptions
+to select a worker, or up to three ordered tasks for a compound request. Later
+workers receive earlier results; the coordinator combines multiple results into
+one answer. It can ask for clarification when no model fits. The relay checks
+online status, workspace access, and permitted task types before dispatching.
+Selection and task classification come from the coordinator, so their quality
+depends on the model you choose; there are no keyword or model-name routing rules.
+
+Chat shows the chosen models and Jev's brief selection explanation. History, code,
+and attachments reach the assigned workers; image-bearing history requires a
+worker with image support enabled during delegation, or a vision-capable selected
+model in basic chat. During delegation a text coordinator receives image names
+rather than image pixels. **Invite to conversation** also shares a general chat and its
+assignments. Purpose descriptions are shared with the workspace; the coordinator
+receives those descriptions and conversation text. Provider keys, API roots, and
+private model instructions stay on each model's device.
+
+A request can make several provider calls and has a four-minute overall limit.
+Invalid plans, unavailable models, and timeouts are reported without automatically
+replaying the request. These model agents answer through provider APIs; this flow
+does not give them filesystem access or execute the code they return. The shared
+model profiles use the app's authenticated relay metadata, not standard A2A discovery.
+
+## Model internet access
+
 To enable internet access, select **Allow this model to search the web** and
 choose a **Search provider**. For the simplest setup, choose **Ollama web search**,
 create a key in [your Ollama account](https://ollama.com/settings/keys), and paste
