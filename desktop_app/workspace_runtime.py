@@ -18,6 +18,7 @@ from network_a2a.server import Relay, create_app
 from network_a2a.persistence import HistoryStore
 from network_a2a.content import MAX_FRAME_BYTES, content_summary
 from network_a2a.web_search import create_search
+from network_a2a.orchestration import GENERAL_TARGET, ORCHESTRATION_TIMEOUT, routing_profile
 
 from .storage import UNAVAILABLE
 
@@ -86,6 +87,7 @@ class WorkspaceRuntime:
             "id": self.storage.settings.get("workspace_id", "local"),
             "name": self.storage.settings.get("workspace_name", "My workspace"),
             "owner": device_id, "models": [profile["id"] for profile in self.storage.settings.get("agents", [])],
+            "coordinator": self.storage.settings.get("coordinator"),
             "agent_profiles": {profile["id"]: self.public_profile(profile, running=False)
                                for profile in self.storage.settings.get("agents", [])}})
         self.app.state.relay.member_remover = self.remove_member
@@ -413,7 +415,8 @@ class WorkspaceRuntime:
     @staticmethod
     def public_profile(profile, running=True):
         """Return model metadata suitable for sharing without credentials or endpoints."""
-        return {"provider": profile["provider"], "model": profile["model"], "vision": profile.get("vision", False), "running": running}
+        return {"provider": profile["provider"], "model": profile["model"], "vision": profile.get("vision", False),
+                "running": running, **routing_profile(profile)}
 
     async def publish_profile(self, profile, running=True):
         public = self.public_profile(profile, running)
@@ -440,11 +443,23 @@ class WorkspaceRuntime:
         await self._remove_runner(profile["id"])
         await self._attach(profile["id"], token, adapter, allow_insecure)
         await self.publish_profile(profile)
+        configured = self.storage.settings.get("coordinator")
+        if not self.remote and (not configured or not self.app.state.relay.allowed(self.active_id, configured)
+                                or self.app.state.relay.agent_description(configured)["kind"] != "model"):
+            previous = self.storage.settings
+            self.storage.settings = {**previous, "coordinator": profile["id"]}
+            try:
+                self.storage.save()
+            except BaseException:
+                self.storage.settings = previous
+                raise
+            self.app.state.relay.workspace["coordinator"] = profile["id"]
 
     async def save_agent(self, profile, key=None, search_key=None):
         """Validate and transactionally persist a model and its keys before restarting it."""
         async with self.mutation:
             self.storage.recover_agent_save()
+            profile = {**profile, **routing_profile(profile)}
             agent_id = profile["id"]
             if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", agent_id):
                 raise ValueError("Agent names need 1–64 letters, numbers, underscores, or hyphens")
@@ -555,8 +570,9 @@ class WorkspaceRuntime:
         generation = self.generation
         base = relay_http_url(self.active_url, allow_insecure=True)
         try:
-            response = await self.relay_http().post(base + f"/agents/{target}/invoke", json=payload,
-                                           headers={"Authorization": "Bearer " + self.active_token}, timeout=65)
+            general = target == GENERAL_TARGET
+            response = await self.relay_http().post(base + ("/orchestrate" if general else f"/agents/{target}/invoke"), json=payload,
+                headers={"Authorization": "Bearer " + self.active_token}, timeout=ORCHESTRATION_TIMEOUT + 5 if general else 65)
             result = response.json()
             if response.status_code != 200:
                 raise RuntimeError(result.get("error", "The agent could not complete this request"))
@@ -574,7 +590,7 @@ class WorkspaceRuntime:
         try:
             response = await self.relay_http().post(base + f"/conversations/{conversation_id}/messages",
                 json={"content": text} if isinstance(text, list) else {"text": text},
-                headers={"Authorization": "Bearer " + self.active_token}, timeout=65)
+                headers={"Authorization": "Bearer " + self.active_token}, timeout=ORCHESTRATION_TIMEOUT + 5)
             if generation != self.generation:
                 raise RuntimeError("Workspace changed while the request was running; it was not replayed")
             await self.refresh()
@@ -591,6 +607,27 @@ class WorkspaceRuntime:
         response = await self.http.get(base_url.rstrip("/") + "/api/tags", timeout=5)
         response.raise_for_status()
         return [item["name"] for item in response.json()["models"]]
+
+    async def set_coordinator(self, agent_id):
+        """The workspace owner chooses the model that plans general-chat work."""
+        async with self.mutation:
+            if self.remote:
+                raise ValueError("The workspace owner chooses the Jev coordinator")
+            relay = self.app.state.relay
+            if not agent_id:
+                agent_id = next((model["id"] for model in relay.orchestrator.models(self.active_id) if model["online"]), None)
+            if agent_id and (not relay.allowed(self.active_id, agent_id)
+                             or relay.agent_description(agent_id)["kind"] != "model"):
+                raise ValueError("Choose a model in this workspace as the Jev coordinator")
+            previous = dict(self.storage.settings)
+            self.storage.settings["coordinator"] = agent_id or None
+            try:
+                self.storage.save()
+            except BaseException:
+                self.storage.settings = previous
+                raise
+            relay.workspace["coordinator"] = agent_id or None
+            await self.refresh()
 
     async def provider_models(self, provider, base_url, key=None, allow_insecure=False, agent_id=None):
         """List provider models, reusing a saved key only for its configured endpoint."""
@@ -627,7 +664,7 @@ class WorkspaceRuntime:
             conversations = self.app.state.relay.conversations
             if conversation_id and not conversations.get(conversation_id, self.active_id):
                 raise ValueError("Choose an existing conversation in this workspace")
-            if target and not self.app.state.relay.allowed(self.active_id, target):
+            if target and not self.app.state.relay.allowed(self.active_id, self.active_id if target == GENERAL_TARGET else target):
                 raise ValueError("Choose an agent in this workspace")
             if lan and not self.sharing:
                 await self._stop_agents()
@@ -677,6 +714,9 @@ class WorkspaceRuntime:
                 await peer.socket.close(code=1008, reason="Removed from workspace")
             await self._remove_runner(member)
             self.storage.settings["agents"] = [profile for profile in self.storage.settings.get("agents", []) if profile["id"] != member]
+            if self.storage.settings.get("coordinator") == member:
+                self.storage.settings["coordinator"] = None
+                self.app.state.relay.workspace["coordinator"] = None
             self.storage.save()
             # The member is out of the workspace either way, but a token left
             # in the OS credential store would still be a secret this device

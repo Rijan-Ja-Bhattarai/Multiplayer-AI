@@ -4,11 +4,23 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QCheckBox, QDialog, QFormLayout, QHBoxLayout, QLineEdit, QPlainTextEdit, QScrollArea, QVBoxLayout, QWidget
 
 from network_a2a.adapters import PROVIDERS
+from network_a2a.orchestration import GENERAL_TARGET
 from network_a2a.web_search import validate_search_settings, validate_search_url
 
 from .theme import PROVIDER_NAMES, color
 from .lan import lan_addresses
 from .widgets import Select, action, label
+from .model_purpose import ModelPurpose
+
+
+def available_agent_name(provider, agents):
+    base = provider + "-agent"
+    existing = {agent["id"] for agent in agents}
+    name, number = base, 2
+    while name in existing:
+        name = f"{base}-{number}"
+        number += 1
+    return name
 
 
 def _style_error(widget, window):
@@ -76,6 +88,8 @@ class AgentDialog(QDialog):
         form.addRow("API key", self.key)
         form.addRow("Instructions", self.system)
         body_layout.addLayout(form)
+        self.purpose_settings = ModelPurpose()
+        body_layout.addWidget(self.purpose_settings)
         body_layout.addWidget(self.autostart, 0, Qt.AlignmentFlag.AlignLeft)
         body_layout.addWidget(self.insecure, 0, Qt.AlignmentFlag.AlignLeft)
         self.vision = QCheckBox("Enable image support for this model")
@@ -139,6 +153,7 @@ class AgentDialog(QDialog):
             self.model.setCurrentText(profile["model"])
             self.base.setText(profile.get("base_url") or "")
             self.system.setPlainText(profile.get("system_prompt") or "")
+            self.purpose_settings.load(profile)
             self.autostart.setChecked(profile.get("autostart", True))
             self.insecure.setChecked(profile.get("allow_insecure", False))
             self.vision.setChecked(profile.get("vision", False))
@@ -156,7 +171,7 @@ class AgentDialog(QDialog):
         key = self.provider.currentData()
         spec = PROVIDERS[key]
         if not self.profile:
-            self.name.setText(f"{key}-agent")
+            self.name.setText(available_agent_name(key, self.window.agents))
         if self.window.remote:
             self.name.setText(self.window.identity)
         self.base.setText(spec.base_url or "")
@@ -277,13 +292,16 @@ class AgentDialog(QDialog):
                    "allow_insecure": self.insecure.isChecked(), "vision": self.vision.isChecked(),
                    "web_search": self.search_mode.currentData() if self.internet.isChecked() else "off",
                    "search_provider": self.search_provider.currentData(),
-                   "searxng_url": self.search_url.text().strip(), "searxng_allow_insecure": self.search_insecure.isChecked()}
+                   "searxng_url": self.search_url.text().strip(), "searxng_allow_insecure": self.search_insecure.isChecked(),
+                   **self.purpose_settings.values()}
         self.save_button.setEnabled(False)
         def success(result):
             """Clear credential fields and close the dialog after a successful save."""
             self.key.clear()
             self.search_key.clear()
             self.accept()
+            if not self.profile:
+                self.window.select_agent(GENERAL_TARGET)
         def failure(message):
             """Display the save error and focus search settings when they caused the failure."""
             if self.isVisible():

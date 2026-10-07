@@ -16,10 +16,11 @@ class AgentListDialog(QDialog):
         layout.setContentsMargins(24, 24, 24, 24)
         self.heading = label("", "heading")
         layout.addWidget(self.heading)
-        self.table = QTableWidget(0, 5)
-        self.table.setHorizontalHeaderLabels(("Agent", "Provider", "Model", "Status", ""))
+        self.table = QTableWidget(0, 6)
+        self.table.setHorizontalHeaderLabels(("Agent", "Provider", "Model", "Purpose / permitted tasks", "Status", ""))
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         self.table.verticalHeader().hide()
         layout.addWidget(self.table)
         layout.addWidget(action("Done", self.accept))
@@ -43,10 +44,12 @@ class AgentListDialog(QDialog):
         self.table.setRowCount(len(agents))
         for row, agent in enumerate(agents):
             for column, value in enumerate((agent["id"], agent.get("provider") or "—", agent.get("model") or "Configured model",
+                                            self.window.model_purpose_summary(agent),
                                             "Online" if agent["online"] else "Offline")):
                 self.table.setItem(row, column, QTableWidgetItem(value))
+                self.table.item(row, column).setToolTip(value)
             if agent.get("profile"):
-                self.table.setCellWidget(row, 4, action("Edit model", lambda checked=False, current=agent: self.edit(current)))
+                self.table.setCellWidget(row, 5, action("Edit model", lambda checked=False, current=agent: self.edit(current)))
             self.table.setRowHeight(row, 46)
 
     def edit(self, agent):
