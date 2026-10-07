@@ -29,7 +29,7 @@ if sys.platform == 'win32':
     plugin_allowlist = {
         'platforms/qwindows.dll', 'platforms/qoffscreen.dll',
         'styles/qmodernwindowsstyle.dll', 'imageformats/qico.dll',
-        'imageformats/qwebp.dll', 'imageformats/qgif.dll',
+        'imageformats/qwebp.dll', 'imageformats/qgif.dll', 'imageformats/qjpeg.dll',
         'networkinformation/qnetworklistmanager.dll',
         'tls/qcertonlybackend.dll', 'tls/qopensslbackend.dll',
         'tls/qschannelbackend.dll',
