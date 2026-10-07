@@ -385,6 +385,16 @@ class MainWindow(QMainWindow):
         self.toast = label("", wrap=True)
         self.style_toast()
         self.toast.hide()
+        # One timer for the toast, restarted by every notice, rather than a
+        # singleShot scheduled per notice. Two notices in quick succession used
+        # to leave two timers pending and the older one took the toast down in
+        # the middle of the newer: copy something, a failure arrives within the
+        # second, and the failure vanished after the copy's second instead of
+        # its own seven and a half. Created here rather than in __init__ so the
+        # toast it hides already exists.
+        self.toast_timer = QTimer(self)
+        self.toast_timer.setSingleShot(True)
+        self.toast_timer.timeout.connect(self.toast.hide)
         body_layout.addWidget(self.toast)
         self.progress = QProgressBar()
         self.progress.setRange(0, 0)
@@ -1960,11 +1970,16 @@ class MainWindow(QMainWindow):
         it is only confirming something the user just watched succeed, so it
         gets a second and gone. Long enough to notice, short enough not to be
         left sitting across the chat.
+
+        The window's one timer is restarted rather than a new one scheduled, so
+        the notice that is actually on screen owns the countdown. Anything else
+        and a stale timer from a previous notice hides this one early, which is
+        at its worst on a short notice followed by a long one.
         """
         self.style_toast(error)
         self.toast.setText(message)
         self.toast.show()
-        QTimer.singleShot(TOAST_MS if duration is None else duration, self.toast.hide)
+        self.toast_timer.start(TOAST_MS if duration is None else duration)
 
     def command(self, method, *args, success=None, failure=None):
         if not self.ready and method != "close":

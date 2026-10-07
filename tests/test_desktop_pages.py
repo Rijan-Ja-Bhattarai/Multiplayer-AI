@@ -824,6 +824,61 @@ def test_a_copied_message_confirms_itself_briefly(window, qt_app) -> None:
         "a failure has to outlive a copy: it is the one worth reading")
 
 
+def test_a_failure_is_not_cut_short_by_the_notice_before_it(window, qt_app) -> None:
+    """The notice on screen owns the countdown, not the one before it.
+
+    Each notice used to schedule its own singleShot, so two notices in quick
+    succession left two timers pending and the older one took the toast down in
+    the middle of the newer. Copy something and a failure arrives within the
+    second, which is not a rare thing: the copy is what the user is doing when
+    the failure shows up. The failure then vanished after the copy's one second
+    instead of its own seven and a half, which is exactly when someone needs to
+    read it.
+
+    The ordering here is the whole test: the failure is raised while the
+    earlier, shorter notice is still counting down.
+    """
+    window.copy_message("a message")
+    QTest.qWait(400)
+    window.notice("Could not save credentials.", error=True)
+
+    # Past the copy's one second, but nowhere near the failure's seven and a
+    # half. Under the old per-notice timers this is where the toast vanished.
+    QTest.qWait(700)
+    assert window.toast.isHidden() is False, (
+        "the failure was taken down by the countdown from the copy before it, "
+        "so it disappeared after a second instead of being readable")
+    assert window.toast.text() == "Could not save credentials.", (
+        f"the toast shows {window.toast.text()!r}, not the failure")
+
+    # And it still goes away on its own schedule rather than never.
+    QTest.qWait(7200)
+    assert window.toast.isHidden() is True, (
+        "the failure toast never went away, so the timer is not running")
+
+
+def test_one_timer_owns_the_toast(window) -> None:
+    """The countdown is a window-owned timer that each notice restarts.
+
+    Checked on the timer itself rather than only on the toast's visibility, so
+    a per-notice timer would be caught here even in a run where two notices
+    never happened to overlap.
+    """
+    assert window.toast_timer.isSingleShot() is True, (
+        "the toast timer is not single-shot, so it will fire repeatedly")
+
+    window.copy_message("a message")
+    assert window.toast_timer.remainingTime() == win.COPY_TOAST_MS, (
+        f"a copy should start a {win.COPY_TOAST_MS}ms countdown, got "
+        f"{window.toast_timer.remainingTime()}")
+    window.notice("Something failed.", error=True)
+    assert window.toast_timer.remainingTime() == win.TOAST_MS, (
+        f"a failure should restart the countdown at {win.TOAST_MS}ms, got "
+        f"{window.toast_timer.remainingTime()}")
+    assert window.toast_timer.parent() is window, (
+        "the timer is not owned by the window, so it can outlive it")
+
+
 def test_the_composer_is_set_apart_from_the_messages(window, qt_app) -> None:
     """It already sat outside the scrolling area, so it did not move.
 
