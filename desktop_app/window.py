@@ -13,8 +13,9 @@ from PySide6.QtGui import (QGuiApplication, QIcon, QKeySequence, QPixmap, QPaint
                            QColor, QDesktopServices, QFont, QPalette, QShortcut)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QFileDialog,
     QFormLayout, QFrame, QGraphicsOpacityEffect, QGridLayout, QHBoxLayout,
-    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
-    QPlainTextEdit, QProgressBar, QScrollArea, QSizePolicy, QStackedWidget,
+    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu,
+    QMessageBox, QPlainTextEdit, QProgressBar, QScrollArea, QSizePolicy,
+    QStackedWidget,
     QVBoxLayout,
     QWidget)
 
@@ -336,6 +337,8 @@ class MainWindow(QMainWindow):
         self.sidebar_agents.setWordWrap(True)
         self.sidebar_agents.setToolTip("Every conversation and agent you can open")
         self.sidebar_agents.itemClicked.connect(lambda item: self.select_agent(item.data(Qt.ItemDataRole.UserRole)))
+        self.sidebar_agents.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.sidebar_agents.customContextMenuRequested.connect(self.show_conversation_menu)
         side.addWidget(self.sidebar_agents)
         side.addStretch()
         self.connection_status = label("●  Starting your network…", "online", True)
@@ -765,6 +768,8 @@ class MainWindow(QMainWindow):
         self.chat_agents = QListWidget()
         self.chat_agents.setFixedWidth(200)
         self.chat_agents.itemClicked.connect(lambda item: self.select_agent(item.data(Qt.ItemDataRole.UserRole)))
+        self.chat_agents.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.chat_agents.customContextMenuRequested.connect(self.show_conversation_menu)
         layout.addWidget(self.chat_agents)
         panel = QWidget()
         column = QVBoxLayout(panel)
@@ -783,6 +788,13 @@ class MainWindow(QMainWindow):
         chat_actions.addWidget(self.chat_agent_count)
         chat_actions.addWidget(self.share_conversation_button)
         chat_actions.addStretch()
+        # Manage the conversation itself. Filled in by update_chat_controls,
+        # because what can be done to a conversation depends on what kind it is.
+        # An empty layout takes no width, so there is nothing to hide when there
+        # is no action on offer.
+        self.chat_manage = QHBoxLayout()
+        self.chat_manage.setSpacing(8)
+        chat_actions.addLayout(self.chat_manage)
         column.addLayout(chat_actions)
         self.messages_scroll = QScrollArea()
         self.messages_scroll.setWidgetResizable(True)
@@ -1415,6 +1427,193 @@ class MainWindow(QMainWindow):
         self.update_chat_controls()
         self.render_imported_models()
 
+    def forget_conversation(self, target, store=None):
+        """Drop a conversation from this device: its chat and its saved rooms.
+
+        ``store`` is another workspace's history store, so a conversation can
+        be forgotten in a workspace that is not the one being viewed.
+
+        The room record and the ``("ui","state")`` blob are edited separately
+        because they are stored separately: a room is one record of its own,
+        while every chat in a workspace shares one blob and has to be read,
+        edited and written back.
+        """
+        if store is None:
+            store = self.history_store
+        self.conversations.pop(target, None)
+        self.chats.pop(target, None)
+        if self.selected == target:
+            self.selected = None
+        if store:
+            store.delete("rooms", target)
+            state = store.load("ui").get("state", {})
+            if state.get("chats", {}).pop(target, None) is not None \
+                    or target in state.get("conversations", {}):
+                state.get("conversations", {}).pop(target, None)
+                if state.get("selected") == target:
+                    state["selected"] = None
+                store.save("ui", "state", state)
+        return target
+
+    def clear_conversation(self, target):
+        """Empty a conversation but keep the thread open.
+
+        For a shared conversation this clears the copy on this device only. The
+        thread still exists on the relay for everyone else, and comes back the
+        next time somebody posts in it, so the confirmation says so rather than
+        letting it read as a delete. The room's revision is copied over to keep
+        the next poll from rebuilding the messages from the relay straight
+        away, which is what it does when the revision has moved on.
+        """
+        chat = self.chats.get(target)
+        if not chat:
+            return
+        room = self.conversations.get(target)
+        chat["messages"] = []
+        chat["unread"] = 0
+        chat["local_pending"] = False
+        if room:
+            chat["revision"] = room["revision"]
+        if target == self.selected:
+            self.render_messages()
+        self.render_agents()
+        self.persist_history()
+
+    def delete_conversation(self, target):
+        """Remove a conversation's history from this device, after asking."""
+        room = self.conversations.get(target)
+        if room:
+            title = room["title"]
+            question = ("Delete this conversation from this device?\n\n"
+                        "It is shared, so it stays on the relay for the other "
+                        "devices and will come back at the next poll. Deleting "
+                        "it for everyone needs the conversation's owner.")
+        else:
+            title = target
+            question = ("Delete this conversation from this device?\n\n"
+                        "Its messages will be removed and cannot be read again.")
+        if QMessageBox.question(self, "Delete conversation",
+                                f"{title}\n\n{question}",
+                                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                                QMessageBox.StandardButton.Cancel) is not QMessageBox.StandardButton.Yes:
+            return
+        # Forgot before anything is drawn, because render_messages() ends by
+        # saving the history: redrawing first would write the conversation back
+        # out again on the way past.
+        self.forget_conversation(target)
+        self.render_agents()
+        self.render_messages()
+        self.render_attachments()
+        self.persist_history()
+        self.notice(f"{title} deleted from this device.")
+
+    def clear_conversation_confirm(self, target):
+        """Ask before emptying a conversation, saying what it will and will not do."""
+        room = self.conversations.get(target)
+        title = room["title"] if room else target
+        if room:
+            detail = ("This clears your copy of the conversation on this device.\n\n"
+                      "It is shared, so the messages stay on the relay for the "
+                      "other devices and reappear here the next time somebody "
+                      "posts in it.")
+        else:
+            detail = ("This removes the messages in this conversation on this "
+                      "device. They cannot be read again.")
+        if QMessageBox.question(self, "Clear conversation", f"{title}\n\n{detail}",
+                                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                                QMessageBox.StandardButton.Cancel) is not QMessageBox.StandardButton.Yes:
+            return
+        self.clear_conversation(target)
+        self.notice("Messages cleared on this device.")
+
+    def conversation_actions(self, target):
+        """The buttons a conversation offers, shared by the header and the menus.
+
+        Both places build from this so they cannot drift, and both hide the
+        actions that do not apply rather than offering something that would not
+        do what it says.
+
+        Delete and leave for a shared conversation need the relay, which is not
+        wired up yet, so they are left out here: a local delete would be undone
+        by the next poll and read as though it had worked. Deleting is offered
+        for a direct or saved conversation, where it is genuinely this device's
+        history to lose.
+        """
+        if not target:
+            return []
+        chat = self.chats.get(target) or {}
+        room = self.conversations.get(target)
+        actions = []
+        if chat.get("messages") or room:
+            clear = action("Clear messages",
+                           lambda checked=False, id=target: self.clear_conversation_confirm(id),
+                           name="ghost")
+            clear.setToolTip("Empty this conversation on this device, and keep the thread")
+            clear.setEnabled(bool(chat.get("messages")))
+            actions.append(clear)
+        if not room:
+            remove = action("Delete conversation",
+                            lambda checked=False, id=target: self.delete_conversation(id),
+                            name="danger")
+            remove.setToolTip("Remove this conversation and its messages from this device")
+            actions.append(remove)
+        return actions
+
+    def conversation_actions(self, target):
+        """What can be done to a conversation, as ``(text, tooltip, callback)``.
+
+        Described rather than built, so the header and the context menu make
+        their own controls from one list and cannot drift apart. Each consumer
+        builds only what it needs: a button for the header, a menu entry for a
+        right-click.
+
+        Delete and leave for a shared conversation need the relay, which is not
+        wired up yet, so they are left out: a local delete would be undone by
+        the next poll and read as though it had worked. Delete is offered for a
+        direct or saved conversation, where it is genuinely this device's
+        history to lose.
+        """
+        if not target:
+            return []
+        chat = self.chats.get(target) or {}
+        room = self.conversations.get(target)
+        entries = []
+        if chat.get("messages"):
+            entries.append((
+                "Clear messages",
+                "Empty this conversation on this device, and keep the thread",
+                lambda id=target: self.clear_conversation_confirm(id)))
+        if not room:
+            entries.append((
+                "Delete conversation",
+                "Remove this conversation and its messages from this device",
+                lambda id=target: self.delete_conversation(id)))
+        return entries
+
+    def show_conversation_menu(self, point):
+        """Right-click a conversation for the same actions the header offers.
+
+        On whichever list was clicked, so the sidebar and the conversation list
+        behave as one. A click on empty space below the rows is not a
+        conversation and gets no menu: acting on whatever happened to be
+        selected instead would delete something the pointer was nowhere near.
+        """
+        listing = self.sender()
+        if not isinstance(listing, QListWidget):
+            return
+        item = listing.itemAt(point)
+        if item is None:
+            return
+        entries = self.conversation_actions(item.data(Qt.ItemDataRole.UserRole))
+        if not entries:
+            return
+        menu = QMenu(self)
+        for text, tip, callback in entries:
+            entry = menu.addAction(text)
+            entry.setToolTip(tip)
+            entry.triggered.connect(lambda checked=False, run=callback: run())
+        menu.exec(listing.viewport().mapToGlobal(point))
+
     def update_chat_controls(self):
         room = self.conversations.get(self.selected)
         target = room["target"] if room else self.selected
@@ -1431,6 +1630,14 @@ class MainWindow(QMainWindow):
         subtitle = "Your agent is working…" if pending else "Online · Ready to collaborate" if agent and agent["online"] else "Start this agent on its device to continue" if agent else "Choose a connected agent to begin"
         self.chat_subtitle.setText((f"Shared with {len(room['members'])} devices · " if room else "") + subtitle)
         self.share_conversation_button.setEnabled(bool(self.ready and not self.remote and agent and agent["online"] and not pending))
+        # Rebuilt rather than shown or hidden, so the set on offer always matches
+        # what this conversation can actually have done to it.
+        clear_layout(self.chat_manage)
+        for text, tip, callback in self.conversation_actions(self.selected):
+            control = action(text, lambda checked=False, run=callback: run(),
+                             name="danger" if text.startswith("Delete") else "ghost")
+            control.setToolTip(tip)
+            self.chat_manage.addWidget(control)
 
     def select_agent(self, agent_id):
         self.selected = agent_id
@@ -2194,6 +2401,19 @@ class MainWindow(QMainWindow):
             changed = set(self.conversations) != {room["id"] for room in data}
             self.conversations = {room["id"]: room for room in data}
             selected_changed = False
+            # A room that is no longer listed is gone: deleted on another
+            # device, or the reader was removed from it. This used to leave the
+            # matching chat behind, and leave ``selected`` pointing at it, so
+            # the conversation stayed in the list and stayed open. Pruned here
+            # so a removal made anywhere is reflected everywhere.
+            gone = [target for target in self.chats
+                    if target.startswith("conversation-") and target not in self.conversations]
+            for target in gone:
+                self.chats.pop(target, None)
+                if self.selected == target:
+                    self.selected = None
+                    selected_changed = True
+                changed = True
             for room in data:
                 chat = self.chats.setdefault(room["id"], {"messages": [], "history": [], "pending": False})
                 if chat.get("revision") == room["revision"]:

@@ -157,8 +157,16 @@ class DesktopRuntime:
                 state = engine.history_store.load("ui").get("state", {})
                 previous = state.get("conversations", {})
                 state["conversations"] = {room["id"]: room for room in data}
+                chats = state.setdefault("chats", {})
+                # Rooms that dropped off the listing are gone, and their saved
+                # chats go with them. Only added to before, so a conversation
+                # deleted on another device stayed in this workspace's archive
+                # for good, and came back if the room ever reappeared.
+                for target in [key for key in chats
+                               if key.startswith("conversation-") and key not in state["conversations"]]:
+                    del chats[target]
                 for room in data:
-                    chat = state.setdefault("chats", {}).setdefault(room["id"], {"messages": [], "history": []})
+                    chat = chats.setdefault(room["id"], {"messages": [], "history": []})
                     old_ids = {message["id"] for message in previous.get(room["id"], {}).get("messages", [])}
                     chat["unread"] = chat.get("unread", 0) + len({message["id"] for message in room["messages"]} - old_ids)
                     chat["revision"] = room["revision"]

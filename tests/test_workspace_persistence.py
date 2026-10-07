@@ -143,6 +143,33 @@ class WorkspacePersistenceTests(unittest.IsolatedAsyncioTestCase):
         saved = self.host.engine.history_store.load("ui")["state"]["chats"]["guest"]
         self.assertIn("Works while owner views another workspace", saved["messages"][0][1])
 
+    async def test_a_background_workspace_forgets_a_room_deleted_elsewhere(self):
+        """A room gone from a background workspace's listing goes from its archive.
+
+        This branch only ever added rooms, so a conversation deleted on another
+        device stayed in that workspace's saved chats for good, and came back
+        if the room ever reappeared.
+        """
+        first_id = self.host.active_workspace_id
+        await self.host.create_workspace("Elsewhere")
+        store = self.host.engines[first_id].history_store
+
+        room = {"id": "conversation-abc", "title": "Room", "target": "llama3",
+                "owner": "owner", "members": ["owner", "guest"], "messages": [],
+                "revision": 2, "pending": False}
+        self.host.forward(first_id, "conversations", [room])
+        saved = store.load("ui")["state"]
+        self.assertIn("conversation-abc", saved["chats"])
+        self.assertIn("conversation-abc", saved["conversations"])
+
+        # It disappears from the relay: deleted on another device, or this one
+        # was removed from it.
+        self.host.forward(first_id, "conversations", [])
+        saved = store.load("ui")["state"]
+        self.assertNotIn("conversation-abc", saved["chats"], (
+            "the archive kept a conversation the relay no longer lists"))
+        self.assertNotIn("conversation-abc", saved["conversations"])
+
     async def test_a_background_reply_records_the_local_responder_in_the_role(self):
         """A reply reaching a background workspace keeps the responder readable.
 

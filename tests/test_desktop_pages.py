@@ -112,6 +112,165 @@ def test_the_shell_controls_explain_themselves(window) -> None:
             f"the {name} tooltip only repeats its own label")
 
 
+def test_a_conversation_offers_what_it_can_do_and_nothing_else(window) -> None:
+    """A conversation's actions are offered in the header and on right-click.
+
+    Both come from one list, so they cannot drift. What is in the list depends
+    on the conversation: a direct or saved one can be deleted outright, a
+    shared one cannot yet, because the relay is authoritative and a local
+    delete would be undone at the next poll while reading as though it worked.
+    """
+    window.agents = [{"id": "local-llama", "kind": "model", "online": True,
+                      "provider": "ollama", "model": "llama3"}]
+
+    def header():
+        return [window.chat_manage.itemAt(index).widget().text()
+                for index in range(window.chat_manage.count())]
+
+    def tooltips():
+        return [window.chat_manage.itemAt(index).widget().toolTip()
+                for index in range(window.chat_manage.count())]
+
+    window.chats = {"local-llama": {"messages": [("user", "hi")]}}
+    window.selected = "local-llama"
+    window.update_chat_controls()
+    assert header() == ["Clear messages", "Delete conversation"], (
+        f"a direct conversation offers {header()}")
+    for tip in tooltips():
+        assert tip, "a conversation action has no tooltip"
+        assert tip not in ("Clear messages", "Delete conversation"), (
+            f"the tooltip only repeats its own label: {tip!r}")
+
+    # Nothing to clear, so nothing offered to clear.
+    window.chats["local-llama"]["messages"] = []
+    window.update_chat_controls()
+    assert header() == ["Delete conversation"], (
+        f"an empty conversation still offers to clear it: {header()}")
+
+    # A shared conversation is on the relay. Clearing it locally is real and
+    # says so; deleting it is not on offer rather than being offered and undone.
+    room = {"id": "conversation-abc", "title": "Chat with llama3", "target": "local-llama",
+            "owner": window.identity or "owner", "members": ["owner", "guest"],
+            "messages": [], "revision": 3, "pending": False}
+    window.conversations = {"conversation-abc": room}
+    window.chats["conversation-abc"] = {"messages": [("user", "hi")], "revision": 3}
+    window.selected = "conversation-abc"
+    window.update_chat_controls()
+    assert header() == ["Clear messages"], (
+        f"a shared conversation offers {header()}, but delete needs the relay")
+    assert "shared" in tooltips()[0].lower() or "device" in tooltips()[0].lower(), (
+        f"clearing a shared conversation should say what it leaves behind: "
+        f"{tooltips()[0]!r}")
+
+    # The right-click menu is built from the same list.
+    window.chats["conversation-abc"]["messages"] = [("user", "hi")]
+    assert [text for text, _, _ in
+            window.conversation_actions("conversation-abc")] == ["Clear messages"]
+    assert window.conversation_actions(None) == [], (
+        "with no conversation open there is nothing to clear or delete")
+
+
+def test_clearing_a_conversation_keeps_the_thread_and_drops_the_messages(
+        window, qt_app) -> None:
+    """Clear empties the messages; the conversation stays where it was.
+
+    For a shared conversation the revision is pinned to the room's, which is
+    what stops the next poll rebuilding the messages straight back from the
+    relay. Without it, clearing appears to do nothing at all.
+    """
+    room = {"id": "conversation-abc", "title": "Chat with llama3", "target": "llama3",
+            "owner": "owner", "members": ["owner", "guest"],
+            "messages": [{"id": "1", "role": "user", "content": "hello", "from": "owner"}],
+            "revision": 7, "pending": False}
+    window.conversations = {"conversation-abc": room}
+    window.chats = {"conversation-abc": {
+        "messages": [("user", "hello")], "revision": 7, "unread": 2}}
+    window.selected = "conversation-abc"
+    window.render_messages()
+
+    window.clear_conversation("conversation-abc")
+
+    assert window.chats["conversation-abc"]["messages"] == [], (
+        "clearing left the messages behind")
+    assert "conversation-abc" in window.conversations, (
+        "clearing removed the conversation instead of its messages")
+    assert window.chats["conversation-abc"]["revision"] == 7, (
+        "the revision was not pinned to the room's, so the next poll rebuilds "
+        "the messages and clearing looks like it did nothing")
+    assert window.chats["conversation-abc"]["unread"] == 0, (
+        "clearing left an unread count against a conversation with no messages")
+
+
+def test_deleting_a_conversation_removes_only_that_one(window, qt_app, monkeypatch) -> None:
+    """One conversation goes; every other keeps its messages.
+
+    Checked against the saved history as well as the window, because a delete
+    that only cleared the screen would come back on the next launch.
+    """
+    from network_a2a.persistence import HistoryStore
+
+    window.history_store = HistoryStore(window.storage.directory)
+    window.conversations = {"conversation-abc": {
+        "id": "conversation-abc", "title": "Room", "target": "llama3",
+        "owner": "owner", "members": ["owner", "guest"], "messages": [],
+        "revision": 1, "pending": False}}
+    window.chats = {"keep": {"messages": [("user", "keep me")], "history": []},
+                    "gone": {"messages": [("user", "delete me")], "history": []},
+                    "conversation-abc": {"messages": [("user", "room chat")], "revision": 1}}
+    window.selected = "gone"
+    window.history_store.save("rooms", "conversation-abc", window.conversations["conversation-abc"])
+    window.persist_history()
+
+    monkeypatch.setattr(win.QMessageBox, "question",
+                        lambda *args, **kwargs: win.QMessageBox.StandardButton.Yes)
+    window.delete_conversation("gone")
+
+    assert "gone" not in window.chats, "the deleted conversation is still open in memory"
+    assert "keep" in window.chats, "deleting one conversation took another with it"
+    assert window.chats["keep"]["messages"] == [("user", "keep me")], (
+        "another conversation's messages were changed")
+    assert "conversation-abc" in window.conversations, (
+        "deleting a direct conversation removed a shared one")
+    assert window.selected is None, (
+        "the deleted conversation was left selected, so the window still opens it")
+
+    saved = window.history_store.load("ui").get("state", {})
+    assert "gone" not in saved.get("chats", {}), "the delete was not saved"
+    assert saved.get("chats", {}).get("keep"), "saving the delete lost another conversation"
+    assert saved.get("selected") is None, "a deleted conversation stayed selected on disk"
+
+    # Deleting a shared room takes its record and its saved chat with it.
+    window.delete_conversation("conversation-abc")
+    assert "conversation-abc" not in window.conversations, "the room is still listed"
+    assert "conversation-abc" not in window.history_store.load("rooms"), (
+        "the room's saved record survived, so it would come back at the next poll")
+
+
+def test_a_conversation_that_disappears_elsewhere_is_forgotten_here(window) -> None:
+    """A room deleted on another device stops being a conversation here.
+
+    The poll only ever rebuilt the room list. It left the matching chat behind
+    and left ``selected`` pointing at it, so the conversation stayed in the
+    sidebar and stayed open after it had been deleted somewhere else.
+    """
+    window.chats = {"conversation-abc": {"messages": [("user", "hi")], "revision": 2},
+                    "direct-chat": {"messages": [("user", "a direct chat")], "revision": 1}}
+    window.conversations = {"conversation-abc": {
+        "id": "conversation-abc", "title": "Room", "target": "llama3",
+        "owner": "owner", "members": ["owner"], "messages": [], "revision": 2,
+        "pending": False}}
+    window.selected = "conversation-abc"
+
+    window.network_event("conversations", [])
+
+    assert "conversation-abc" not in window.chats, (
+        "the chat for a room that is gone was kept")
+    assert window.selected is None, (
+        "the window is still pointed at a conversation that no longer exists")
+    assert "direct-chat" in window.chats, (
+        "a room disappearing took a direct conversation with it")
+
+
 def test_the_rows_built_on_demand_explain_themselves(window) -> None:
     """Agent cards and attachments appear only once there is something to show.
 
