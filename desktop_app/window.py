@@ -100,6 +100,10 @@ OVERVIEW_PAGE = PAGE_INDEX["overview"]
 # The mark beside a message, and the width a grouped message is indented by
 # when it follows its own speaker's earlier message.
 SPEAKER_AVATAR = 34
+# Qt's QWIDGETSIZE_MAX, which PySide6 does not export. ``setFixedHeight``
+# pins both ends of a widget's range, and a bubble is pinned on every render,
+# so it has to be let go with the number spelled out before it can be measured.
+UNPINNED = 16777215
 # How long a toast stays up. Long, because a failure has to be read and acted
 # on; a copy has already happened by the time it appears.
 TOAST_MS = 7500
@@ -1636,30 +1640,60 @@ class MainWindow(QMainWindow):
         The width is ``min(preferred, limit)``: a short reply gets the width of
         its text and reads as a bubble, a long one gets the ceiling and wraps.
 
-        The height is read back from the bubble's column *after* the width is
-        set, because it depends on how the reply wrapped. Measured the other
-        way round, against the previous width, a long reply claimed to be
-        24000px tall. It is pinned because the scrolling panel squeezes its
-        rows to fit rather than scrolling them, which left every bubble one
-        line high no matter how much text was in it.
+        The height is worked out from each child's own idea of its height, not
+        read back from the bubble. Both obvious readings are wrong:
+
+        ``column.sizeHint()`` reports whatever the column is currently laid out
+        at, and the height used to be pinned from that reading. Once pinned, the
+        column's hint reports the pin back, so the pin became its own input and
+        the height could never change again. A message laid out at a wide panel
+        kept that height, and narrowing the panel re-wrapped the text into a
+        bubble far too short for it, cutting off the bottom of the message.
+
+        Reading a child's ``height()`` is wrong too. A plain label in a fresh row
+        still has whatever height it was last given, which is the widget
+        default, so a one-line title came out hundreds of pixels tall. So each
+        kind is asked the way it decides for itself: a Markdown reply works its
+        height out from its text, a wrapped label from ``heightForWidth`` at the
+        width it has just been given, and a plain label from its size hint.
+
+        The pin goes back on at the end, because the scrolling panel squeezes
+        its rows to fit rather than scrolling them, which left every bubble one
+        line high. It is set from what the children actually need, so it holds
+        the text rather than cutting it.
         """
         available = self.messages_scroll.viewport().width()
         limit = max(240, int(available * 0.74)) if available > 0 else 240
         for bubble in self.message_bubbles:
             width = bubble.preferred_width()
             bubble.setFixedWidth(max(1, min(width if width > 0 else limit, limit)))
-            # The column first, so the body is handed the new width and its
-            # resize handler can set the wrap; the reply works its height out
-            # from that, but does so on the next event-loop turn, so it is
-            # asked again afterwards. Measuring before the layout ran gave the
-            # height of one enormous line: 24000px for a paragraph.
+            # Released before anything is measured: a fixed height is one of
+            # the column's inputs, so a pin left from the last render is what
+            # this one would be measured against.
+            bubble.setMinimumHeight(0)
+            bubble.setMaximumHeight(UNPINNED)
+            # The column first, so the body is handed the new width and can set
+            # its wrap. Measuring before the layout ran gave the height of one
+            # enormous line: 24000px for a paragraph.
             bubble.column.activate()
-            for index in range(bubble.column.count()):
-                child = bubble.column.itemAt(index).widget()
+            margins = bubble.column.contentsMargins()
+            children = [bubble.column.itemAt(index).widget()
+                        for index in range(bubble.column.count())]
+            needed = margins.top() + margins.bottom()
+            for child in children:
                 refit = getattr(child, "fit_height", None)
                 if callable(refit):
                     refit()
-            bubble.setFixedHeight(max(1, bubble.column.sizeHint().height()))
+                    needed += child.height()
+                elif isinstance(child, QLabel) and child.wordWrap():
+                    # A wrapped label does not re-wrap on its own once a height
+                    # has been fixed on it, so it has to be told.
+                    child.setFixedHeight(child.heightForWidth(child.width()))
+                    needed += child.height()
+                else:
+                    needed += child.sizeHint().height()
+            needed += bubble.column.spacing() * max(0, len(children) - 1)
+            bubble.setFixedHeight(max(1, needed))
 
     def settle_message_layout(self):
         """Force the chat's layout to run now.

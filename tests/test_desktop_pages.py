@@ -31,6 +31,7 @@ from PySide6.QtCore import QEvent, QSize  # noqa: E402
 from PySide6.QtGui import QResizeEvent  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 
+from desktop_app.markdown import MarkdownMessage  # noqa: E402
 from desktop_app import window as win  # noqa: E402
 from desktop_app.storage import ABSENT, REMOVED, Storage  # noqa: E402
 from desktop_app.theme import (DARK, LIGHT, MIKU, THEME_CHOICES, THEME_NAMES,
@@ -605,6 +606,118 @@ def test_saved_replies_are_unwrapped_only_when_the_prefix_is_a_known_agent(windo
     assert window.split_legacy_responder(
         "assistant", "my-local-agent:\n**Hi**") == (
             "assistant", "my-local-agent:\n**Hi**")
+
+
+def test_no_bubble_is_too_short_for_the_text_it_holds(window, qt_app) -> None:
+    """Nothing is cut off, at any panel width.
+
+    A bubble's height used to be pinned from its column's size hint, and once
+    pinned the column reported the pin back, so the height could never change
+    again. A message laid out at a wide panel kept that height, and narrowing
+    the panel re-wrapped the text into a bubble far too short for it. On a
+    1000px window a message needing 360px was drawn in 238px, so the bottom
+    third of what was said was simply not on screen.
+
+    Swept rather than checked once, because the height is only wrong at widths
+    other than the one it was first laid out at.
+    """
+    window.navigate(win.PAGE_INDEX["conversations"])
+    window.agents = [{"id": "local-llama", "kind": "model", "online": True,
+                      "provider": "ollama", "model": "llama3"}]
+    question = ("This is a long question from the user that runs on for quite a "
+                "while and should wrap across several lines in the bubble. " * 4)
+    answer = ("This is a long reply from the agent that also runs on for quite a "
+              "while and should wrap across several lines in the bubble. " * 4)
+    window.show()
+
+    def clipped():
+        """Every body that cannot show all of its own text."""
+        found = []
+        for bubble in window.message_bubbles:
+            for child in bubble.findChildren(QLabel):
+                if child.wordWrap() and child.text():
+                    needed = child.heightForWidth(child.width())
+                    if needed > child.height() + 1:
+                        found.append(f"label has {child.height()}px, needs {needed}px")
+            for child in bubble.findChildren(MarkdownMessage):
+                needed = child.document().size().height()
+                if needed > child.height() + 1:
+                    found.append(f"reply has {child.height()}px, needs {needed:.0f}px")
+        return found
+
+    for width in (1400, 1000, 800, 620, 480, 1500):
+        window.resize(width, 900)
+        # The runtime polls the relay and replaces the chats with whatever it
+        # says, which is nothing, so it is given its turn before the fake
+        # conversation goes in rather than after. Nothing turns the loop after
+        # the render either: render_messages() settles the layout itself, and
+        # one more pass is one more chance for the poll to wipe the bubbles out
+        # from under the reading.
+        qt_app.processEvents()
+        window.selected = "local-llama"
+        window.chats = {"local-llama": {"messages": [
+            ("user", question), ("assistant", answer)]}}
+        window.render_messages()
+        assert window.message_bubbles, f"the message is missing at {width}px"
+        assert not clipped(), f"text is cut off at {width}px: {clipped()}"
+
+
+def test_a_bubble_grows_again_when_the_panel_is_widened(window, qt_app) -> None:
+    """Widening the window restores the width a reply had before narrowing it.
+
+    Measuring a reply's natural width did not work, because lifting the wrap
+    re-entered the height fitter, which re-set the wrap before the measurement
+    was read. So a reply's "natural" width was really just the width it already
+    had, and once the panel narrowed, the ceiling was the only thing moving it.
+    Widening afterwards had nothing to grow back into and left every message
+    stranded at the narrow width.
+    """
+    window.navigate(win.PAGE_INDEX["conversations"])
+    window.agents = [{"id": "local-llama", "kind": "model", "online": True,
+                      "provider": "ollama", "model": "llama3"}]
+    reply = "A reply long enough that the panel's ceiling is what decides its width. " * 12
+    window.show()
+
+    def render_at(width):
+        window.resize(width, 900)
+        qt_app.processEvents()
+        window.selected = "local-llama"
+        window.chats = {"local-llama": {"messages": [("assistant", reply)]}}
+        window.render_messages()
+        assert window.message_bubbles, f"the reply is missing at {width}px"
+        return window.message_bubbles[0].width()
+
+    wide = render_at(1500)
+    narrow = render_at(700)
+    assert narrow < wide, f"narrowing did not narrow the reply ({narrow} vs {wide})"
+
+    assert render_at(1500) > narrow, (
+        f"widening did not widen the reply back: it stayed at {narrow}px after "
+        f"being {wide}px on a wider panel")
+
+
+def test_a_replys_natural_width_does_not_depend_on_how_it_is_currently_laid_out() -> None:
+    """The unwrapped width of a reply is the same whatever its current width.
+
+    Read through the widget so the guard inside it is exercised: lifting the
+    wrap emits ``documentSizeChanged``, which re-enters ``fit_height`` and puts
+    the wrap back before ``idealWidth`` can be read.
+    """
+    from desktop_app.markdown import MarkdownMessage
+
+    reply = MarkdownMessage("A reply. " * 200)
+    widths = set()
+    for width in (200, 400, 700):
+        reply.resize(width, 300)
+        reply.fit_height()
+        widths.add(round(reply.natural_width()))
+        # Measuring must leave the reply as it found it, or the height the
+        # bubble has already settled on stops matching the text.
+        assert reply.document().textWidth() > 0, (
+            "measuring left the reply unwrapped, so its height is meaningless")
+
+    assert len(widths) == 1, (
+        f"the natural width moved with the layout: {sorted(widths)}")
 
 
 def test_resizing_the_window_re_caps_the_bubbles(window, qt_app) -> None:

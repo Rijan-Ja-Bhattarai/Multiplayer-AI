@@ -12,6 +12,7 @@ class MarkdownMessage(QTextBrowser):
     def __init__(self, text, parent=None, theme_name=DARK):
         super().__init__(parent)
         self._fitting = False
+        self._natural = None
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setReadOnly(True)
         self.setOpenLinks(False)
@@ -79,23 +80,25 @@ class MarkdownMessage(QTextBrowser):
     def natural_width(self):
         """How wide this reply would be if it were not wrapping.
 
-        ``idealWidth`` is clamped by the text width ``resizeEvent`` sets to
-        make the reply wrap in the first place, so it reports the current
-        width rather than the width of the text. The wrap is lifted for the
-        measurement and put back immediately, because a reply is not a fixed
-        width and it has to keep wrapping at whatever the panel gives it.
+        Measured on a throwaway document rather than by lifting the wrap on
+        this one. Lifting it looks like the obvious way and does not work: the
+        change emits ``documentSizeChanged``, which re-enters ``fit_height``,
+        and that puts the wrap straight back before the width is read. Worse,
+        the layout is cached, so after a reply has been wrapped even once the
+        reading comes back as the width it already had -- which made every
+        measurement depend on the current layout, so a reply only ever matched
+        the width it was already at.
+
+        A new document has no cached layout, so its size is the real one. The
+        result is cached because a reply's text never changes after it is built,
+        and this runs on every render and on every window resize.
         """
-        document = self.document()
-        current = document.textWidth()
-        try:
-            document.setTextWidth(-1)
-            width = document.idealWidth()
-        finally:
-            # Put back what was there, not a stand-in of one pixel. A reply
-            # that has not been laid out yet has no width of its own, and
-            # wrapping it at a single pixel makes a paragraph 24000px tall.
-            document.setTextWidth(current if current > 0 else -1)
-        return width
+        if self._natural is None:
+            probe = QTextDocument()
+            probe.setDocumentMargin(self.document().documentMargin())
+            probe.setPlainText(self.document().toPlainText())
+            self._natural = probe.documentLayout().documentSize().width()
+        return self._natural
 
     def fit_height(self, *args):
         """Size this reply to the text at whatever width it currently has.
