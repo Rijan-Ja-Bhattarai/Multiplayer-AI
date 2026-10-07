@@ -199,6 +199,9 @@ class MainWindow(QMainWindow):
         # without this a join could be submitted a second time while the first
         # was still waiting on a relay that takes up to 30 seconds.
         self.workspace_busy = {"create": False, "join": False, "invite": False}
+        # While a shared conversation is being ended at the relay, so its
+        # actions cannot be fired twice from two places at once.
+        self.chat_busy = False
         self.toast_error = False
         self.request_count = 0
         self.ready = False
@@ -1527,39 +1530,6 @@ class MainWindow(QMainWindow):
         self.notice("Messages cleared on this device.")
 
     def conversation_actions(self, target):
-        """The buttons a conversation offers, shared by the header and the menus.
-
-        Both places build from this so they cannot drift, and both hide the
-        actions that do not apply rather than offering something that would not
-        do what it says.
-
-        Delete and leave for a shared conversation need the relay, which is not
-        wired up yet, so they are left out here: a local delete would be undone
-        by the next poll and read as though it had worked. Deleting is offered
-        for a direct or saved conversation, where it is genuinely this device's
-        history to lose.
-        """
-        if not target:
-            return []
-        chat = self.chats.get(target) or {}
-        room = self.conversations.get(target)
-        actions = []
-        if chat.get("messages") or room:
-            clear = action("Clear messages",
-                           lambda checked=False, id=target: self.clear_conversation_confirm(id),
-                           name="ghost")
-            clear.setToolTip("Empty this conversation on this device, and keep the thread")
-            clear.setEnabled(bool(chat.get("messages")))
-            actions.append(clear)
-        if not room:
-            remove = action("Delete conversation",
-                            lambda checked=False, id=target: self.delete_conversation(id),
-                            name="danger")
-            remove.setToolTip("Remove this conversation and its messages from this device")
-            actions.append(remove)
-        return actions
-
-    def conversation_actions(self, target):
         """What can be done to a conversation, as ``(text, tooltip, callback)``.
 
         Described rather than built, so the header and the context menu make
@@ -1567,11 +1537,9 @@ class MainWindow(QMainWindow):
         builds only what it needs: a button for the header, a menu entry for a
         right-click.
 
-        Delete and leave for a shared conversation need the relay, which is not
-        wired up yet, so they are left out: a local delete would be undone by
-        the next poll and read as though it had worked. Delete is offered for a
-        direct or saved conversation, where it is genuinely this device's
-        history to lose.
+        A shared conversation follows the workspace's own rule: whoever started
+        it may end it, and anyone else steps out of it. Delete and leave go to
+        the relay first, so what is claimed to the reader is what happens.
         """
         if not target:
             return []
@@ -1581,14 +1549,61 @@ class MainWindow(QMainWindow):
         if chat.get("messages"):
             entries.append((
                 "Clear messages",
-                "Empty this conversation on this device, and keep the thread",
+                "Empty your copy of this conversation on this device, and keep the thread",
                 lambda id=target: self.clear_conversation_confirm(id)))
-        if not room:
+        if room:
+            owned = room["owner"] == self.identity
+            entries.append((
+                "Delete for everyone" if owned else "Leave conversation",
+                "End this conversation for every device in it" if owned
+                else "Step out of this conversation, keeping it for the others",
+                lambda id=target, remove=owned: self.end_conversation(id, remove)))
+        else:
             entries.append((
                 "Delete conversation",
                 "Remove this conversation and its messages from this device",
                 lambda id=target: self.delete_conversation(id)))
         return entries
+
+    def end_conversation(self, target, delete):
+        """Ask the relay to end a shared conversation, then forget it here.
+
+        The local copy goes only once the relay has agreed. Forgetting it first
+        would leave the row on screen until the next poll brought it back, which
+        reads as though the delete had failed.
+        """
+        room = self.conversations.get(target)
+        title = room["title"] if room else target
+        if delete:
+            question = ("Delete this conversation for every device in it?\n\n"
+                        "Its messages will be removed from the relay and cannot "
+                        "be read again by anyone.")
+        else:
+            question = ("Leave this conversation?\n\n"
+                        "You will stop seeing it, and it stays for everyone "
+                        "else in it.")
+        if QMessageBox.question(self, "Delete conversation" if delete else "Leave conversation",
+                                f"{title}\n\n{question}",
+                                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                                QMessageBox.StandardButton.Cancel) is not QMessageBox.StandardButton.Yes:
+            return
+        method = "delete_conversation" if delete else "leave_conversation"
+        self.chat_busy = True
+        self.update_chat_controls()
+        def failed(message):
+            self.chat_busy = False
+            self.notice(message, error=True)
+            self.update_chat_controls()
+        def done(result):
+            self.chat_busy = False
+            self.forget_conversation(target)
+            self.render_agents()
+            self.render_messages()
+            self.render_attachments()
+            self.persist_history()
+            self.notice("Conversation deleted." if delete
+                        else "You have left the conversation.")
+        self.command(method, target, success=done, failure=failed)
 
     def show_conversation_menu(self, point):
         """Right-click a conversation for the same actions the header offers.
@@ -1637,6 +1652,7 @@ class MainWindow(QMainWindow):
             control = action(text, lambda checked=False, run=callback: run(),
                              name="danger" if text.startswith("Delete") else "ghost")
             control.setToolTip(tip)
+            control.setEnabled(not self.chat_busy)
             self.chat_manage.addWidget(control)
 
     def select_agent(self, agent_id):

@@ -57,6 +57,45 @@ class Conversations:
                 room["revision"] += 1
                 self.save(room)
 
+    def delete(self, conversation_id, source):
+        """Remove a conversation for everyone, owner only.
+
+        The rule mirrors the workspace's: whoever started it may end it, and a
+        member leaves instead. Returns the reason it could not be done, or
+        None on success, so the caller can tell a refusal from a room that is
+        simply not there.
+        """
+        room = self.get(conversation_id, source)
+        if not room:
+            return "Conversation is unavailable for this device"
+        if room["owner"] != source:
+            return "Only the conversation's host can delete it. Leave it instead."
+        self.rooms.pop(conversation_id, None)
+        # The record goes with it. Left behind, the room would come back the
+        # next time the relay started.
+        if self.store:
+            self.store.delete("rooms", conversation_id)
+        return None
+
+    def leave(self, conversation_id, source):
+        """Take one member out of one conversation, leaving the rest of it alone.
+
+        Not ``remove_member``, which strips a member from every conversation at
+        once because that is what being removed from the workspace means.
+        Leaving a conversation is not that: the room and its history stay for
+        everyone else, and the owner has to be told to delete it.
+        """
+        room = self.get(conversation_id, source)
+        if not room:
+            return "Conversation is unavailable for this device"
+        if room["owner"] == source:
+            return "The host must delete this conversation rather than leave it"
+        if source in room["members"]:
+            room["members"].remove(source)
+            room["revision"] += 1
+            self.save(room)
+        return None
+
     def get(self, conversation_id, source):
         room = self.rooms.get(conversation_id)
         if (not room or source not in room["members"]
@@ -91,6 +130,30 @@ class Conversations:
         if not room:
             return JSONResponse({"error": "Conversation is unavailable for this device"}, 404)
         return JSONResponse(room, headers={"Cache-Control": "no-store"})
+
+    async def http_delete(self, request):
+        """DELETE: end a conversation for everyone. Host only."""
+        source = self._source(request)
+        if not source:
+            return JSONResponse({"error": "Unauthorized"}, 401)
+        error = self.delete(request.path_params["conversation_id"], source)
+        if error:
+            # 403 when it exists and is not the caller's to delete, which is a
+            # different thing from it not being there at all.
+            return JSONResponse({"error": error},
+                                403 if "host" in error else 404)
+        return JSONResponse({"status": "deleted"})
+
+    async def http_leave(self, request):
+        """POST: step out of a conversation, leaving it for everyone else."""
+        source = self._source(request)
+        if not source:
+            return JSONResponse({"error": "Unauthorized"}, 401)
+        error = self.leave(request.path_params["conversation_id"], source)
+        if error:
+            return JSONResponse({"error": error},
+                                403 if "host" in error else 404)
+        return JSONResponse({"status": "left"})
 
     async def send(self, request):
         source = self._source(request)

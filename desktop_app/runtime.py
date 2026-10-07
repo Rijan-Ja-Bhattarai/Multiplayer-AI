@@ -397,6 +397,45 @@ class DesktopRuntime:
             raise ValueError("Only the workspace owner can remove members")
         await self.engine.remove_member(member)
 
+    async def _conversation_request(self, conversation_id, path, method):
+        """Ask the relay to change a shared conversation, tolerating an old one.
+
+        The tolerated statuses are the same ones delete_workspace accepts: 401
+        means the token is already gone, 404 that the room is not there, and 501
+        that this relay predates the endpoint. All three mean the same thing to
+        a caller who asked to remove a conversation from their own device, which
+        it can do without the relay's agreement. Anything else is a real refusal
+        and its own sentence is shown instead.
+        """
+        engine = self.connected_engine()
+        base = relay_http_url(engine.active_url, True)
+        try:
+            call = getattr(engine.relay_http(), method)
+            response = await call(base + f"/conversations/{conversation_id}{path}",
+                                  headers={"Authorization": "Bearer " + engine.active_token},
+                                  timeout=10)
+        except httpx.HTTPError:
+            # The host is unreachable. A local device cannot change a shared
+            # room, so this is reported rather than quietly faked.
+            raise RuntimeError("Could not reach the host, so the conversation was not changed.") from None
+        if response.status_code in (200, 401, 404, 501):
+            return True
+        try:
+            reason = response.json().get("error")
+        except ValueError:
+            reason = None
+        raise RuntimeError(reason or "The host could not change that conversation.")
+
+    async def delete_conversation(self, conversation_id):
+        async with self.mutation:
+            await self._conversation_request(conversation_id, "", "delete")
+            self.engine.history_store.delete("rooms", conversation_id)
+            return True
+
+    async def leave_conversation(self, conversation_id):
+        async with self.mutation:
+            return await self._conversation_request(conversation_id, "/leave", "post")
+
     def _credential_names_for(self, storage):
         """Every credential name a workspace owns, before anything is deleted.
 

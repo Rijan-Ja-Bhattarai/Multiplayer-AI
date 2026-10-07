@@ -147,25 +147,32 @@ def test_a_conversation_offers_what_it_can_do_and_nothing_else(window) -> None:
     assert header() == ["Delete conversation"], (
         f"an empty conversation still offers to clear it: {header()}")
 
-    # A shared conversation is on the relay. Clearing it locally is real and
-    # says so; deleting it is not on offer rather than being offered and undone.
+    # A shared conversation follows the workspace's own rule: whoever started
+    # it may end it, and anyone else steps out of it.
     room = {"id": "conversation-abc", "title": "Chat with llama3", "target": "local-llama",
-            "owner": window.identity or "owner", "members": ["owner", "guest"],
+            "owner": window.identity, "members": [window.identity, "guest"],
             "messages": [], "revision": 3, "pending": False}
     window.conversations = {"conversation-abc": room}
     window.chats["conversation-abc"] = {"messages": [("user", "hi")], "revision": 3}
     window.selected = "conversation-abc"
     window.update_chat_controls()
-    assert header() == ["Clear messages"], (
-        f"a shared conversation offers {header()}, but delete needs the relay")
-    assert "shared" in tooltips()[0].lower() or "device" in tooltips()[0].lower(), (
-        f"clearing a shared conversation should say what it leaves behind: "
-        f"{tooltips()[0]!r}")
+    assert header() == ["Clear messages", "Delete for everyone"], (
+        f"the host of a shared conversation is offered {header()}")
+    assert "every device" in tooltips()[1], (
+        f"deleting for everyone should say who it is for: {tooltips()[1]!r}")
+
+    room["owner"] = "somebody-else"
+    window.update_chat_controls()
+    assert header() == ["Clear messages", "Leave conversation"], (
+        f"a member of a shared conversation is offered {header()}, but the "
+        "conversation is not theirs to end")
+    assert "for the others" in tooltips()[1], (
+        f"leaving should say what is kept: {tooltips()[1]!r}")
 
     # The right-click menu is built from the same list.
-    window.chats["conversation-abc"]["messages"] = [("user", "hi")]
     assert [text for text, _, _ in
-            window.conversation_actions("conversation-abc")] == ["Clear messages"]
+            window.conversation_actions("conversation-abc")] == [
+                "Clear messages", "Leave conversation"]
     assert window.conversation_actions(None) == [], (
         "with no conversation open there is nothing to clear or delete")
 
