@@ -79,19 +79,20 @@ class SharedConversationTests(unittest.IsolatedAsyncioTestCase):
         await self.host.refresh()
         self.assertEqual([data for kind, data in self.events if kind == "conversations"][-1], [])
 
-    async def test_a_relay_without_the_endpoint_is_treated_as_agreeing(self):
-        """An older relay is tolerated, not reported as a failed delete.
+    async def test_only_a_room_that_is_gone_counts_as_a_shared_conversation_done(self):
+        """Only 200 and 404 mean the change was made.
 
-        The same statuses delete_workspace already accepts, minus the one that
-        does not transfer: 404 for a room that is not there, and 501 for a relay
-        that predates the endpoint. Both mean the conversation is not here any
-        more, which is what was asked for, so the local copy is forgotten and
-        nothing is shown.
+        404 is the room not being here, which is also what a relay predating
+        these routes answers for an unregistered path, so an older host lands
+        here too and the local copy is forgotten with nothing to lose.
 
-        401 is not among them. On a workspace a revoked token means the
-        membership is already gone and forgetting it locally is right; on a
-        conversation it means this device may not make the change, while the
-        room and everyone else's messages of it are still on the relay.
+        Everything else is a refusal. 401 says this device may not make the
+        change; 501 says the relay declined to. Neither is true of
+        delete_workspace, which tolerates both: there a revoked token means the
+        membership is already gone, and an operator-managed relay is a decision
+        about their own server. On a conversation the room and everyone else's
+        messages of it are still there either way, so reading those as success
+        forgets something that has not gone anywhere.
         """
         async def model(payload, source):
             return {"text": "AI: " + payload["messages"][-1]["content"], "provider": "test"}
@@ -109,34 +110,37 @@ class SharedConversationTests(unittest.IsolatedAsyncioTestCase):
         async def call(url, headers=None, timeout=None):
             return Response(status)
 
-        # 401 first, while the room record is still in place, so what follows
-        # is down to the 401 and not to the tolerated deletes that come after.
-        # 401 is a refusal, not a done job: it must not be read as a delete.
-        engine = self.guest.connected_engine()
-        stub = MagicMock()
+        # The refusals first, while the room record is still in place, so what
+        # follows is down to them and not to the tolerated delete that comes
+        # after. Neither may be read as a done job.
+        for status, expected in ((401, "not a member"), (501, "does not support")):
+            with self.subTest(status=status):
+                engine = self.guest.connected_engine()
+                stub = MagicMock()
 
-        async def unauthorized(url, headers=None, timeout=None):
-            return Response(401)
+                async def refuses(url, headers=None, timeout=None, code=status):
+                    return Response(code)
 
-        stub.delete = unauthorized
-        stub.post = unauthorized
-        with patch.object(engine, "relay_http", return_value=stub):
-            with self.assertRaises(RuntimeError) as message:
-                await self.guest.delete_conversation(room_id)
-            self.assertIn("not a member", str(message.exception))
-            with self.assertRaises(RuntimeError):
-                await self.guest.leave_conversation(room_id)
-        self.assertIn(room_id, self.host.engine.history_store.load("rooms"), (
-            "a 401 was treated as a delete, so the room went from the relay "
-            "while it still has everyone else's messages of it"))
+                stub.delete = refuses
+                stub.post = refuses
+                with patch.object(engine, "relay_http", return_value=stub):
+                    with self.assertRaises(RuntimeError) as message:
+                        await self.guest.delete_conversation(room_id)
+                    self.assertIn(expected, str(message.exception))
+                    with self.assertRaises(RuntimeError):
+                        await self.guest.leave_conversation(room_id)
+                self.assertIn(room_id, self.host.engine.history_store.load("rooms"), (
+                    f"a {status} was treated as a delete, so the room went from "
+                    f"the relay while it still has everyone else's messages of it"))
 
         await self.guest.refresh()
         rooms = [data for kind, data in self.events if kind == "conversations"][-1]
         self.assertEqual([room["id"] for room in rooms], [room_id], (
-            "a 401 left the conversation missing from the relay, so it was "
+            "a refusal left the conversation missing from the relay, so it was "
             "treated as deleted rather than refused"))
 
-        for status in (404, 501):
+        # Only the room being gone.
+        for status in (404,):
             with self.subTest(status=status):
                 engine = self.guest.connected_engine()
                 stub = MagicMock()

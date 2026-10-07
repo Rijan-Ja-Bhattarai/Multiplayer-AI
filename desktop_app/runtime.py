@@ -400,18 +400,25 @@ class DesktopRuntime:
     async def _conversation_request(self, conversation_id, path, method):
         """Ask the relay to change a shared conversation, tolerating an old one.
 
-        404 means the room is not there and 501 that this relay predates the
-        endpoint. Both mean the conversation is not here any more, which is what
-        was asked for, so the local copy is forgotten.
+        Only 200 and 404 mean it is done. 404 means the room is not here, and it
+        is also what a relay predating these routes answers for an unregistered
+        path, so an older host lands here too and the local copy is forgotten
+        with nothing to lose.
 
-        401 is *not* tolerated, though delete_workspace does tolerate it. There
-        the token being gone means the membership is already gone, so forgetting
-        it locally is right. On a conversation it means this device is not
-        allowed to make the change, and the room is still on the relay with
-        everyone else's messages in it. Reporting that as success makes the
-        window forget a conversation that has not gone anywhere, and the next
-        poll brings it straight back -- a delete that looks like it worked and
-        did not. So it is a refusal, and says so.
+        401 and 501 are refusals, and they do not transfer from
+        delete_workspace, which tolerates both. There, a 401 means the token is
+        gone, so the membership is gone and forgetting it locally is right, and
+        a 501 means an operator manages membership. Neither is true of a
+        conversation: 401 says this device may not make the change and 501 says
+        the relay declined to, while the room and everyone else's messages of it
+        are still there. Reporting either as success makes the window forget a
+        conversation that has gone nowhere, and the next poll brings it straight
+        back -- a delete that looks like it worked and did not.
+
+        501 in particular can never come from this relay's conversation routes;
+        they answer 200, 401, 403 and 404 only. Tolerating it was dead code
+        that would have fired only against something else, and firing would
+        report success for an operation the relay refused to perform.
         """
         engine = self.connected_engine()
         base = relay_http_url(engine.active_url, True)
@@ -429,7 +436,11 @@ class DesktopRuntime:
                 "This device is not a member of that conversation any more, so "
                 "it was not changed. Ask the host to remove your device and "
                 "reconnect.")
-        if response.status_code in (200, 404, 501):
+        if response.status_code == 501:
+            raise RuntimeError(
+                "This host does not support ending a conversation, so nothing "
+                "was changed. Ask the owner to delete it from their desktop.")
+        if response.status_code in (200, 404):
             return True
         try:
             reason = response.json().get("error")
