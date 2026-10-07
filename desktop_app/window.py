@@ -1521,7 +1521,7 @@ class MainWindow(QMainWindow):
         rather than telling them something they have to act on.
         """
         QApplication.clipboard().setText(text)
-        self.notice("Copied", duration=COPY_TOAST_MS)
+        self.notice("Message Copied", duration=COPY_TOAST_MS)
 
     def speaker_identity(self, role, room=None):
         """Who is speaking, as ``(name, subtitle, provider, kind)``.
@@ -1529,8 +1529,8 @@ class MainWindow(QMainWindow):
         Resolved in one place because it used to be spread across the role map
         and a fallback that labelled a message with whatever conversation
         happened to be open. Two roles fell through that fallback: ``peer``,
-        which named another device's message after the agent, and any
-        assistant whose id the reader then had to decode.
+        which named another device's message after the reader's own agent, and
+        any assistant whose id the reader then had to decode.
 
         ``kind`` drives the layout rather than the role string, so a peer's
         message and an agent's are told apart by the bubble and not by the
@@ -1546,9 +1546,20 @@ class MainWindow(QMainWindow):
         if role == "local_agent":
             return self.agent_identity(room["target"] if room else self.selected)
         if role == "peer":
-            # Another device. It has no provider and no avatar of ours, so it
-            # is named by its identity and tinted as a peer.
-            return ("This device", "", None, "peer")
+            # Another device. It has no provider of ours and no avatar, so it
+            # is named by its own identity and tinted as a peer.
+            #
+            # The sender is the key of the chat the message is in, which is
+            # ``self.selected`` whenever this is being rendered: a peer chat is
+            # opened by the sender's identity and has no room behind it, since
+            # rooms only ever exist for agents. So ``self.selected`` is who
+            # wrote it.
+            #
+            # Deliberately not ``room["target"]``, the way the fallback at the
+            # end of this method resolves an agent: that names the local agent
+            # the reader is talking to, which would label another device's
+            # message with the reader's own agent.
+            return (self.selected or "Another device", "", None, "peer")
 
         speaker = role.removeprefix("member:") if role.startswith("member:") else None
         if speaker is not None:
@@ -1649,6 +1660,12 @@ class MainWindow(QMainWindow):
         for row in self.messages_widget.findChildren(HoverRow):
             row.outer.activate()
             row.content.activate()
+            # The stack holding the bubble and the actions under it. Left out,
+            # the bubble sits at its default 640x480 geometry until the event
+            # loop gets to it, which is the same fault one level down.
+            row.message.activate()
+            if row.has_actions:
+                row.actions.layout().activate()
             for bubble in row.findChildren(MessageBubble):
                 # The bubble's own column, or the title and body keep their
                 # default 640x480 geometry and the bubble ends up one line
@@ -1656,10 +1673,15 @@ class MainWindow(QMainWindow):
                 bubble.column.activate()
 
     def eventFilter(self, watched, event):
-        if (watched is getattr(self, "messages_scroll", None) and
-                hasattr(self, "messages_scroll") and
-                watched is self.messages_scroll.viewport() and
-                event.type() == QEvent.Type.Resize):
+        # The filter is installed on the viewport, so ``watched`` is always the
+        # viewport and never the scroll widget. Asking for both used to be a
+        # test nothing could pass: a widget is never identical to its own
+        # viewport, so the branch was dead and bubble widths were never
+        # re-capped when the window was resized, which is the whole reason
+        # this filter is installed.
+        scroll = getattr(self, "messages_scroll", None)
+        if scroll is not None and watched is scroll.viewport() \
+                and event.type() == QEvent.Type.Resize:
             self.cap_message_widths()
         return super().eventFilter(watched, event)
 
@@ -1684,8 +1706,15 @@ class MainWindow(QMainWindow):
         room = self.conversations.get(self.selected)
         self.message_bubbles = []
         previous = None
-        for role, text in chat.get("messages", []):
-            name, subtitle, provider, kind = self.speaker_identity(role, room)
+        messages = chat.get("messages", [])
+        # Every speaker, resolved once up front. The run a message belongs to
+        # is decided by what comes after it, so the whole history has to be
+        # known before the first row can be laid out.
+        resolved = [self.speaker_identity(role, room) for role, _ in messages]
+        identities = [(name, subtitle, provider, kind)
+                      for name, subtitle, provider, kind in resolved]
+        for index, (role, text) in enumerate(messages):
+            name, subtitle, provider, kind = resolved[index]
             # Discord groups consecutive messages from one speaker under a
             # single header rather than boxing each one. A row per message
             # with a card around it reads as a stack of documents, which is
@@ -1696,14 +1725,15 @@ class MainWindow(QMainWindow):
             # called "Ollama", so grouping on the name alone tucked one
             # agent's reply under another agent's header and dropped the
             # subtitle that tells them apart.
-            identity = (name, subtitle, provider, kind)
+            identity = identities[index]
             grouped = identity == previous
+            # The last message of a run, which is where the actions go. Putting
+            # them under every message instead would stack a copy button under
+            # each of a run's replies with nothing between them.
+            last_of_run = index + 1 >= len(identities) \
+                or identities[index + 1] != identity
             mine = kind == "user"
-            # The actions belong beside the speaker they act on. An agent's
-            # mark is on the left and the reader's on the right, so the slot
-            # leads for anything but the reader's own message.
-            row = HoverRow(leading_actions=not mine)
-            mark = None
+            row = HoverRow(mine=mine)
             if grouped:
                 # Hold the place the mark would take, so a follow-on message
                 # lines up under the one above instead of sliding across.
@@ -1737,20 +1767,20 @@ class MainWindow(QMainWindow):
 
             # Your messages sit on the right with the mark beside them, an
             # agent's on the left. The stretch is what carries the bubble to
-            # that side, so the row itself still spans the panel and the
-            # hover actions cannot change its width.
-            if mine:
-                row.content.addStretch(1)
-                row.add_content(bubble, 0, Qt.AlignmentFlag.AlignTop)
-                row.add_content(mark, 0, Qt.AlignmentFlag.AlignTop)
-            else:
-                row.add_content(mark, 0, Qt.AlignmentFlag.AlignTop)
-                row.add_content(bubble, 0, Qt.AlignmentFlag.AlignTop)
-                row.content.addStretch(1)
+            # that side, so the row itself still spans the panel.
+            row.set_message(bubble)
+            row.add_mark(mark)
 
-            copy = action("Copy", lambda checked=False, value=text: self.copy_message(value), name="ghost")
-            copy.setToolTip("Copy this message")
-            row.add_action(copy)
+            # Copy belongs to the reply, the way it does in a browser
+            # assistant, and only the last of a run carries it. Your own
+            # messages have none: there is nothing there to want back, and a
+            # button under every question would be a row of them.
+            if kind in ("agent", "peer") and last_of_run:
+                copy = action("Copy",
+                              lambda checked=False, value=text: self.copy_message(value),
+                              name="ghost")
+                copy.setToolTip("Copy this message")
+                row.add_action(copy)
             self.messages.addWidget(row)
             previous = identity
         self.cap_message_widths()

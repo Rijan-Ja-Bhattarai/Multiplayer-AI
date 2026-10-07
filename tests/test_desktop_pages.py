@@ -25,8 +25,9 @@ pytest.importorskip("psutil", reason="psutil backs the Resources page")
 from PySide6.QtCore import QEasingCurve, QPoint, QPointF, Qt, QTimer  # noqa: E402
 from PySide6.QtGui import QPalette, QShortcut, QWheelEvent  # noqa: E402
 from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog, QFrame,  # noqa: E402
-                             QLabel, QMessageBox, QPushButton)
+                             QLabel, QMessageBox, QPushButton, QWidget)
 from PySide6.QtCore import QAbstractAnimation  # noqa: E402
+from PySide6.QtCore import QEvent  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 
 from desktop_app import window as win  # noqa: E402
@@ -495,16 +496,82 @@ def test_a_failure_is_not_painted_in_a_providers_colour(window) -> None:
 
 def test_a_peer_message_is_named_as_a_peer(window) -> None:
     """It was labelled with the agent's name and rendered its markdown raw."""
-    window.selected = "local-llama"
     window.agents = [{"id": "local-llama", "online": True, "provider": "ollama",
                       "model": "llama3.2"}]
+    window.selected = "guest-laptop"
     name, subtitle, provider, kind = window.speaker_identity("peer", None)
     assert kind == "peer", f"a peer was treated as {kind}"
     assert provider is None, "a peer was given a provider, so it is tinted as one"
+    # The sender is the key of the chat the message is in, so it is whoever
+    # is selected. It used to read "This device", which named the reader
+    # rather than whoever had written the message.
+    assert name == "guest-laptop", f"a peer was named {name!r}"
+
+    window.selected = None
+    assert window.speaker_identity("peer", None)[0] == "Another device", (
+        "a peer with no chat open should still say something")
+
+    # Not the reader's own agent: ``room["target"]`` is the local agent, and
+    # labelling another device's message with it pointed at the wrong speaker.
+    window.selected = "guest-laptop"
+    with_room = window.speaker_identity("peer", {"target": "local-llama"})
+    assert with_room[0] == "guest-laptop", (
+        f"a peer was named after the local agent as {with_room[0]!r}")
 
     member = window.speaker_identity("member:guest-laptop", None)
     assert member[0] == "guest-laptop", f"a member was named {member[0]!r}"
     assert member[3] == "peer", f"a member was treated as {member[3]}"
+
+
+def test_resizing_the_window_re_caps_the_bubbles(window, qt_app) -> None:
+    """Narrowing the panel re-wraps the messages rather than clipping them.
+
+    The filter that does this is installed on the viewport, and it used to
+    also insist that the watched widget was the scroll widget itself, which
+    nothing can be both. So the branch was dead: the widths were only ever
+    capped on a render, and a message dragged off the edge stayed off.
+    """
+    window.navigate(win.PAGE_INDEX["conversations"])
+    window.agents = [{"id": "local-llama", "kind": "model", "online": True,
+                      "provider": "ollama", "model": "llama3"}]
+    window.selected = "local-llama"
+    window.chats = {"local-llama": {"messages": [
+        ("assistant", "a reply long enough that the ceiling matters " * 12)]}}
+    window.show()
+    window.resize(1400, 900)
+    window.render_messages()
+    qt_app.processEvents()
+    wide = window.message_bubbles[0].width()
+
+    # The filter has to run at all, and only for the viewport's own resize.
+    called = []
+    original = window.cap_message_widths
+    window.cap_message_widths = lambda: called.append(True) or original()
+    try:
+        window.resize(760, 900)
+        qt_app.processEvents()
+        assert called, "resizing the window did not re-cap the bubbles"
+    finally:
+        window.cap_message_widths = original
+
+    # A different event on the viewport is not a reason to redo the layout.
+    # Only a real resize of an unrelated widget is left out of this: delivering
+    # a QResizeEvent without resizing anything can cascade a genuine relayout,
+    # which moves the viewport and so legitimately re-caps the bubbles. That
+    # would be testing Qt's layout rather than the filter.
+    called.clear()
+    window.cap_message_widths = lambda: called.append(True)
+    try:
+        QApplication.sendEvent(window.messages_scroll.viewport(),
+                               QEvent(QEvent.Type.FocusIn))
+        qt_app.processEvents()
+    finally:
+        window.cap_message_widths = original
+    assert not called, "the cap ran for an event that was not a viewport resize"
+
+    assert window.message_bubbles[0].width() < wide, (
+        "a narrower panel did not narrow the bubble, so the reply runs off "
+        "the edge")
 
 
 def test_body_text_stays_readable_on_every_bubble_fill(window) -> None:
@@ -619,83 +686,117 @@ def test_a_renamed_agent_does_not_inherit_the_previous_replys_header(window, qt_
         f"{headers}")
 
 
-def test_the_action_slot_keeps_its_place_when_revealed(window, qt_app) -> None:
-    """The actions stay in the layout whether or not they are shown.
+def test_hovering_a_message_moves_nothing(window, qt_app) -> None:
+    """The pointer crossing a message must not shift it.
 
-    If they were added on hover instead, every row would jump sideways as
-    the pointer crossed it. The invariant is checked on the layout rather
-    than only on the resulting width, because a row is sized by the panel
-    around it and a reflow can leave the width unchanged by luck.
+    It used to. The actions lived in a slot beside the mark and appeared on
+    hover, and a hidden widget hands its space back to the layout, so
+    revealing them took about 90px off the bubble and re-wrapped the text
+    under the pointer. The row's own width never changed, which is why the
+    earlier check on it passed while the message visibly jumped: the bubble
+    is what reflowed. So the bubble is what is checked here.
     """
     conversation_window(window)
     window.show()
     qt_app.processEvents()
-    rows = window.messages_widget.findChildren(win.HoverRow)
-
-    def action_slot(row):
-        return [row.outer.itemAt(index).widget()
-                for index in range(row.outer.count())]
-
-    assert rows and not any(r.actions_revealed for r in rows), (
-        "the actions start visible, so there is nothing to reveal")
-    for row in rows:
-        assert any(w is not None and w.objectName() == "messageActions"
-                   for w in action_slot(row)), (
-            "the actions are not in the layout while hidden, so revealing "
-            "them would reflow the row")
-
-    before = [r.geometry().width() for r in rows]
-    for row in rows:
-        row.reveal_actions(True)
-    qt_app.processEvents()
-
-    assert all(r.actions_revealed for r in rows), "revealing did not take"
-    assert [r.geometry().width() for r in rows] == before, (
-        "revealing the actions changed the row width, so the row will shift "
-        "as the pointer crosses it")
-
-    for row in rows:
-        row.reveal_actions(False)
-    assert not any(r.actions_revealed for r in rows), "hiding did not take"
-
-
-def test_the_copy_action_sits_beside_the_speaker_it_copies(window, qt_app) -> None:
-    """Each row's actions belong at that speaker's end of the row.
-
-    The slot was laid out last on every row, so an agent's actions turned up
-    on the far right, directly beside the reader's own mark, and read as though
-    the reader could copy the reply. Yours is right, since your mark is.
-    """
-    conversation_window(window)
-    window.show()
-    for row in window.messages_widget.findChildren(win.HoverRow):
-        row.reveal_actions(True)
-    qt_app.processEvents()
-
     rows = window.messages_widget.findChildren(win.HoverRow)
     assert rows
+
+    # There is no hover behaviour left to fire, and that is the point. Pinned
+    # here rather than left implicit, because otherwise the sendEvent below is
+    # a no-op and this test would pass for the wrong reason the moment someone
+    # re-added a reveal on hover.
+    assert win.HoverRow.enterEvent is QWidget.enterEvent, (
+        "the row reveals something on hover again, so a message will move as "
+        "the pointer crosses it")
+    assert win.HoverRow.leaveEvent is QWidget.leaveEvent, (
+        "the row hides something on leave again, so a message will move as "
+        "the pointer crosses it")
+
+    def boxes():
+        return [(bubble_box(window, row),
+                 (row.findChild(win.MessageBubble).x(),
+                  row.findChild(win.MessageBubble).y(),
+                  row.findChild(win.MessageBubble).width(),
+                  row.findChild(win.MessageBubble).height()))
+                for row in rows]
+
+    before = boxes()
     for row in rows:
-        # A row whose leading slot is a widget is an agent's: yours opens with
-        # a stretch and puts your mark on the right instead. Addressed by
-        # slot rather than by looking for an avatar, because a grouped
-        # follow-on message has a plain spacer where the mark would be.
-        mine = row.content.itemAt(0).widget() is None
-        actions = row._actions
-        mark = (row.content.itemAt(2) if mine else row.content.itemAt(0)).widget()
-        mark_x = mark.mapTo(row, mark.rect().topLeft()).x()
-        if mine:
-            assert actions.x() >= mark_x, (
-                f"your own actions belong outboard of your mark, not between "
-                f"it and the message (mark at {mark_x}, actions at "
-                f"{actions.x()})")
-        else:
-            assert actions.x() + actions.width() <= mark_x, (
-                f"an agent's actions should lead the row, beside its mark: "
-                f"mark at {mark_x}, actions end at "
-                f"{actions.x() + actions.width()}")
-            assert actions.x() == 0, (
-                f"an agent's actions should be at the leading edge, not at "
-                f"x={actions.x()}")
+        QApplication.sendEvent(row, QEvent(QEvent.Type.Enter))
+    qt_app.processEvents()
+
+    assert boxes() == before, (
+        "hovering moved the bubbles, so a message reflows as the pointer "
+        "crosses it")
+
+
+def test_the_copy_action_is_permanent_and_sits_under_the_reply(window, qt_app) -> None:
+    """A copy button under every reply, always there, the way a browser has it.
+
+    It used to appear only on hover, which read as a pop-up, and sat in a slot
+    beside the mark rather than under the message it copies.
+    """
+    window.navigate(win.PAGE_INDEX["conversations"])
+    window.agents = [{"id": "local-llama", "kind": "model", "online": True,
+                      "provider": "ollama", "model": "llama3"}]
+    window.selected = "local-llama"
+    window.chats = {"local-llama": {"messages": [
+        ("assistant", "a reply"),
+        ("user", "a question"),
+    ]}}
+    window.show()
+    window.render_messages()
+    qt_app.processEvents()
+
+    rows = window.messages_widget.findChildren(win.HoverRow)
+    reply, question = rows[0], rows[1]
+    assert reply.has_actions, "the reply has no copy button"
+    assert not question.has_actions, (
+        "your own message has a copy button, so every question gets one")
+
+    bubble = row_bubbles(reply)[0]
+    strip = reply.actions
+    bubble_top = bubble.mapTo(reply, bubble.rect().topLeft()).y()
+    strip_top = strip.mapTo(reply, strip.rect().topLeft()).y()
+    assert strip_top >= bubble_top + bubble.height(), (
+        f"the copy button sits at y={strip_top}, inside the bubble, which "
+        f"ends at {bubble_top + bubble.height()}")
+    assert strip.mapTo(reply, strip.rect().topLeft()).x() \
+        == bubble.mapTo(reply, bubble.rect().topLeft()).x(), (
+        "the copy button should line up with the text it copies, not float "
+        "off against the panel")
+
+    # And it is visible without a pointer anywhere near it.
+    assert strip.isHidden() is False, (
+        "the copy button is hidden until hovered, so it pops up instead of "
+        "being simply there")
+
+
+def test_only_the_last_reply_of_a_run_carries_a_copy(window, qt_app) -> None:
+    """Three replies from one agent get one copy button, under the third.
+
+    Putting one under each would stack three identical buttons with nothing
+    between them, since a run is already presented as one block under a
+    single header.
+    """
+    window.navigate(win.PAGE_INDEX["conversations"])
+    window.agents = [{"id": "local-llama", "kind": "model", "online": True,
+                      "provider": "ollama", "model": "llama3"}]
+    window.selected = "local-llama"
+    window.chats = {"local-llama": {"messages": [
+        ("assistant", "first"), ("assistant", "second"), ("assistant", "third"),
+        ("user", "a question"), ("assistant", "a new run"),
+    ]}}
+    window.show()
+    window.render_messages()
+    qt_app.processEvents()
+
+    rows = window.messages_widget.findChildren(win.HoverRow)
+    carried = [index for index, row in enumerate(rows) if row.has_actions]
+    assert carried == [2, 4], (
+        f"expected a copy button on the last reply of each run, got rows "
+        f"{carried}")
 
 
 def test_a_copied_message_confirms_itself_briefly(window, qt_app) -> None:
@@ -708,7 +809,7 @@ def test_a_copied_message_confirms_itself_briefly(window, qt_app) -> None:
     assert win.TOAST_MS == 7500
 
     window.copy_message("a message")
-    assert window.toast.text() == "Copied", (
+    assert window.toast.text() == "Message Copied", (
         f"the copy toast says {window.toast.text()!r}")
 
     # It is gone a second later, while a failure is still up. ``isHidden`` is
