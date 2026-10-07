@@ -113,29 +113,30 @@ def test_the_shell_controls_explain_themselves(window) -> None:
 
 
 def test_a_conversation_offers_what_it_can_do_and_nothing_else(window) -> None:
-    """A conversation's actions are offered in the header and on right-click.
+    """What a conversation can be given, in the header and on right-click.
 
-    Both come from one list, so they cannot drift. What is in the list depends
-    on the conversation: a direct or saved one can be deleted outright, a
-    shared one cannot yet, because the relay is authoritative and a local
-    delete would be undone at the next poll while reading as though it worked.
+    Both come from one description, so they cannot drift. What is in it depends
+    on the conversation: a direct one can be deleted outright, and a shared one
+    follows the workspace's rule -- whoever started it may end it for everyone,
+    and anyone else steps out of it.
     """
+    window.identity = "me"
     window.agents = [{"id": "local-llama", "kind": "model", "online": True,
                       "provider": "ollama", "model": "llama3"}]
 
-    def header():
-        return [window.chat_manage.itemAt(index).widget().text()
-                for index in range(window.chat_manage.count())]
+    def offered():
+        menu = window.build_conversation_menu(window.selected)
+        return [] if menu is None else [entry.text() for entry in menu.actions()]
 
     def tooltips():
-        return [window.chat_manage.itemAt(index).widget().toolTip()
-                for index in range(window.chat_manage.count())]
+        menu = window.build_conversation_menu(window.selected)
+        return [] if menu is None else [entry.toolTip() for entry in menu.actions()]
 
     window.chats = {"local-llama": {"messages": [("user", "hi")]}}
     window.selected = "local-llama"
     window.update_chat_controls()
-    assert header() == ["Clear messages", "Delete conversation"], (
-        f"a direct conversation offers {header()}")
+    assert offered() == ["Clear messages", "Delete conversation"], (
+        f"a direct conversation offers {offered()}")
     for tip in tooltips():
         assert tip, "a conversation action has no tooltip"
         assert tip not in ("Clear messages", "Delete conversation"), (
@@ -144,11 +145,10 @@ def test_a_conversation_offers_what_it_can_do_and_nothing_else(window) -> None:
     # Nothing to clear, so nothing offered to clear.
     window.chats["local-llama"]["messages"] = []
     window.update_chat_controls()
-    assert header() == ["Delete conversation"], (
-        f"an empty conversation still offers to clear it: {header()}")
+    assert offered() == ["Delete conversation"], (
+        f"an empty conversation still offers to clear it: {offered()}")
 
-    # A shared conversation follows the workspace's own rule: whoever started
-    # it may end it, and anyone else steps out of it.
+    # A shared conversation follows the workspace's own rule.
     room = {"id": "conversation-abc", "title": "Chat with llama3", "target": "local-llama",
             "owner": window.identity, "members": [window.identity, "guest"],
             "messages": [], "revision": 3, "pending": False}
@@ -156,25 +156,29 @@ def test_a_conversation_offers_what_it_can_do_and_nothing_else(window) -> None:
     window.chats["conversation-abc"] = {"messages": [("user", "hi")], "revision": 3}
     window.selected = "conversation-abc"
     window.update_chat_controls()
-    assert header() == ["Clear messages", "Delete for everyone"], (
-        f"the host of a shared conversation is offered {header()}")
+    assert offered() == ["Clear messages", "Delete for everyone"], (
+        f"the host of a shared conversation is offered {offered()}")
     assert "every device" in tooltips()[1], (
         f"deleting for everyone should say who it is for: {tooltips()[1]!r}")
 
     room["owner"] = "somebody-else"
     window.update_chat_controls()
-    assert header() == ["Clear messages", "Leave conversation"], (
-        f"a member of a shared conversation is offered {header()}, but the "
+    assert offered() == ["Clear messages", "Leave conversation"], (
+        f"a member of a shared conversation is offered {offered()}, but the "
         "conversation is not theirs to end")
     assert "for the others" in tooltips()[1], (
         f"leaving should say what is kept: {tooltips()[1]!r}")
 
-    # The right-click menu is built from the same list.
+    # The header's one button opens the same menu a right-click gives.
     assert [text for text, _, _ in
             window.conversation_actions("conversation-abc")] == [
                 "Clear messages", "Leave conversation"]
     assert window.conversation_actions(None) == [], (
         "with no conversation open there is nothing to clear or delete")
+    window.selected = None
+    window.update_chat_controls()
+    assert window.build_conversation_menu(None) is None, (
+        "a menu was built with no conversation open")
 
 
 def test_clearing_a_conversation_keeps_the_thread_and_drops_the_messages(
@@ -278,57 +282,138 @@ def test_a_conversation_that_disappears_elsewhere_is_forgotten_here(window) -> N
         "a room disappearing took a direct conversation with it")
 
 
-def test_a_conversation_action_survives_the_polling(window, qt_app, monkeypatch) -> None:
-    """The header's buttons must still be the same widgets three seconds later.
+def test_the_chat_page_does_not_overflow(window, qt_app) -> None:
+    """Nothing in the chat page may be laid out past the edge of the window.
 
-    The runtime polls the agents list every three seconds, and each poll used to
-    rebuild these buttons from scratch. A click whose mouse-up landed after a
-    rebuild was delivered to a widget that had already been thrown away, so
-    both buttons looked dead and worked only when the timing happened to fall
-    right. They are now held and only their enabled state changes.
-
-    Clicking through several polls is the point: the earlier version passed a
-    test that clicked straight after building them.
+    A control in an overflowing layout is the worst kind of invisible: it is
+    drawn, hit-testing reaches it, and it looks exactly where it is supposed
+    to. Two things caused it. The composer's hint was an unwrapped label, so
+    its whole line was a hard minimum width, which made the composer's minimum
+    the chat panel's minimum at 1111px inside a panel of 1020 -- and the header
+    row, laid out at that wider figure, put everything after its stretch past
+    the right edge of the window. Separately, the conversation actions were two
+    text buttons needing 485px in a row that had 918px of other things in it.
     """
     window.identity = "me"
     window.agents = [{"id": "local-llama", "kind": "model", "online": True,
                       "provider": "ollama", "model": "llama3"}]
     window.selected = "local-llama"
     window.chats = {"local-llama": {"messages": [("user", "hi"), ("assistant", "hello")]}}
+    window.navigate(win.CONVERSATIONS_PAGE)
+    window.show()
+    window.resize(1330, 910)
     window.render_agents()
+    qt_app.processEvents()
 
-    def buttons():
-        return [window.chat_manage.itemAt(index).widget()
-                for index in range(window.chat_manage.count())]
+    panel = window.stack.currentWidget().layout().itemAt(1).widget()
+    assert panel.minimumSizeHint().width() <= panel.width(), (
+        f"the chat panel wants {panel.minimumSizeHint().width()}px but only has "
+        f"{panel.width()}px, so its header is laid out wider than the panel")
+
+    # Every control in the header has to be inside the window, not merely drawn.
+    for name, control in (("agent count", window.chat_agent_count),
+                          ("invite", window.share_conversation_button),
+                          ("manage", window.manage_button)):
+        centre = control.mapTo(window, control.rect().center())
+        assert 0 <= centre.x() < window.width(), (
+            f"the {name} control is at x={centre.x()} in a window "
+            f"{window.width()}px wide, so it cannot be clicked")
+        assert isinstance(window.childAt(centre), type(control)), (
+            f"the {name} control is not what a click at that point would reach")
+
+
+def test_the_conversation_header_is_a_surface_of_its_own(window, qt_app) -> None:
+    """The heading reads as a heading, and not as the first lines of the chat.
+
+    It sat on the chat's own background with nothing between them, while the
+    composer below had a hairline to mark it off. The header is now a framed
+    surface with an edge under it, in every theme.
+    """
+    window.selected = "local-llama"
+    window.agents = [{"id": "local-llama", "kind": "model", "online": True,
+                      "provider": "ollama", "model": "llama3"}]
+    window.chats = {"local-llama": {"messages": [("user", "hi")]}}
+    window.navigate(win.CONVERSATIONS_PAGE)
+    window.show()
+    window.render_messages()
+    qt_app.processEvents()
+
+    assert window.chat_header.objectName() == "chatHeader"
+    for name, sheet in THEMES.items():
+        rule = next((line for line in sheet.splitlines() if "#chatHeader" in line), "")
+        assert rule, f"{name} has no rule for #chatHeader"
+        assert "border-bottom" in rule, (
+            f"{name} gives the chat header no edge, so it does not read as "
+            f"separate from the chat: {rule}")
+
+    # And it is above the messages rather than inside them.
+    assert window.chat_header.y() + window.chat_header.height() \
+        <= window.messages_scroll.y(), (
+            "the chat header overlaps the messages, so the heading and the "
+            "conversation are on top of each other")
+
+
+def test_a_conversation_action_survives_the_polling(window, qt_app, monkeypatch) -> None:
+    """The header's conversation button must still work three seconds later.
+
+    The runtime polls the agents list every three seconds, and this button used
+    to be two, rebuilt from scratch on each poll. A click whose mouse-up landed
+    after a rebuild was delivered to a widget that had already been thrown
+    away, so the buttons looked dead and worked only when the timing happened to
+    fall right. It is now one button, held, offering a menu of the same actions
+    a right-click gives.
+
+    Going through the polls first is the part that matters: an earlier test
+    clicked straight after building the buttons and passed against the broken
+    version.
+    """
+    window.identity = "me"
+    window.agents = [{"id": "local-llama", "kind": "model", "online": True,
+                      "provider": "ollama", "model": "llama3"}]
+    window.selected = "local-llama"
+    window.chats = {"local-llama": {"messages": [("user", "hi"), ("assistant", "hello")]}}
+    window.navigate(win.CONVERSATIONS_PAGE)
+    window.show()
+    window.render_agents()
 
     def poll():
         window.network_event("agents", {"agents": window.agents, "connected": True})
 
-    before = buttons()
+    before = window.manage_button
     for _ in range(5):
         poll()
-    assert buttons() == before, (
-        "the agents poll replaced the conversation buttons, so a click can be "
+    assert window.manage_button is before, (
+        "the agents poll replaced the conversation button, so a click can be "
         "delivered to a widget that no longer exists")
+    assert window.manage_button.isEnabled(), (
+        "the conversation button is disabled while there are messages to clear")
 
-    # And they still act on the conversation they were built for.
+    # And the menu it opens really does the work.
     monkeypatch.setattr(win.QMessageBox, "question",
                         lambda *args, **kwargs: win.QMessageBox.StandardButton.Yes)
-    for _ in range(5):
-        poll()
-    [button for button in buttons() if button.text() == "Clear messages"][0].click()
+    menu = window.build_conversation_menu(window.selected)
+    assert [entry.text() for entry in menu.actions()] == [
+        "Clear messages", "Delete conversation"]
+    [entry for entry in menu.actions() if entry.text() == "Clear messages"][0].trigger()
     assert window.chats["local-llama"]["messages"] == [], (
-        "Clear messages did nothing when clicked after a poll")
+        "Clear messages did nothing")
 
     window.chats["local-llama"]["messages"] = [("user", "again")]
     window.render_agents()
     for _ in range(5):
         poll()
-    [button for button in buttons() if button.text().startswith("Delete")][0].click()
+    menu = window.build_conversation_menu(window.selected)
+    [entry for entry in menu.actions()
+     if entry.text().startswith("Delete")][0].trigger()
     assert "local-llama" not in window.chats, (
-        "Delete conversation did nothing when clicked after a poll")
+        "Delete conversation did nothing when used after a poll")
     assert window.selected is None, (
         "the deleted conversation is still selected")
+
+    # With nothing left there is nothing to offer, so the button says so.
+    window.update_chat_controls()
+    assert window.manage_button.isEnabled() is False, (
+        "the conversation button is still offered with no conversation open")
 
 
 def test_the_rows_built_on_demand_explain_themselves(window) -> None:

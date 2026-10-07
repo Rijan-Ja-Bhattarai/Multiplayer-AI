@@ -7,8 +7,8 @@ import sys
 from pathlib import Path
 from datetime import datetime
 
-from PySide6.QtCore import (QEasingCurve, QEvent, QPropertyAnimation, QSize, Qt,
-                            QTimer, QUrl, Slot)
+from PySide6.QtCore import (QEasingCurve, QEvent, QPoint, QPropertyAnimation, QSize,
+                            Qt, QTimer, QUrl, Slot)
 from PySide6.QtGui import (QGuiApplication, QIcon, QKeySequence, QPixmap, QPainter,
                            QColor, QDesktopServices, QFont, QPalette, QShortcut)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QFileDialog,
@@ -202,10 +202,6 @@ class MainWindow(QMainWindow):
         # While a shared conversation is being ended at the relay, so its
         # actions cannot be fired twice from two places at once.
         self.chat_busy = False
-        # The header's conversation buttons, and what they were last built for.
-        # Kept so the three-second poll cannot replace them mid-click.
-        self.chat_manage_buttons = []
-        self.chat_manage_signature = None
         self.toast_error = False
         self.request_count = 0
         self.ready = False
@@ -780,11 +776,21 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.chat_agents)
         panel = QWidget()
         column = QVBoxLayout(panel)
-        column.setContentsMargins(22, 22, 22, 20)
+        column.setContentsMargins(0, 0, 0, 0)
+        # The header gets a surface of its own, with a hairline under it, so
+        # which conversation this is and who is in it read as a heading to the
+        # conversation rather than as the first two lines of it. It sat directly
+        # on the chat's background with nothing between them, and the composer's
+        # hairline at the bottom made the middle the odd one out: the only part
+        # of the page with no edge to it.
+        self.chat_header, header = frame("chatHeader")
+        header.setContentsMargins(22, 18, 22, 12)
+        header.setSpacing(4)
+        column.addWidget(self.chat_header)
         self.chat_title = label("Choose an agent", "heading")
-        column.addWidget(self.chat_title)
+        header.addWidget(self.chat_title)
         self.chat_subtitle = label("Start a conversation with a connected device.", "muted")
-        column.addWidget(self.chat_subtitle)
+        header.addWidget(self.chat_subtitle)
         self.share_conversation_button = action("Invite to conversation", self.invite_conversation)
         self.share_conversation_button.setToolTip(
             "Invite another device into this conversation")
@@ -795,19 +801,26 @@ class MainWindow(QMainWindow):
         chat_actions.addWidget(self.chat_agent_count)
         chat_actions.addWidget(self.share_conversation_button)
         chat_actions.addStretch()
-        # Manage the conversation itself. Filled in by update_chat_controls,
-        # because what can be done to a conversation depends on what kind it is.
-        # An empty layout takes no width, so there is nothing to hide when there
-        # is no action on offer.
-        self.chat_manage = QHBoxLayout()
-        self.chat_manage.setSpacing(8)
-        chat_actions.addLayout(self.chat_manage)
-        column.addLayout(chat_actions)
+        # Managing the conversation is one button that opens the same menu a
+        # right-click gives, rather than a button per action. Two text buttons
+        # needed about 485px between them, the panel is 1020px wide, and the
+        # rest of this row already wanted 918: the row overflowed and Qt laid
+        # the buttons out past the edge of the window, where they looked fine
+        # and could not be clicked. A menu also has room to spell the actions
+        # out, and it is where the context menu already put them.
+        self.manage_button = action("Manage", self.show_manage_menu, name="ghost")
+        self.manage_button.setToolTip(
+            "Clear or delete this conversation, and what else it can be given")
+        chat_actions.addWidget(self.manage_button)
+        header.addLayout(chat_actions)
         self.messages_scroll = QScrollArea()
         self.messages_scroll.setWidgetResizable(True)
         self.messages_widget = QWidget()
         self.messages = QVBoxLayout(self.messages_widget)
-        self.messages.setContentsMargins(0, 16, 5, 16)
+        # Inset here rather than on the column, because the column no longer has
+        # margins of its own: the header needs to reach the panel's edges for
+        # its own surface and hairline to read as an edge.
+        self.messages.setContentsMargins(22, 16, 17, 16)
         self.messages.setSpacing(16)
         self.messages.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.messages_scroll.setWidget(self.messages_widget)
@@ -827,7 +840,7 @@ class MainWindow(QMainWindow):
         # move; what it lacked was any sign that it was a different surface
         # from the messages above it. A hairline is what says that.
         self.composer_bar, composer_column = frame("composerBar")
-        composer_column.setContentsMargins(0, 12, 0, 14)
+        composer_column.setContentsMargins(22, 12, 22, 14)
         composer_column.setSpacing(8)
         composer_column.addLayout(self.attachment_rows)
         composer_column.addWidget(self.composer)
@@ -838,7 +851,17 @@ class MainWindow(QMainWindow):
         self.attach_button.setToolTip(
             "Attach images or PDFs. An image is only read by an agent with vision enabled.")
         footer.addWidget(self.attach_button)
-        footer.addWidget(label("Enter to send · Shift + Enter for a new line", "muted"))
+        # This hint used to be a plain unwrapped label, so its whole line was a
+        # hard minimum width for the composer, and the composer's minimum was
+        # the chat panel's minimum: 1111px inside a panel that is 1020px. The
+        # panel then laid its header out at the wider figure, which put anything
+        # after the header's stretch past the right edge of the window, where
+        # the conversation buttons sat visible and unclickable. Wrapping lets it
+        # shrink to its longest word instead of to its whole sentence.
+        self.composer_hint = label("Enter to send · Shift + Enter for a new line", "muted", True)
+        self.composer_hint.setWordWrap(True)
+        self.composer_hint.setMinimumWidth(120)
+        footer.addWidget(self.composer_hint)
         footer.addStretch()
         self.send_button = action("Send request  ↑", self.send_message, True)
         self.send_button.setToolTip("Send this message to the selected agent")
@@ -1609,8 +1632,33 @@ class MainWindow(QMainWindow):
                         else "You have left the conversation.")
         self.command(method, target, success=done, failure=failed)
 
+    def build_conversation_menu(self, target):
+        """A menu of what can be done to a conversation, or None if nothing can.
+
+        Built from the same description the header and the right-click both use,
+        so there is one answer to what a conversation can be given and it is the
+        same in every place it is offered.
+        """
+        entries = self.conversation_actions(target)
+        if not entries:
+            return None
+        menu = QMenu(self)
+        for text, tip, callback in entries:
+            entry = menu.addAction(text)
+            entry.setToolTip(tip)
+            entry.setEnabled(not self.chat_busy)
+            entry.triggered.connect(lambda checked=False, run=callback: run())
+        return menu
+
+    def show_manage_menu(self):
+        """Open the conversation menu from the header, under the button."""
+        menu = self.build_conversation_menu(self.selected)
+        if menu:
+            menu.exec(self.manage_button.mapToGlobal(
+                QPoint(0, self.manage_button.height())))
+
     def show_conversation_menu(self, point):
-        """Right-click a conversation for the same actions the header offers.
+        """Right-click a conversation for the same menu the header offers.
 
         On whichever list was clicked, so the sidebar and the conversation list
         behave as one. A click on empty space below the rows is not a
@@ -1623,15 +1671,9 @@ class MainWindow(QMainWindow):
         item = listing.itemAt(point)
         if item is None:
             return
-        entries = self.conversation_actions(item.data(Qt.ItemDataRole.UserRole))
-        if not entries:
-            return
-        menu = QMenu(self)
-        for text, tip, callback in entries:
-            entry = menu.addAction(text)
-            entry.setToolTip(tip)
-            entry.triggered.connect(lambda checked=False, run=callback: run())
-        menu.exec(listing.viewport().mapToGlobal(point))
+        menu = self.build_conversation_menu(item.data(Qt.ItemDataRole.UserRole))
+        if menu:
+            menu.exec(listing.viewport().mapToGlobal(point))
 
     def update_chat_controls(self):
         room = self.conversations.get(self.selected)
@@ -1649,27 +1691,17 @@ class MainWindow(QMainWindow):
         subtitle = "Your agent is working…" if pending else "Online · Ready to collaborate" if agent and agent["online"] else "Start this agent on its device to continue" if agent else "Choose a connected agent to begin"
         self.chat_subtitle.setText((f"Shared with {len(room['members'])} devices · " if room else "") + subtitle)
         self.share_conversation_button.setEnabled(bool(self.ready and not self.remote and agent and agent["online"] and not pending))
-        # Rebuilt only when the set of actions actually changes. This runs on
-        # every agents poll, three seconds apart, and clearing the layout threw
-        # the buttons away and made new ones each time: a click whose mouse-up
-        # landed after a swap was delivered to a widget that no longer existed,
-        # so the buttons appeared dead and worked only if you were lucky with
-        # the timing. Held as widgets so they stay the same objects between
-        # polls, and only their enabled state is touched.
-        actions = self.conversation_actions(self.selected)
-        signature = (self.selected, tuple(text for text, _, _ in actions))
-        if signature != self.chat_manage_signature:
-            clear_layout(self.chat_manage)
-            self.chat_manage_buttons = []
-            for text, tip, callback in actions:
-                control = action(text, lambda checked=False, run=callback: run(),
-                                 name="danger" if text.startswith("Delete") else "ghost")
-                control.setToolTip(tip)
-                self.chat_manage.addWidget(control)
-                self.chat_manage_buttons.append(control)
-            self.chat_manage_signature = signature
-        for control in self.chat_manage_buttons:
-            control.setEnabled(not self.chat_busy)
+        # The header's one conversation button is always the same widget. It
+        # used to be two, rebuilt from scratch on every agents poll, and the
+        # poll threw them away mid-click; and then two text buttons overflowed
+        # the panel and were laid out past the edge of the window, where they
+        # could not be clicked at all. It is held and only enabled or disabled.
+        entries = self.conversation_actions(self.selected)
+        self.manage_button.setEnabled(bool(entries) and not self.chat_busy)
+        self.manage_button.setToolTip(
+            f"Clear or delete this conversation: {len(entries)} "
+            + ("action on offer" if len(entries) == 1 else "actions on offer")
+            if entries else "There is nothing to do to this conversation yet")
 
     def select_agent(self, agent_id):
         self.selected = agent_id

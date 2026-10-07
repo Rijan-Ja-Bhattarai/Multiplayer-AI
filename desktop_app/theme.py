@@ -516,6 +516,7 @@ QLabel { background: transparent; }
     QWidget#messageRow:hover { background: @@surface_row_hover@@; }
     QWidget#messageActions { background: transparent; }
     QFrame#composerBar { background: @@surface_base@@; border: none; border-top: 1px solid @@border@@; }
+    QFrame#chatHeader { background: @@surface_base@@; border: none; border-bottom: 1px solid @@border@@; }
 QLabel#title { font-size: 31px; font-weight: 700; color: @@text_strong@@; }
 QLabel#heroTitle { font-size: 34px; font-weight: 700; color: @@text_hero@@; }
 QLabel#heading { font-size: 19px; font-weight: 650; color: @@text_strong@@; }
