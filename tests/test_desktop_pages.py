@@ -27,6 +27,7 @@ from PySide6.QtGui import QPalette, QShortcut, QWheelEvent  # noqa: E402
 from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog, QFrame,  # noqa: E402
                              QLabel, QMessageBox, QPushButton)
 from PySide6.QtCore import QAbstractAnimation  # noqa: E402
+from PySide6.QtTest import QTest  # noqa: E402
 
 from desktop_app import window as win  # noqa: E402
 from desktop_app.storage import ABSENT, REMOVED, Storage  # noqa: E402
@@ -656,6 +657,70 @@ def test_the_action_slot_keeps_its_place_when_revealed(window, qt_app) -> None:
     for row in rows:
         row.reveal_actions(False)
     assert not any(r.actions_revealed for r in rows), "hiding did not take"
+
+
+def test_the_copy_action_sits_beside_the_speaker_it_copies(window, qt_app) -> None:
+    """Each row's actions belong at that speaker's end of the row.
+
+    The slot was laid out last on every row, so an agent's actions turned up
+    on the far right, directly beside the reader's own mark, and read as though
+    the reader could copy the reply. Yours is right, since your mark is.
+    """
+    conversation_window(window)
+    window.show()
+    for row in window.messages_widget.findChildren(win.HoverRow):
+        row.reveal_actions(True)
+    qt_app.processEvents()
+
+    rows = window.messages_widget.findChildren(win.HoverRow)
+    assert rows
+    for row in rows:
+        # A row whose leading slot is a widget is an agent's: yours opens with
+        # a stretch and puts your mark on the right instead. Addressed by
+        # slot rather than by looking for an avatar, because a grouped
+        # follow-on message has a plain spacer where the mark would be.
+        mine = row.content.itemAt(0).widget() is None
+        actions = row._actions
+        mark = (row.content.itemAt(2) if mine else row.content.itemAt(0)).widget()
+        mark_x = mark.mapTo(row, mark.rect().topLeft()).x()
+        if mine:
+            assert actions.x() >= mark_x, (
+                f"your own actions belong outboard of your mark, not between "
+                f"it and the message (mark at {mark_x}, actions at "
+                f"{actions.x()})")
+        else:
+            assert actions.x() + actions.width() <= mark_x, (
+                f"an agent's actions should lead the row, beside its mark: "
+                f"mark at {mark_x}, actions end at "
+                f"{actions.x() + actions.width()}")
+            assert actions.x() == 0, (
+                f"an agent's actions should be at the leading edge, not at "
+                f"x={actions.x()}")
+
+
+def test_a_copied_message_confirms_itself_briefly(window, qt_app) -> None:
+    """A copy toast goes in a second, not the seven and a half for a failure.
+
+    Nothing has to be read or acted on: the user just watched the copy happen.
+    The copy text is a word, and the failure toast keeps its own duration.
+    """
+    assert win.COPY_TOAST_MS == 1000
+    assert win.TOAST_MS == 7500
+
+    window.copy_message("a message")
+    assert window.toast.text() == "Copied", (
+        f"the copy toast says {window.toast.text()!r}")
+
+    # It is gone a second later, while a failure is still up. ``isHidden`` is
+    # the toast's own state: the fixture's window is never shown, so
+    # ``isVisible`` would report False for both of them and prove nothing.
+    QTest.qWait(1100)
+    assert window.toast.isHidden() is True, "the copy toast was still up"
+
+    window.notice("Could not save credentials.", error=True)
+    QTest.qWait(1100)
+    assert window.toast.isHidden() is False, (
+        "a failure has to outlive a copy: it is the one worth reading")
 
 
 def test_the_composer_is_set_apart_from_the_messages(window, qt_app) -> None:

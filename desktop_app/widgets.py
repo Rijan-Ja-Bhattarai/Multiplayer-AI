@@ -393,9 +393,15 @@ class HoverRow(QWidget):
     pointer passes over it. The row itself is one widget rather than a
     layout, because ``:hover`` in a stylesheet matches widgets, and a bare
     layout has nothing to match on.
+
+    ``leading_actions`` puts the slot at the start of the row rather than the
+    end, which is what puts it beside the speaker's mark. It defaulted to the
+    end for every row, so an agent's actions turned up on the far side of the
+    panel from that agent's avatar, directly beside the reader's own mark
+    instead, and looked as though the reader could copy the reply.
     """
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, leading_actions=False):
         super().__init__(parent)
         self.setObjectName("messageRow")
         self.outer = QHBoxLayout(self)
@@ -403,13 +409,22 @@ class HoverRow(QWidget):
         self.outer.setSpacing(0)
         self.content = QHBoxLayout()
         self.content.setSpacing(12)
-        self.outer.addLayout(self.content, 1)
         self._actions = QWidget()
         self._actions.setObjectName("messageActions")
         self._actions_layout = QHBoxLayout(self._actions)
-        self._actions_layout.setContentsMargins(8, 0, 0, 0)
+        # Mirrored with the row it leads, so the actions sit against the same
+        # edge as the content rather than being pushed away from it.
+        self._actions_layout.setContentsMargins(0, 0, 8, 0) if leading_actions \
+            else self._actions_layout.setContentsMargins(8, 0, 0, 0)
         self._actions_layout.setSpacing(4)
-        self.outer.addWidget(self._actions, 0, Qt.AlignmentFlag.AlignTop)
+        if leading_actions:
+            # Inserted first, so it is laid out ahead of the content rather
+            # than trailing it.
+            self.outer.addWidget(self._actions, 0, Qt.AlignmentFlag.AlignTop)
+            self.outer.addLayout(self.content, 1)
+        else:
+            self.outer.addLayout(self.content, 1)
+            self.outer.addWidget(self._actions, 0, Qt.AlignmentFlag.AlignTop)
         self._actions.setVisible(False)
         self._revealed = False
 

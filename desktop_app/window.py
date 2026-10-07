@@ -100,6 +100,10 @@ OVERVIEW_PAGE = PAGE_INDEX["overview"]
 # The mark beside a message, and the width a grouped message is indented by
 # when it follows its own speaker's earlier message.
 SPEAKER_AVATAR = 34
+# How long a toast stays up. Long, because a failure has to be read and acted
+# on; a copy has already happened by the time it appears.
+TOAST_MS = 7500
+COPY_TOAST_MS = 1000
 
 
 def app_icon(theme_name=DARK):
@@ -1512,10 +1516,12 @@ class MainWindow(QMainWindow):
         """Put a message on the clipboard.
 
         Says so afterwards, because nothing on screen changes when a copy
-        succeeds and silence would leave the button looking inert.
+        succeeds and silence would leave the button looking inert. It is gone
+        in a second: this confirms something the user just watched happen,
+        rather than telling them something they have to act on.
         """
         QApplication.clipboard().setText(text)
-        self.notice("Message copied.")
+        self.notice("Copied", duration=COPY_TOAST_MS)
 
     def speaker_identity(self, role, room=None):
         """Who is speaking, as ``(name, subtitle, provider, kind)``.
@@ -1693,7 +1699,10 @@ class MainWindow(QMainWindow):
             identity = (name, subtitle, provider, kind)
             grouped = identity == previous
             mine = kind == "user"
-            row = HoverRow()
+            # The actions belong beside the speaker they act on. An agent's
+            # mark is on the left and the reader's on the right, so the slot
+            # leads for anything but the reader's own message.
+            row = HoverRow(leading_actions=not mine)
             mark = None
             if grouped:
                 # Hold the place the mark would take, so a follow-on message
@@ -1913,11 +1922,19 @@ class MainWindow(QMainWindow):
         while self.activity_list.count() > 8:
             self.activity_list.takeItem(self.activity_list.count() - 1)
 
-    def notice(self, message, error=False):
+    def notice(self, message, error=False, duration=None):
+        """Show the toast, then take it away again.
+
+        ``duration`` is how long it stays. It defaults to 7.5s because a
+        failure has to be read and acted on, but a copy has already happened:
+        it is only confirming something the user just watched succeed, so it
+        gets a second and gone. Long enough to notice, short enough not to be
+        left sitting across the chat.
+        """
         self.style_toast(error)
         self.toast.setText(message)
         self.toast.show()
-        QTimer.singleShot(7500, self.toast.hide)
+        QTimer.singleShot(TOAST_MS if duration is None else duration, self.toast.hide)
 
     def command(self, method, *args, success=None, failure=None):
         if not self.ready and method != "close":
