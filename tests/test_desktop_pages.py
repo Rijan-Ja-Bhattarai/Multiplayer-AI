@@ -23,15 +23,19 @@ pytest.importorskip("PySide6", reason="PySide6 is needed for the desktop page te
 pytest.importorskip("psutil", reason="psutil backs the Resources page")
 
 from PySide6.QtCore import QEasingCurve, QPoint, QPointF, Qt, QTimer  # noqa: E402
-from PySide6.QtGui import QShortcut, QWheelEvent  # noqa: E402
+from PySide6.QtGui import QPalette, QShortcut, QWheelEvent  # noqa: E402
 from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog, QFrame,  # noqa: E402
-                             QLabel, QMessageBox, QPushButton)
+                             QLabel, QMessageBox, QPushButton, QWidget)
 from PySide6.QtCore import QAbstractAnimation  # noqa: E402
+from PySide6.QtCore import QEvent, QSize  # noqa: E402
+from PySide6.QtGui import QResizeEvent  # noqa: E402
+from PySide6.QtTest import QTest  # noqa: E402
 
+from desktop_app.markdown import MarkdownMessage  # noqa: E402
 from desktop_app import window as win  # noqa: E402
 from desktop_app.storage import ABSENT, REMOVED, Storage  # noqa: E402
 from desktop_app.theme import (DARK, LIGHT, MIKU, THEME_CHOICES, THEME_NAMES,
-                             THEMES, color, stylesheet)  # noqa: E402
+                             THEMES, color, contrast_ratio, stylesheet)  # noqa: E402
 
 
 class MemoryVault:
@@ -106,6 +110,402 @@ def test_the_shell_controls_explain_themselves(window) -> None:
         assert button.toolTip(), f"the {name} button has no tooltip"
         assert button.toolTip() != button.text().strip(), (
             f"the {name} tooltip only repeats its own label")
+
+
+def test_a_conversation_offers_what_it_can_do_and_nothing_else(window) -> None:
+    """What a conversation can be given, in the header and on right-click.
+
+    Both come from one description, so they cannot drift. What is in it depends
+    on the conversation: a direct one can be deleted outright, and a shared one
+    follows the workspace's rule -- whoever started it may end it for everyone,
+    and anyone else steps out of it.
+    """
+    window.identity = "me"
+    window.agents = [{"id": "local-llama", "kind": "model", "online": True,
+                      "provider": "ollama", "model": "llama3"}]
+
+    def offered():
+        menu = window.build_conversation_menu(window.selected)
+        return [] if menu is None else [entry.text() for entry in menu.actions()]
+
+    def tooltips():
+        menu = window.build_conversation_menu(window.selected)
+        return [] if menu is None else [entry.toolTip() for entry in menu.actions()]
+
+    window.chats = {"local-llama": {"messages": [("user", "hi")]}}
+    window.selected = "local-llama"
+    window.update_chat_controls()
+    assert offered() == ["Clear messages", "Delete conversation"], (
+        f"a direct conversation offers {offered()}")
+    for tip in tooltips():
+        assert tip, "a conversation action has no tooltip"
+        assert tip not in ("Clear messages", "Delete conversation"), (
+            f"the tooltip only repeats its own label: {tip!r}")
+
+    # Nothing to clear, so nothing offered to clear.
+    window.chats["local-llama"]["messages"] = []
+    window.update_chat_controls()
+    assert offered() == ["Delete conversation"], (
+        f"an empty conversation still offers to clear it: {offered()}")
+
+    # A shared conversation follows the workspace's own rule.
+    room = {"id": "conversation-abc", "title": "Chat with llama3", "target": "local-llama",
+            "owner": window.identity, "members": [window.identity, "guest"],
+            "messages": [], "revision": 3, "pending": False}
+    window.conversations = {"conversation-abc": room}
+    window.chats["conversation-abc"] = {"messages": [("user", "hi")], "revision": 3}
+    window.selected = "conversation-abc"
+    window.update_chat_controls()
+    assert offered() == ["Clear messages", "Delete for everyone"], (
+        f"the host of a shared conversation is offered {offered()}")
+    assert "every device" in tooltips()[1], (
+        f"deleting for everyone should say who it is for: {tooltips()[1]!r}")
+
+    room["owner"] = "somebody-else"
+    window.update_chat_controls()
+    assert offered() == ["Clear messages", "Leave conversation"], (
+        f"a member of a shared conversation is offered {offered()}, but the "
+        "conversation is not theirs to end")
+    assert "for the others" in tooltips()[1], (
+        f"leaving should say what is kept: {tooltips()[1]!r}")
+
+    # The header's one button opens the same menu a right-click gives.
+    assert [text for text, _, _ in
+            window.conversation_actions("conversation-abc")] == [
+                "Clear messages", "Leave conversation"]
+    assert window.conversation_actions(None) == [], (
+        "with no conversation open there is nothing to clear or delete")
+    window.selected = None
+    window.update_chat_controls()
+    assert window.build_conversation_menu(None) is None, (
+        "a menu was built with no conversation open")
+
+
+def test_clearing_a_conversation_keeps_the_thread_and_drops_the_messages(
+        window, qt_app) -> None:
+    """Clear empties the messages; the conversation stays where it was.
+
+    For a shared conversation the revision is pinned to the room's, which is
+    what stops the next poll rebuilding the messages straight back from the
+    relay. Without it, clearing appears to do nothing at all.
+    """
+    room = {"id": "conversation-abc", "title": "Chat with llama3", "target": "llama3",
+            "owner": "owner", "members": ["owner", "guest"],
+            "messages": [{"id": "1", "role": "user", "content": "hello", "from": "owner"}],
+            "revision": 7, "pending": False}
+    window.conversations = {"conversation-abc": room}
+    window.chats = {"conversation-abc": {
+        "messages": [("user", "hello")], "revision": 7, "unread": 2}}
+    window.selected = "conversation-abc"
+    window.render_messages()
+
+    window.clear_conversation("conversation-abc")
+
+    assert window.chats["conversation-abc"]["messages"] == [], (
+        "clearing left the messages behind")
+    assert "conversation-abc" in window.conversations, (
+        "clearing removed the conversation instead of its messages")
+    assert window.chats["conversation-abc"]["revision"] == 7, (
+        "the revision was not pinned to the room's, so the next poll rebuilds "
+        "the messages and clearing looks like it did nothing")
+    assert window.chats["conversation-abc"]["unread"] == 0, (
+        "clearing left an unread count against a conversation with no messages")
+
+
+def test_deleting_a_conversation_removes_only_that_one(window, qt_app, monkeypatch) -> None:
+    """One conversation goes; every other keeps its messages.
+
+    Checked against the saved history as well as the window, because a delete
+    that only cleared the screen would come back on the next launch.
+    """
+    from network_a2a.persistence import HistoryStore
+
+    window.history_store = HistoryStore(window.storage.directory)
+    window.conversations = {"conversation-abc": {
+        "id": "conversation-abc", "title": "Room", "target": "llama3",
+        "owner": "owner", "members": ["owner", "guest"], "messages": [],
+        "revision": 1, "pending": False}}
+    window.chats = {"keep": {"messages": [("user", "keep me")], "history": []},
+                    "gone": {"messages": [("user", "delete me")], "history": []},
+                    "conversation-abc": {"messages": [("user", "room chat")], "revision": 1}}
+    window.selected = "gone"
+    window.history_store.save("rooms", "conversation-abc", window.conversations["conversation-abc"])
+    window.persist_history()
+
+    monkeypatch.setattr(win.QMessageBox, "question",
+                        lambda *args, **kwargs: int(win.QMessageBox.StandardButton.Yes))
+    window.delete_conversation("gone")
+
+    assert "gone" not in window.chats, "the deleted conversation is still open in memory"
+    assert "keep" in window.chats, "deleting one conversation took another with it"
+    assert window.chats["keep"]["messages"] == [("user", "keep me")], (
+        "another conversation's messages were changed")
+    assert "conversation-abc" in window.conversations, (
+        "deleting a direct conversation removed a shared one")
+    assert window.selected is None, (
+        "the deleted conversation was left selected, so the window still opens it")
+
+    saved = window.history_store.load("ui").get("state", {})
+    assert "gone" not in saved.get("chats", {}), "the delete was not saved"
+    assert saved.get("chats", {}).get("keep"), "saving the delete lost another conversation"
+    assert saved.get("selected") is None, "a deleted conversation stayed selected on disk"
+
+    # Deleting a shared room takes its record and its saved chat with it.
+    window.delete_conversation("conversation-abc")
+    assert "conversation-abc" not in window.conversations, "the room is still listed"
+    assert "conversation-abc" not in window.history_store.load("rooms"), (
+        "the room's saved record survived, so it would come back at the next poll")
+
+
+def test_a_conversation_that_disappears_elsewhere_is_forgotten_here(window) -> None:
+    """A room deleted on another device stops being a conversation here.
+
+    The poll only ever rebuilt the room list. It left the matching chat behind
+    and left ``selected`` pointing at it, so the conversation stayed in the
+    sidebar and stayed open after it had been deleted somewhere else.
+    """
+    window.chats = {"conversation-abc": {"messages": [("user", "hi")], "revision": 2},
+                    "direct-chat": {"messages": [("user", "a direct chat")], "revision": 1}}
+    window.conversations = {"conversation-abc": {
+        "id": "conversation-abc", "title": "Room", "target": "llama3",
+        "owner": "owner", "members": ["owner"], "messages": [], "revision": 2,
+        "pending": False}}
+    window.selected = "conversation-abc"
+
+    window.network_event("conversations", [])
+
+    assert "conversation-abc" not in window.chats, (
+        "the chat for a room that is gone was kept")
+    assert window.selected is None, (
+        "the window is still pointed at a conversation that no longer exists")
+    assert "direct-chat" in window.chats, (
+        "a room disappearing took a direct conversation with it")
+
+
+def test_the_chat_page_does_not_overflow(window, qt_app) -> None:
+    """Nothing in the chat page may be laid out past the edge of the window.
+
+    A control in an overflowing layout is the worst kind of invisible: it is
+    drawn, hit-testing reaches it, and it looks exactly where it is supposed
+    to. Two things caused it. The composer's hint was an unwrapped label, so
+    its whole line was a hard minimum width, which made the composer's minimum
+    the chat panel's minimum at 1111px inside a panel of 1020 -- and the header
+    row, laid out at that wider figure, put everything after its stretch past
+    the right edge of the window. Separately, the conversation actions were two
+    text buttons needing 485px in a row that had 918px of other things in it.
+    """
+    window.identity = "me"
+    window.agents = [{"id": "local-llama", "kind": "model", "online": True,
+                      "provider": "ollama", "model": "llama3"}]
+    window.selected = "local-llama"
+    window.chats = {"local-llama": {"messages": [("user", "hi"), ("assistant", "hello")]}}
+    window.navigate(win.CONVERSATIONS_PAGE)
+    window.show()
+    window.resize(1330, 910)
+    window.render_agents()
+    qt_app.processEvents()
+
+    panel = window.stack.currentWidget().layout().itemAt(1).widget()
+    assert panel.minimumSizeHint().width() <= panel.width(), (
+        f"the chat panel wants {panel.minimumSizeHint().width()}px but only has "
+        f"{panel.width()}px, so its header is laid out wider than the panel")
+
+    # Every control in the header has to be inside the window, not merely drawn.
+    for name, control in (("agent count", window.chat_agent_count),
+                          ("invite", window.share_conversation_button),
+                          ("manage", window.manage_button)):
+        centre = control.mapTo(window, control.rect().center())
+        assert 0 <= centre.x() < window.width(), (
+            f"the {name} control is at x={centre.x()} in a window "
+            f"{window.width()}px wide, so it cannot be clicked")
+        assert isinstance(window.childAt(centre), type(control)), (
+            f"the {name} control is not what a click at that point would reach")
+
+
+def test_the_conversation_header_is_a_surface_of_its_own(window, qt_app) -> None:
+    """The heading reads as a heading, and not as the first lines of the chat.
+
+    It sat on the chat's own background with nothing between them, while the
+    composer below had a hairline to mark it off. The header is now a framed
+    surface with an edge under it, in every theme.
+    """
+    window.selected = "local-llama"
+    window.agents = [{"id": "local-llama", "kind": "model", "online": True,
+                      "provider": "ollama", "model": "llama3"}]
+    window.chats = {"local-llama": {"messages": [("user", "hi")]}}
+    window.navigate(win.CONVERSATIONS_PAGE)
+    window.show()
+    window.render_messages()
+    qt_app.processEvents()
+
+    assert window.chat_header.objectName() == "chatHeader"
+    for name, sheet in THEMES.items():
+        rule = next((line for line in sheet.splitlines() if "#chatHeader" in line), "")
+        assert rule, f"{name} has no rule for #chatHeader"
+        assert "border-bottom" in rule, (
+            f"{name} gives the chat header no edge, so it does not read as "
+            f"separate from the chat: {rule}")
+
+    # And it is above the messages rather than inside them.
+    assert window.chat_header.y() + window.chat_header.height() \
+        <= window.messages_scroll.y(), (
+            "the chat header overlaps the messages, so the heading and the "
+            "conversation are on top of each other")
+
+
+def test_a_conversation_action_survives_the_polling(window, qt_app, monkeypatch) -> None:
+    """The header's conversation button must still work three seconds later.
+
+    The runtime polls the agents list every three seconds, and this button used
+    to be two, rebuilt from scratch on each poll. A click whose mouse-up landed
+    after a rebuild was delivered to a widget that had already been thrown
+    away, so the buttons looked dead and worked only when the timing happened to
+    fall right. It is now one button, held, offering a menu of the same actions
+    a right-click gives.
+
+    Going through the polls first is the part that matters: an earlier test
+    clicked straight after building the buttons and passed against the broken
+    version.
+    """
+    window.identity = "me"
+    window.agents = [{"id": "local-llama", "kind": "model", "online": True,
+                      "provider": "ollama", "model": "llama3"}]
+    window.selected = "local-llama"
+    window.chats = {"local-llama": {"messages": [("user", "hi"), ("assistant", "hello")]}}
+    window.navigate(win.CONVERSATIONS_PAGE)
+    window.show()
+    window.render_agents()
+
+    def poll():
+        window.network_event("agents", {"agents": window.agents, "connected": True})
+
+    before = window.manage_button
+    for _ in range(5):
+        poll()
+    assert window.manage_button is before, (
+        "the agents poll replaced the conversation button, so a click can be "
+        "delivered to a widget that no longer exists")
+    assert window.manage_button.isEnabled(), (
+        "the conversation button is disabled while there are messages to clear")
+
+    # And the menu it opens really does the work. The dialog is replaced with
+    # one that answers the way a real dialog answers: QMessageBox.question
+    # returns a plain int, not the StandardButton enum member. Returning the
+    # enum here instead is what let an identity test pass against code that
+    # could never work.
+    monkeypatch.setattr(win.QMessageBox, "question",
+                        lambda *args, **kwargs: int(win.QMessageBox.StandardButton.Yes))
+    menu = window.build_conversation_menu(window.selected)
+    assert [entry.text() for entry in menu.actions()] == [
+        "Clear messages", "Delete conversation"]
+    [entry for entry in menu.actions() if entry.text() == "Clear messages"][0].trigger()
+    assert window.chats["local-llama"]["messages"] == [], (
+        "Clear messages did nothing")
+
+    window.chats["local-llama"]["messages"] = [("user", "again")]
+    window.render_agents()
+    for _ in range(5):
+        poll()
+    menu = window.build_conversation_menu(window.selected)
+    [entry for entry in menu.actions()
+     if entry.text().startswith("Delete")][0].trigger()
+    assert "local-llama" not in window.chats, (
+        "Delete conversation did nothing when used after a poll")
+    assert window.selected is None, (
+        "the deleted conversation is still selected")
+
+    # With nothing left there is nothing to offer, so the button says so.
+    window.update_chat_controls()
+    assert window.manage_button.isEnabled() is False, (
+        "the conversation button is still offered with no conversation open")
+
+
+def test_answering_yes_really_does_the_thing(window, qt_app) -> None:
+    """A confirmation that returns Yes must not quietly do nothing.
+
+    This is why clear and delete appeared broken for so long. The comparison
+    was ``is not QMessageBox.StandardButton.Yes``, and a dialog returns a plain
+    ``int`` -- 16384 -- while that constant is a Shiboken flag enum. The two are
+    equal by value and are never the same object, so the test for "did they say
+    no" was always true and the function returned before doing anything. The
+    dialog opened, the answer was given, and nothing happened, every time.
+
+    Every test of it had passed because they replaced the dialog with one
+    returning the very enum member being compared against. This one answers the
+    way a real dialog answers.
+    """
+    window.identity = "me"
+    window.agents = [{"id": "local-llama", "kind": "model", "online": True,
+                      "provider": "ollama", "model": "llama3"}]
+    window.selected = "local-llama"
+    window.chats = {"local-llama": {"messages": [("user", "hello world")]}}
+    window.navigate(win.CONVERSATIONS_PAGE)
+    window.show()
+    window.render_messages()
+
+    assert window.answered_yes(int(win.QMessageBox.StandardButton.Yes)) is True, (
+        "a dialog answering with the plain int Qt returns is being read as No, "
+        "so every confirmation is a no-op")
+    assert window.answered_yes(int(win.QMessageBox.StandardButton.Cancel)) is False, (
+        "a dialog answering Cancel is being read as Yes")
+    assert isinstance(int(win.QMessageBox.StandardButton.Yes), int), (
+        "Qt no longer returns a plain int; this guard and its tests need "
+        "revisiting")
+
+    # The whole path, with the dialog answering the way a real one does.
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(win.QMessageBox, "question",
+                   lambda *args, **kwargs: int(win.QMessageBox.StandardButton.Yes))
+    try:
+        window.clear_conversation_confirm("local-llama")
+        assert window.chats["local-llama"]["messages"] == [], (
+            "answering Yes did not clear the messages")
+
+        window.chats["local-llama"]["messages"] = [("user", "hello world")]
+        window.render_messages()
+        window.delete_conversation("local-llama")
+        assert "local-llama" not in window.chats, (
+            "answering Yes did not delete the conversation")
+    finally:
+        monkey.undo()
+
+
+def test_the_confirmation_says_the_row_will_stay(window, qt_app, monkeypatch) -> None:
+    """A successful delete must not read as a failed one.
+
+    A row is rebuilt from the connected devices and agents on every poll, so one
+    naming a live device cannot be taken away by emptying its messages. The
+    conversation empties and the row sits there still, which looks like nothing
+    happened. The count and the reason are both in the dialog, which is the one
+    place the reader actually looks.
+    """
+    window.identity = "me"
+    window.agents = [{"id": "device-me", "kind": "model", "online": True,
+                      "local": True, "provider": "ollama", "model": "llama3"}]
+    window.selected = "device-me"
+    window.chats = {"device-me": {"messages": [("user", "a"), ("assistant", "b"),
+                                               ("user", "c")]}}
+    asked = []
+    monkeypatch.setattr(win.QMessageBox, "question",
+                        lambda *args, **kwargs: asked.append(args[2])
+                        or int(win.QMessageBox.StandardButton.Yes))
+    window.clear_conversation_confirm("device-me")
+
+    assert asked, "no confirmation was shown"
+    body = asked[0]
+    assert "3 messages" in body, f"the dialog does not say how many: {body!r}"
+    assert "row will stay" in body, (
+        f"the dialog does not warn that the row remains: {body!r}")
+    assert "connected" in body, (
+        f"the dialog does not say why the row remains: {body!r}")
+
+    # And a conversation with no row of its own is not told about one.
+    window.chats["saved-only"] = {"messages": [("user", "x")]}
+    window.selected = "saved-only"
+    asked.clear()
+    window.clear_conversation_confirm("saved-only")
+    assert "row will stay" not in asked[0], (
+        f"a conversation with no row was warned about one: {asked[0]!r}")
 
 
 def test_the_rows_built_on_demand_explain_themselves(window) -> None:
@@ -318,6 +718,17 @@ def conversation_window(window):
     return window
 
 
+def row_marks(row):
+    """Every painted mark in a row, wherever it sits.
+
+    Used to read ``content.itemAt(0)``, which assumed the mark is the first
+    thing in the row. Your own messages put theirs on the right, so the
+    leading slot is a stretch instead and the positional helper stopped
+    finding anything. Scanning is what the helper should have done all along.
+    """
+    return [child for child in row.findChildren(QLabel) if not child.pixmap().isNull()]
+
+
 def row_lead(row):
     """The widget holding a row's leading slot: an avatar, or the indent."""
     return row.content.itemAt(0).widget()
@@ -325,12 +736,22 @@ def row_lead(row):
 
 def row_has_mark(row):
     """A mark is a label carrying a painted pixmap; the indent is a bare widget."""
-    lead = row_lead(row)
-    return isinstance(lead, QLabel) and not lead.pixmap().isNull()
+    return bool(row_marks(row))
 
 
 def row_labels(row):
     return [child.text() for child in row.findChildren(QLabel) if child.text()]
+
+
+def row_bubbles(row):
+    return row.findChildren(win.MessageBubble)
+
+
+def bubble_box(window, row):
+    """A row's bubble in the panel's coordinates, so rows are comparable."""
+    bubble = row_bubbles(row)[0]
+    origin = bubble.mapTo(window.messages_widget, bubble.rect().topLeft())
+    return origin.x(), origin.x() + bubble.width()
 
 
 def test_messages_are_rows_and_not_cards(window) -> None:
@@ -358,70 +779,712 @@ def test_consecutive_messages_from_one_speaker_are_grouped(window) -> None:
     assert "You" not in row_labels(rows[1]), (
         "a follow-on message repeats the name above it")
 
+    # The speaker is named by the provider now, with the agent's own id as a
+    # subtitle when it differs. The raw id was the only label before, so two
+    # different providers were told apart by decoding "local-llama".
+    assert "Ollama" in row_labels(rows[2]), (
+        f"the agent is not named by its provider: {row_labels(rows[2])}")
     assert "local-llama" in row_labels(rows[2]), (
-        "a new speaker should be named")
+        "the agent id is lost, so two Ollama agents are indistinguishable")
     assert "local-llama" not in row_labels(rows[3]), (
         "a follow-on message repeats the name above it")
 
 
 def test_a_grouped_message_lines_up_under_the_one_above(window, qt_app) -> None:
-    """Without the indent the text slides left under the absent mark."""
-    conversation_window(window)
-    window.show()
-    qt_app.processEvents()
-    rows = window.messages_widget.findChildren(win.HoverRow)
+    """Without the held place, a follow-on message slides across.
 
-    def text_indent(row):
-        # Any label with text is body copy; the speaker's name is a label
-        # too, but it only appears on an ungrouped row and sits at the same
-        # indent, so it does not disturb the comparison.
-        bodies = [child for child in row.findChildren(QLabel) if child.text()]
-        return min((b.mapTo(row, b.rect().topLeft()).x() for b in bodies),
-                   default=None)
-
-    assert text_indent(rows[0]) == text_indent(rows[1]), (
-        f"a grouped message sits at {text_indent(rows[1])} while the one above "
-        f"it sits at {text_indent(rows[0])}")
-
-
-def test_the_action_slot_keeps_its_place_when_revealed(window, qt_app) -> None:
-    """The actions stay in the layout whether or not they are shown.
-
-    If they were added on hover instead, every row would jump sideways as
-    the pointer crossed it. The invariant is checked on the layout rather
-    than only on the resulting width, because a row is sized by the panel
-    around it and a reflow can leave the width unchanged by luck.
+    Checked on whichever edge the bubble sits against rather than on the left,
+    because your own messages are right-aligned and an agent's are on the
+    left. What has to hold either way is that a follow-on message shares an
+    edge with the one above it.
     """
     conversation_window(window)
     window.show()
     qt_app.processEvents()
     rows = window.messages_widget.findChildren(win.HoverRow)
 
-    def action_slot(row):
-        return [row.outer.itemAt(index).widget()
-                for index in range(row.outer.count())]
+    for above, below in ((rows[0], rows[1]), (rows[2], rows[3])):
+        top_left, top_right = bubble_box(window, above)
+        low_left, low_right = bubble_box(window, below)
+        assert top_left == low_left or top_right == low_right, (
+            f"a grouped message sits at {low_left}-{low_right} while the one "
+            f"above it sits at {top_left}-{top_right}, so neither edge lines up")
 
-    assert rows and not any(r.actions_revealed for r in rows), (
-        "the actions start visible, so there is nothing to reveal")
-    for row in rows:
-        assert any(w is not None and w.objectName() == "messageActions"
-                   for w in action_slot(row)), (
-            "the actions are not in the layout while hidden, so revealing "
-            "them would reflow the row")
 
-    before = [r.geometry().width() for r in rows]
-    for row in rows:
-        row.reveal_actions(True)
+def test_your_messages_go_right_and_an_agents_go_left(window, qt_app) -> None:
+    """The two sides are what tell your input from a reply at a glance."""
+    conversation_window(window)
+    window.show()
+    qt_app.processEvents()
+    rows = window.messages_widget.findChildren(win.HoverRow)
+    panel = window.messages_scroll.viewport().width()
+
+    yours = bubble_box(window, rows[0])
+    theirs = bubble_box(window, rows[2])
+
+    assert yours[0] > theirs[0], (
+        f"your message starts at {yours[0]} and the agent's at {theirs[0]}, so "
+        "they are on the same side")
+    assert yours[1] >= theirs[1], (
+        "your message does not reach as far across as the agent's")
+    assert theirs[0] < panel * 0.5 < yours[1], (
+        f"your message ends at {yours[1]} and the agent's at {theirs[0]} of a "
+        f"{panel}px panel, so they are not on opposite sides")
+
+
+def test_a_short_message_hugs_and_a_long_one_is_capped(window, qt_app) -> None:
+    """A bubble sized to the panel is a slab, which is the fault being fixed.
+
+    The window is shown before the messages are put in place. Once the real
+    runtime is up it reports its workspace, and that restores the saved chat
+    list over whatever the test set, so anything staged beforehand is gone.
+    """
+    window.resize(1330, 910)
+    window.show()
+    pump(qt_app, 0.3)
+    window.selected = "local-llama"
+    window.agents = [{"id": "local-llama", "online": True, "provider": "ollama",
+                     "model": "llama3.2"}]
+    window.chats = {"local-llama": {"messages": [
+        ("user", "hi"),
+        ("assistant", "word " * 400),
+    ]}}
+    window.render_messages()
+    pump(qt_app, 0.3)
+
+    rows = window.messages_widget.findChildren(win.HoverRow)
+    assert len(rows) == 2, f"expected two rows, got {len(rows)}"
+    panel = window.messages_scroll.viewport().width()
+    short = row_bubbles(rows[0])[0].width()
+    long = row_bubbles(rows[1])[0].width()
+
+    assert short < panel * 0.5, (
+        f"a two-word message filled {short}px of a {panel}px panel, so the "
+        "bubble is a slab rather than a bubble")
+    assert long <= int(panel * 0.74) + 1, (
+        f"a long message ran to {long}px of a {panel}px panel")
+    assert not window.messages_scroll.horizontalScrollBar().isVisible(), (
+        "a long message made the chat scroll sideways")
+
+
+def test_each_provider_gets_its_own_bubble_colour(window) -> None:
+    """Which model is answering reads without the name."""
+    window.agents = [
+        {"id": "a", "online": True, "provider": "ollama", "model": "llama3.2"},
+        {"id": "b", "online": True, "provider": "anthropic", "model": "claude-opus"},
+        {"id": "c", "online": True, "provider": "gemini", "model": "gemini-2"},
+    ]
+    for name in THEME_NAMES:
+        window.apply_theme(name)
+        fills = {window.message_bubble_fill(agent["provider"], "agent")
+                 for agent in window.agents}
+        assert len(fills) == 3, (
+            f"{name}: three providers share {len(fills)} bubble colours")
+
+
+def test_a_failure_is_not_painted_in_a_providers_colour(window) -> None:
+    """A failed call is not that model's fault to be branded with."""
+    window.apply_theme(DARK)
+    for provider in ("ollama", "anthropic", "gemini"):
+        assert window.message_bubble_fill(provider, "error") == color(DARK, "danger_bg"), (
+            f"a {provider} failure was tinted with that provider's colour")
+    assert window.message_bubble_fill(None, "user") == color(DARK, "surface_raised"), (
+        "your own messages carry a provider tint")
+
+
+def test_a_peer_message_is_named_as_a_peer(window) -> None:
+    """It was labelled with the agent's name and rendered its markdown raw."""
+    window.agents = [{"id": "local-llama", "online": True, "provider": "ollama",
+                      "model": "llama3.2"}]
+    window.selected = "guest-laptop"
+    name, subtitle, provider, kind = window.speaker_identity("peer", None)
+    assert kind == "peer", f"a peer was treated as {kind}"
+    assert provider is None, "a peer was given a provider, so it is tinted as one"
+    # The sender is the key of the chat the message is in, so it is whoever
+    # is selected. It used to read "This device", which named the reader
+    # rather than whoever had written the message.
+    assert name == "guest-laptop", f"a peer was named {name!r}"
+
+    window.selected = None
+    assert window.speaker_identity("peer", None)[0] == "Another device", (
+        "a peer with no chat open should still say something")
+
+    # Not the reader's own agent: ``room["target"]`` is the local agent, and
+    # labelling another device's message with it pointed at the wrong speaker.
+    window.selected = "guest-laptop"
+    with_room = window.speaker_identity("peer", {"target": "local-llama"})
+    assert with_room[0] == "guest-laptop", (
+        f"a peer was named after the local agent as {with_room[0]!r}")
+
+    member = window.speaker_identity("member:guest-laptop", None)
+    assert member[0] == "guest-laptop", f"a member was named {member[0]!r}"
+    assert member[3] == "peer", f"a member was treated as {member[3]}"
+
+
+def test_a_local_agents_reply_is_not_headed_by_the_peer_that_asked(window) -> None:
+    """The responder is this device's own agent, not whoever asked it a question.
+
+    A peer's request is answered by the local agent, and the reply comes back
+    with ``from`` as the peer who asked and ``to`` as the agent that replied.
+    The reply used to be headed by ``selected``, which in a peer conversation is
+    the peer, so it rendered under the asker's name with the real responder left
+    inline in the body text.
+    """
+    window.identity = "my-laptop"
+    window.agents = [
+        {"id": "my-local-agent", "kind": "model", "online": True, "local": True,
+         "provider": "ollama", "model": "llama3"},
+        {"id": "guest-laptop", "kind": "device", "online": True},
+    ]
+    window.selected = "guest-laptop"
+
+    window.network_event("incoming_reply", {
+        "from": "guest-laptop", "to": "my-local-agent",
+        "text": "## Heading\n\n**Hello** from my agent."})
+
+    assert window.chats["guest-laptop"]["messages"] == [
+        ("local_agent:my-local-agent", "## Heading\n\n**Hello** from my agent.")], (
+        f"the responder's id should travel in the role, not be glued onto the "
+        f"text: {window.chats['guest-laptop']['messages']}")
+
+    name, subtitle, provider, kind = window.speaker_identity(
+        "local_agent:my-local-agent", None)
+    assert name == "Ollama", f"the reply is headed by {name!r}"
+    assert subtitle == "my-local-agent", f"the agent id was dropped: {subtitle!r}"
+    assert provider == "ollama", "the local responder lost its provider"
+    assert kind == "agent", f"the local responder was treated as {kind}"
+
+    # The bare role still falls back the old way, which is what a saved
+    # conversation nobody can attribute relies on.
+    assert window.speaker_identity("local_agent", {"target": "some-agent"})[0] == "some-agent"
+
+
+def test_a_failed_local_reply_is_still_an_error(window) -> None:
+    """The error path is unchanged: it names no responder, because none replied."""
+    window.identity = "my-laptop"
+    window.agents = [{"id": "my-local-agent", "kind": "model", "online": True,
+                      "local": True, "provider": "ollama", "model": "llama3"}]
+    window.selected = "guest-laptop"
+
+    window.network_event("incoming_reply", {
+        "from": "guest-laptop", "to": "my-local-agent",
+        "text": "The local agent could not complete this request.", "error": True})
+
+    assert window.chats["guest-laptop"]["messages"] == [
+        ("error", "The local agent could not complete this request.")]
+
+
+def test_saved_replies_are_unwrapped_only_when_the_prefix_is_a_known_agent(window) -> None:
+    """The old shape put ``id:\\n`` on the front, and is read back apart.
+
+    Splitting on the newline alone would eat the first line of any reply that
+    happens to begin with a colon, because an agent id and an ordinary word are
+    both bare characters from the same set. So it splits only for an agent
+    currently in the list, and only when the line ends in the colon the old
+    prefix always had.
+    """
+    window.agents = [{"id": "my-local-agent", "kind": "model", "online": True,
+                      "local": True, "provider": "ollama", "model": "llama3"}]
+
+    assert window.split_legacy_responder(
+        "local_agent", "my-local-agent:\n**Hi** there") == (
+            "local_agent:my-local-agent", "**Hi** there")
+
+    for text in ("Note:\ncheck the second run",     # an ordinary opening line
+                 "my-local-agent\n**Hi**",          # no colon, so not the old shape
+                 "my-local-agent:\n",               # nothing left to show
+                 "no colon or newline here",
+                 "ghost-agent:\nfrom a device that is gone"):
+        assert window.split_legacy_responder("local_agent", text) == ("local_agent", text), (
+            f"a reply that was never stored this way was rewritten: {text!r}")
+
+    # Only the reply role is touched.
+    assert window.split_legacy_responder(
+        "assistant", "my-local-agent:\n**Hi**") == (
+            "assistant", "my-local-agent:\n**Hi**")
+
+
+def test_no_bubble_is_too_short_for_the_text_it_holds(window, qt_app) -> None:
+    """Nothing is cut off, at any panel width.
+
+    A bubble's height used to be pinned from its column's size hint, and once
+    pinned the column reported the pin back, so the height could never change
+    again. A message laid out at a wide panel kept that height, and narrowing
+    the panel re-wrapped the text into a bubble far too short for it. On a
+    1000px window a message needing 360px was drawn in 238px, so the bottom
+    third of what was said was simply not on screen.
+
+    Swept rather than checked once, because the height is only wrong at widths
+    other than the one it was first laid out at.
+    """
+    window.navigate(win.PAGE_INDEX["conversations"])
+    window.agents = [{"id": "local-llama", "kind": "model", "online": True,
+                      "provider": "ollama", "model": "llama3"}]
+    question = ("This is a long question from the user that runs on for quite a "
+                "while and should wrap across several lines in the bubble. " * 4)
+    answer = ("This is a long reply from the agent that also runs on for quite a "
+              "while and should wrap across several lines in the bubble. " * 4)
+    window.show()
+
+    def clipped():
+        """Every body that cannot show all of its own text."""
+        found = []
+        for bubble in window.message_bubbles:
+            for child in bubble.findChildren(QLabel):
+                if child.wordWrap() and child.text():
+                    needed = child.heightForWidth(child.width())
+                    if needed > child.height() + 1:
+                        found.append(f"label has {child.height()}px, needs {needed}px")
+            for child in bubble.findChildren(MarkdownMessage):
+                needed = child.document().size().height()
+                if needed > child.height() + 1:
+                    found.append(f"reply has {child.height()}px, needs {needed:.0f}px")
+        return found
+
+    for width in (1400, 1000, 800, 620, 480, 1500):
+        window.resize(width, 900)
+        # The runtime polls the relay and replaces the chats with whatever it
+        # says, which is nothing, so it is given its turn before the fake
+        # conversation goes in rather than after. Nothing turns the loop after
+        # the render either: render_messages() settles the layout itself, and
+        # one more pass is one more chance for the poll to wipe the bubbles out
+        # from under the reading.
+        qt_app.processEvents()
+        window.selected = "local-llama"
+        window.chats = {"local-llama": {"messages": [
+            ("user", question), ("assistant", answer)]}}
+        window.render_messages()
+        assert window.message_bubbles, f"the message is missing at {width}px"
+        assert not clipped(), f"text is cut off at {width}px: {clipped()}"
+
+
+def test_a_bubble_grows_again_when_the_panel_is_widened(window, qt_app) -> None:
+    """Widening the window restores the width a reply had before narrowing it.
+
+    Measuring a reply's natural width did not work, because lifting the wrap
+    re-entered the height fitter, which re-set the wrap before the measurement
+    was read. So a reply's "natural" width was really just the width it already
+    had, and once the panel narrowed, the ceiling was the only thing moving it.
+    Widening afterwards had nothing to grow back into and left every message
+    stranded at the narrow width.
+    """
+    window.navigate(win.PAGE_INDEX["conversations"])
+    window.agents = [{"id": "local-llama", "kind": "model", "online": True,
+                      "provider": "ollama", "model": "llama3"}]
+    reply = "A reply long enough that the panel's ceiling is what decides its width. " * 12
+    window.show()
+
+    def render_at(width):
+        window.resize(width, 900)
+        qt_app.processEvents()
+        window.selected = "local-llama"
+        window.chats = {"local-llama": {"messages": [("assistant", reply)]}}
+        window.render_messages()
+        assert window.message_bubbles, f"the reply is missing at {width}px"
+        return window.message_bubbles[0].width()
+
+    wide = render_at(1500)
+    narrow = render_at(700)
+    assert narrow < wide, f"narrowing did not narrow the reply ({narrow} vs {wide})"
+
+    assert render_at(1500) > narrow, (
+        f"widening did not widen the reply back: it stayed at {narrow}px after "
+        f"being {wide}px on a wider panel")
+
+
+def test_a_replys_natural_width_does_not_depend_on_how_it_is_currently_laid_out() -> None:
+    """The unwrapped width of a reply is the same whatever its current width.
+
+    Read through the widget so the guard inside it is exercised: lifting the
+    wrap emits ``documentSizeChanged``, which re-enters ``fit_height`` and puts
+    the wrap back before ``idealWidth`` can be read.
+    """
+    from desktop_app.markdown import MarkdownMessage
+
+    reply = MarkdownMessage("A reply. " * 200)
+    widths = set()
+    for width in (200, 400, 700):
+        reply.resize(width, 300)
+        reply.fit_height()
+        widths.add(round(reply.natural_width()))
+        # Measuring must leave the reply as it found it, or the height the
+        # bubble has already settled on stops matching the text.
+        assert reply.document().textWidth() > 0, (
+            "measuring left the reply unwrapped, so its height is meaningless")
+
+    assert len(widths) == 1, (
+        f"the natural width moved with the layout: {sorted(widths)}")
+
+
+def test_resizing_the_window_re_caps_the_bubbles(window, qt_app) -> None:
+    """Narrowing the panel re-wraps the messages rather than clipping them.
+
+    The filter that does this is installed on the viewport, and it used to
+    also insist that the watched widget was the scroll widget itself, which
+    nothing can be both. So the branch was dead: the widths were only ever
+    capped on a render, and a message dragged off the edge stayed off.
+    """
+    window.navigate(win.PAGE_INDEX["conversations"])
+    window.agents = [{"id": "local-llama", "kind": "model", "online": True,
+                      "provider": "ollama", "model": "llama3"}]
+    window.selected = "local-llama"
+    window.chats = {"local-llama": {"messages": [
+        ("assistant", "a reply long enough that the ceiling matters " * 12)]}}
+    window.show()
+    window.resize(1400, 900)
+    window.render_messages()
+    qt_app.processEvents()
+    wide = window.message_bubbles[0].width()
+
+    # The filter has to run at all. No chat is needed for this half, which is
+    # the point of checking it on its own: the runtime polls the relay on a
+    # timer, and letting the event loop turn here hands it the chance to replace
+    # the chats below with whatever the relay says, which is nothing.
+    called = []
+    original = window.cap_message_widths
+    window.cap_message_widths = lambda: called.append(True)
+    try:
+        window.resize(760, 900)
+        qt_app.processEvents()
+        assert called, "resizing the window did not re-cap the bubbles"
+    finally:
+        window.cap_message_widths = original
+
+    # The guard has to be narrow. Called directly rather than delivered, because
+    # posting these for real lets Qt relayout in response -- a focus change can
+    # move a scrollbar, which resizes the viewport, which legitimately re-caps.
+    # That would be measuring Qt's layout rather than the filter's condition.
+    called.clear()
+    window.cap_message_widths = lambda: called.append(True)
+    try:
+        window.eventFilter(window, QResizeEvent(QSize(100, 100), QSize(100, 100)))
+        window.eventFilter(window.messages_scroll.viewport(),
+                           QEvent(QEvent.Type.FocusIn))
+    finally:
+        window.cap_message_widths = original
+    assert not called, "the cap ran for something that was not the viewport resizing"
+
+    # And the narrower panel really does produce a narrower bubble. Seeded again
+    # here because the poll above has had its turn and replaced the chats.
+    window.selected = "local-llama"
+    window.chats = {"local-llama": {"messages": [
+        ("assistant", "a reply long enough that the ceiling matters " * 12)]}}
+    window.render_messages()
+    qt_app.processEvents()
+    assert window.message_bubbles, (
+        "the reply is gone, so the poller replaced the chats after all")
+    assert window.message_bubbles[0].width() < wide, (
+        "a narrower panel did not narrow the bubble, so the reply runs off "
+        "the edge")
+
+
+def test_body_text_stays_readable_on_every_bubble_fill(window) -> None:
+    """A tint is close enough to the surface that the checked pair still holds."""
+    for name in THEME_NAMES:
+        window.apply_theme(name)
+        body = color(name, "text")
+        for provider in ("ollama", "anthropic", "gemini", "openai"):
+            fill = window.message_bubble_fill(provider, "agent")
+            ratio = contrast_ratio(body, fill)
+            assert ratio >= 4.5, (
+                f"{name}/{provider}: text on {fill} is {ratio:.2f}:1, under 4.5")
+        for kind in ("user", "error"):
+            fill = window.message_bubble_fill(None, kind)
+            ratio = contrast_ratio(body, fill)
+            assert ratio >= 4.5, (
+                f"{name}/{kind}: text on {fill} is {ratio:.2f}:1, under 4.5")
+
+
+def test_a_markdown_reply_is_transparent_so_the_bubble_shows_through(window, qt_app) -> None:
+    """It used to paint an opaque surface of its own, which is the slab."""
+    from desktop_app.markdown import MarkdownMessage
+
+    # Pump first, build the chat second. The runtime polls the relay on a
+    # timer and replaces ``window.chats`` with whatever the relay says, which
+    # is nothing, so a fake chat set before the pump is simply erased by it
+    # and there is no reply left to look at.
+    pump(qt_app, 0.2)
+    conversation_window(window)
+    body = window.messages_widget.findChild(MarkdownMessage)
+    assert body is not None, "the reply is not rendered as markdown"
+
+    base = body.palette().color(QPalette.ColorRole.Base)
+    assert base.alpha() == 0 or "background: transparent" in body.styleSheet(), (
+        f"a markdown reply still paints an opaque background ({base.name()}), "
+        "so the bubble behind it is invisible")
+    assert "background: transparent" in body.styleSheet(), (
+        "the reply's own stylesheet still fills the widget")
+    # And the bubble it sits in really does have a fill, so the transparency
+    # is showing a background rather than showing the panel.
+    bubble = body.parent()
+    assert isinstance(bubble, win.MessageBubble), (
+        f"a reply is not inside a bubble, it is inside {type(bubble).__name__}")
+
+    # The palette alone would not prove it: the app-level ``QWidget`` rule
+    # resolves the Base role back to an opaque colour on any widget under
+    # this stylesheet, whatever the widget's own palette says. What decides
+    # what is seen is the rule on the reply itself, so read what it paints.
+    # Every pixel is counted rather than one being sampled: the reply is full
+    # of text, and a single probe lands on a glyph or on the background
+    # depending on the message. The surface colour must be absent, because
+    # that opaque slab is the thing being removed, and the bubble's own fill
+    # must be present, because that is what has to show through.
+    qt_app.processEvents()
+    surface = color(window.theme, "surface")
+    fill = window.message_bubble_fill("ollama", "assistant")
+    # Grab the bubble, not the reply. Grabbing the reply on its own gives a
+    # pixmap whose transparent regions read as black, which is the reply's
+    # transparency showing up as a colour rather than the bubble behind it.
+    painted = bubble.grab().toImage()
+    colours = {painted.pixelColor(x, y).name().lower()
+               for y in range(painted.height()) for x in range(painted.width())}
+    assert surface.lower() not in colours, (
+        f"the reply still paints the {surface} surface, so it is an opaque "
+        f"slab over the bubble again")
+    assert fill.lower() in colours, (
+        f"the reply never shows the bubble behind it; {fill} is absent from "
+        f"what it paints")
+
+
+def test_a_renamed_agent_does_not_inherit_the_previous_replys_header(window, qt_app) -> None:
+    """Two replies both called "Ollama" are not the same speaker.
+
+    A reconnect can bring an agent back under a new id. Both ids read as
+    "Ollama", so grouping on the name alone ran the two runs together under
+    one header, and the id that tells them apart was dropped from every reply
+    after the first. The identity is the name, the id, the provider and the
+    kind together.
+    """
+    window.navigate(win.PAGE_INDEX["conversations"])
+    window.agents = [{"id": "llama3-old", "kind": "model", "online": True,
+                      "provider": "ollama", "model": "llama3"}]
+    window.selected = "llama3-old"
+    window.chats = {"llama3-old": {"messages": [
+        ("local_agent", "before the reconnect"),
+        ("local_agent", "still the first run"),
+    ]}}
+    window.render_messages()
+    first = [row_labels(row) for row in window.messages_widget.findChildren(win.HoverRow)]
+
+    # The agent comes back under a new id, and the history follows it.
+    window.agents = [{"id": "llama3-new", "kind": "model", "online": True,
+                      "provider": "ollama", "model": "llama3"}]
+    window.selected = "llama3-new"
+    window.chats = {"llama3-new": {"messages": [
+        ("local_agent", "before the reconnect"),
+        ("local_agent", "after the reconnect"),
+    ]}}
+    window.render_messages()
     qt_app.processEvents()
 
-    assert all(r.actions_revealed for r in rows), "revealing did not take"
-    assert [r.geometry().width() for r in rows] == before, (
-        "revealing the actions changed the row width, so the row will shift "
-        "as the pointer crosses it")
+    # Only the rows from this render are of interest: the previous render's
+    # rows are still parented until the event loop deletes them, so the whole
+    # set is searched rather than counted.
+    headers = [row_labels(row) for row in window.messages_widget.findChildren(win.HoverRow)]
+    assert headers.count(["Ollama", "llama3-new"]) == 1, (
+        f"the reply after the reconnect never headed itself: {headers}")
+    assert headers.count(["Ollama", "llama3-old"]) == 1, (
+        f"the reply before it lost its own header: {headers}")
+    assert ["Ollama", "llama3-new"] in headers and ["Ollama", "llama3-old"] in headers, (
+        "both runs are called Ollama, so neither id may be dropped: "
+        f"{headers}")
 
+
+def test_hovering_a_message_moves_nothing(window, qt_app) -> None:
+    """The pointer crossing a message must not shift it.
+
+    It used to. The actions lived in a slot beside the mark and appeared on
+    hover, and a hidden widget hands its space back to the layout, so
+    revealing them took about 90px off the bubble and re-wrapped the text
+    under the pointer. The row's own width never changed, which is why the
+    earlier check on it passed while the message visibly jumped: the bubble
+    is what reflowed. So the bubble is what is checked here.
+    """
+    conversation_window(window)
+    window.show()
+    qt_app.processEvents()
+    rows = window.messages_widget.findChildren(win.HoverRow)
+    assert rows
+
+    # There is no hover behaviour left to fire, and that is the point. Pinned
+    # here rather than left implicit, because otherwise the sendEvent below is
+    # a no-op and this test would pass for the wrong reason the moment someone
+    # re-added a reveal on hover.
+    assert win.HoverRow.enterEvent is QWidget.enterEvent, (
+        "the row reveals something on hover again, so a message will move as "
+        "the pointer crosses it")
+    assert win.HoverRow.leaveEvent is QWidget.leaveEvent, (
+        "the row hides something on leave again, so a message will move as "
+        "the pointer crosses it")
+
+    def boxes():
+        return [(bubble_box(window, row),
+                 (row.findChild(win.MessageBubble).x(),
+                  row.findChild(win.MessageBubble).y(),
+                  row.findChild(win.MessageBubble).width(),
+                  row.findChild(win.MessageBubble).height()))
+                for row in rows]
+
+    before = boxes()
     for row in rows:
-        row.reveal_actions(False)
-    assert not any(r.actions_revealed for r in rows), "hiding did not take"
+        QApplication.sendEvent(row, QEvent(QEvent.Type.Enter))
+    qt_app.processEvents()
+
+    assert boxes() == before, (
+        "hovering moved the bubbles, so a message reflows as the pointer "
+        "crosses it")
+
+
+def test_the_copy_action_is_permanent_and_sits_under_the_reply(window, qt_app) -> None:
+    """A copy button under every reply, always there, the way a browser has it.
+
+    It used to appear only on hover, which read as a pop-up, and sat in a slot
+    beside the mark rather than under the message it copies.
+    """
+    window.navigate(win.PAGE_INDEX["conversations"])
+    window.agents = [{"id": "local-llama", "kind": "model", "online": True,
+                      "provider": "ollama", "model": "llama3"}]
+    window.selected = "local-llama"
+    window.chats = {"local-llama": {"messages": [
+        ("assistant", "a reply"),
+        ("user", "a question"),
+    ]}}
+    window.show()
+    window.render_messages()
+    qt_app.processEvents()
+
+    rows = window.messages_widget.findChildren(win.HoverRow)
+    reply, question = rows[0], rows[1]
+    assert reply.has_actions, "the reply has no copy button"
+    assert not question.has_actions, (
+        "your own message has a copy button, so every question gets one")
+
+    bubble = row_bubbles(reply)[0]
+    strip = reply.actions
+    bubble_top = bubble.mapTo(reply, bubble.rect().topLeft()).y()
+    strip_top = strip.mapTo(reply, strip.rect().topLeft()).y()
+    assert strip_top >= bubble_top + bubble.height(), (
+        f"the copy button sits at y={strip_top}, inside the bubble, which "
+        f"ends at {bubble_top + bubble.height()}")
+    assert strip.mapTo(reply, strip.rect().topLeft()).x() \
+        == bubble.mapTo(reply, bubble.rect().topLeft()).x(), (
+        "the copy button should line up with the text it copies, not float "
+        "off against the panel")
+
+    # And it is visible without a pointer anywhere near it.
+    assert strip.isHidden() is False, (
+        "the copy button is hidden until hovered, so it pops up instead of "
+        "being simply there")
+
+
+def test_only_the_last_reply_of_a_run_carries_a_copy(window, qt_app) -> None:
+    """Three replies from one agent get one copy button, under the third.
+
+    Putting one under each would stack three identical buttons with nothing
+    between them, since a run is already presented as one block under a
+    single header.
+    """
+    window.navigate(win.PAGE_INDEX["conversations"])
+    window.agents = [{"id": "local-llama", "kind": "model", "online": True,
+                      "provider": "ollama", "model": "llama3"}]
+    window.selected = "local-llama"
+    window.chats = {"local-llama": {"messages": [
+        ("assistant", "first"), ("assistant", "second"), ("assistant", "third"),
+        ("user", "a question"), ("assistant", "a new run"),
+    ]}}
+    window.show()
+    window.render_messages()
+    qt_app.processEvents()
+
+    rows = window.messages_widget.findChildren(win.HoverRow)
+    carried = [index for index, row in enumerate(rows) if row.has_actions]
+    assert carried == [2, 4], (
+        f"expected a copy button on the last reply of each run, got rows "
+        f"{carried}")
+
+
+def test_a_copied_message_confirms_itself_briefly(window, qt_app) -> None:
+    """A copy toast goes in a second, not the seven and a half for a failure.
+
+    Nothing has to be read or acted on: the user just watched the copy happen.
+    The copy text is a word, and the failure toast keeps its own duration.
+    """
+    assert win.COPY_TOAST_MS == 1000
+    assert win.TOAST_MS == 7500
+
+    window.copy_message("a message")
+    assert window.toast.text() == "Message Copied", (
+        f"the copy toast says {window.toast.text()!r}")
+
+    # It is gone a second later, while a failure is still up. ``isHidden`` is
+    # the toast's own state: the fixture's window is never shown, so
+    # ``isVisible`` would report False for both of them and prove nothing.
+    QTest.qWait(1100)
+    assert window.toast.isHidden() is True, "the copy toast was still up"
+
+    window.notice("Could not save credentials.", error=True)
+    QTest.qWait(1100)
+    assert window.toast.isHidden() is False, (
+        "a failure has to outlive a copy: it is the one worth reading")
+
+
+def test_a_failure_is_not_cut_short_by_the_notice_before_it(window, qt_app) -> None:
+    """The notice on screen owns the countdown, not the one before it.
+
+    Each notice used to schedule its own singleShot, so two notices in quick
+    succession left two timers pending and the older one took the toast down in
+    the middle of the newer. Copy something and a failure arrives within the
+    second, which is not a rare thing: the copy is what the user is doing when
+    the failure shows up. The failure then vanished after the copy's one second
+    instead of its own seven and a half, which is exactly when someone needs to
+    read it.
+
+    The ordering here is the whole test: the failure is raised while the
+    earlier, shorter notice is still counting down.
+    """
+    window.copy_message("a message")
+    QTest.qWait(400)
+    window.notice("Could not save credentials.", error=True)
+
+    # Past the copy's one second, but nowhere near the failure's seven and a
+    # half. Under the old per-notice timers this is where the toast vanished.
+    QTest.qWait(700)
+    assert window.toast.isHidden() is False, (
+        "the failure was taken down by the countdown from the copy before it, "
+        "so it disappeared after a second instead of being readable")
+    assert window.toast.text() == "Could not save credentials.", (
+        f"the toast shows {window.toast.text()!r}, not the failure")
+
+    # And it still goes away on its own schedule rather than never.
+    QTest.qWait(7200)
+    assert window.toast.isHidden() is True, (
+        "the failure toast never went away, so the timer is not running")
+
+
+def test_one_timer_owns_the_toast(window) -> None:
+    """The countdown is a window-owned timer that each notice restarts.
+
+    Checked on the timer itself rather than only on the toast's visibility, so
+    a per-notice timer would be caught here even in a run where two notices
+    never happened to overlap.
+    """
+    assert window.toast_timer.isSingleShot() is True, (
+        "the toast timer is not single-shot, so it will fire repeatedly")
+
+    window.copy_message("a message")
+    assert window.toast_timer.isActive() is True, (
+        f"a copy did not start the toast timer, which is {window.toast_timer.interval()}ms")
+    assert window.toast_timer.interval() == win.COPY_TOAST_MS, (
+        f"a copy should start a {win.COPY_TOAST_MS}ms countdown, got "
+        f"{window.toast_timer.interval()}ms")
+    window.notice("Something failed.", error=True)
+    assert window.toast_timer.isActive() is True, (
+        f"a failure did not restart the toast timer, which is {window.toast_timer.interval()}ms")
+    assert window.toast_timer.interval() == win.TOAST_MS, (
+        f"a failure should restart the countdown at {win.TOAST_MS}ms, got "
+        f"{window.toast_timer.interval()}ms")
+    assert window.toast_timer.parent() is window, (
+        "the timer is not owned by the window, so it can outlive it")
 
 
 def test_the_composer_is_set_apart_from_the_messages(window, qt_app) -> None:

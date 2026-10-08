@@ -398,6 +398,41 @@ def provider_color(name, provider_key):
     return accents.get(provider_key, palette(name)["provider_fallback"])
 
 
+def mix(foreground, background, amount):
+    """``foreground`` blended into ``background``, as a ``#rrggbb`` string.
+
+    Plain integer channel arithmetic, no Qt, because this module is the one
+    place that must keep working with only the palette data.
+
+    Used to tint a message bubble toward the provider's own accent. Blending
+    rather than adding a token per provider keeps the three palettes holding
+    the same keys, which the palette tests require, and means a provider
+    added later needs no palette work at all.
+
+    ``amount`` is clamped, so a caller computing a ratio cannot produce an
+    invalid colour by being slightly out of range.
+    """
+    def channel(value):
+        return max(0, min(255, int(round(value))))
+
+    weight = max(0.0, min(1.0, float(amount)))
+    top = _channels(foreground)
+    bottom = _channels(background)
+    blended = [channel(bottom[index] + (top[index] - bottom[index]) * weight)
+               for index in range(3)]
+    return "#" + "".join("%02x" % value for value in blended)
+
+
+def _channels(value):
+    """The three channels of a ``#rrggbb`` or ``#rgb`` string."""
+    text = value.strip().lstrip("#")
+    if len(text) == 3:
+        text = "".join(character * 2 for character in text)
+    if len(text) != 6:
+        raise ValueError(f"not a hex colour: {value!r}")
+    return tuple(int(text[index:index + 2], 16) for index in (0, 2, 4))
+
+
 def system_theme(app=None):
     """The OS light/dark preference, or None when it cannot be determined.
 
@@ -481,6 +516,7 @@ QLabel { background: transparent; }
     QWidget#messageRow:hover { background: @@surface_row_hover@@; }
     QWidget#messageActions { background: transparent; }
     QFrame#composerBar { background: @@surface_base@@; border: none; border-top: 1px solid @@border@@; }
+    QFrame#chatHeader { background: @@surface_base@@; border: none; border-bottom: 1px solid @@border@@; }
 QLabel#title { font-size: 31px; font-weight: 700; color: @@text_strong@@; }
 QLabel#heroTitle { font-size: 34px; font-weight: 700; color: @@text_hero@@; }
 QLabel#heading { font-size: 19px; font-weight: 650; color: @@text_strong@@; }

@@ -7,13 +7,15 @@ import sys
 from pathlib import Path
 from datetime import datetime
 
-from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QSize, Qt, QTimer, QUrl, Slot
+from PySide6.QtCore import (QEasingCurve, QEvent, QPoint, QPropertyAnimation, QSize,
+                            Qt, QTimer, QUrl, Slot)
 from PySide6.QtGui import (QGuiApplication, QIcon, QKeySequence, QPixmap, QPainter,
                            QColor, QDesktopServices, QFont, QPalette, QShortcut)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QFileDialog,
     QFormLayout, QFrame, QGraphicsOpacityEffect, QGridLayout, QHBoxLayout,
-    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
-    QPlainTextEdit, QProgressBar, QScrollArea, QSizePolicy, QStackedWidget,
+    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu,
+    QMessageBox, QPlainTextEdit, QProgressBar, QScrollArea, QSizePolicy,
+    QStackedWidget,
     QVBoxLayout,
     QWidget)
 
@@ -31,11 +33,11 @@ from .layout import minimum_size, sidebar_should_collapse, window_size
 from .markdown import MarkdownMessage
 from .model_purpose import ModelPurpose
 from .resources import ResourceSampler
-from .theme import (DARK, LIGHT, PROVIDER_NAMES, THEME_CHOICES, color,
-                   provider_entry, provider_names, resolve_theme, stylesheet,
-                   system_theme)
-from .widgets import (Composer, ErrorLine, HoverRow, OrbitArt, Select, WorkspaceButton,
-                     action, app_mark, label)
+from .theme import (DARK, LIGHT, PROVIDER_NAMES, THEME_CHOICES, color, mix,
+                   provider_color, provider_entry, provider_names, resolve_theme,
+                   stylesheet, system_theme)
+from .widgets import (Composer, ErrorLine, HoverRow, MessageBubble, OrbitArt,
+                    Select, WorkspaceButton, action, app_mark, label)
 
 
 def frame(name, layout_type=QVBoxLayout):
@@ -101,6 +103,14 @@ OVERVIEW_PAGE = PAGE_INDEX["overview"]
 # The mark beside a message, and the width a grouped message is indented by
 # when it follows its own speaker's earlier message.
 SPEAKER_AVATAR = 34
+# Qt's QWIDGETSIZE_MAX, which PySide6 does not export. ``setFixedHeight``
+# pins both ends of a widget's range, and a bubble is pinned on every render,
+# so it has to be let go with the number spelled out before it can be measured.
+UNPINNED = 16777215
+# How long a toast stays up. Long, because a failure has to be read and acted
+# on; a copy has already happened by the time it appears.
+TOAST_MS = 7500
+COPY_TOAST_MS = 1000
 
 
 def app_icon(theme_name=DARK):
@@ -183,11 +193,17 @@ class MainWindow(QMainWindow):
         # rebuild of the page can find it again. Lines hold no message of
         # their own.
         self.card_lines = {}
+        # The bubbles from the last render, so their width can be recapped
+        # when the panel is resized.
+        self.message_bubbles = []
         # Whether each Workspaces operation is still in flight. The poll runs
         # every three seconds and this page re-enables its buttons from it, so
         # without this a join could be submitted a second time while the first
         # was still waiting on a relay that takes up to 30 seconds.
         self.workspace_busy = {"create": False, "join": False, "invite": False}
+        # While a shared conversation is being ended at the relay, so its
+        # actions cannot be fired twice from two places at once.
+        self.chat_busy = False
         self.toast_error = False
         self.request_count = 0
         self.ready = False
@@ -326,6 +342,8 @@ class MainWindow(QMainWindow):
         self.sidebar_agents.setWordWrap(True)
         self.sidebar_agents.setToolTip("Every conversation and agent you can open")
         self.sidebar_agents.itemClicked.connect(lambda item: self.select_agent(item.data(Qt.ItemDataRole.UserRole)))
+        self.sidebar_agents.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.sidebar_agents.customContextMenuRequested.connect(self.show_conversation_menu)
         side.addWidget(self.sidebar_agents)
         side.addStretch()
         self.connection_status = label("●  Starting your network…", "online", True)
@@ -379,6 +397,16 @@ class MainWindow(QMainWindow):
         self.toast = label("", wrap=True)
         self.style_toast()
         self.toast.hide()
+        # One timer for the toast, restarted by every notice, rather than a
+        # singleShot scheduled per notice. Two notices in quick succession used
+        # to leave two timers pending and the older one took the toast down in
+        # the middle of the newer: copy something, a failure arrives within the
+        # second, and the failure vanished after the copy's second instead of
+        # its own seven and a half. Created here rather than in __init__ so the
+        # toast it hides already exists.
+        self.toast_timer = QTimer(self)
+        self.toast_timer.setSingleShot(True)
+        self.toast_timer.timeout.connect(self.toast.hide)
         body_layout.addWidget(self.toast)
         self.progress = QProgressBar()
         self.progress.setRange(0, 0)
@@ -747,14 +775,26 @@ class MainWindow(QMainWindow):
         self.chat_agents = QListWidget()
         self.chat_agents.setFixedWidth(200)
         self.chat_agents.itemClicked.connect(lambda item: self.select_agent(item.data(Qt.ItemDataRole.UserRole)))
+        self.chat_agents.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.chat_agents.customContextMenuRequested.connect(self.show_conversation_menu)
         layout.addWidget(self.chat_agents)
         panel = QWidget()
         column = QVBoxLayout(panel)
-        column.setContentsMargins(22, 22, 22, 20)
+        column.setContentsMargins(0, 0, 0, 0)
+        # The header gets a surface of its own, with a hairline under it, so
+        # which conversation this is and who is in it read as a heading to the
+        # conversation rather than as the first two lines of it. It sat directly
+        # on the chat's background with nothing between them, and the composer's
+        # hairline at the bottom made the middle the odd one out: the only part
+        # of the page with no edge to it.
+        self.chat_header, header = frame("chatHeader")
+        header.setContentsMargins(22, 18, 22, 12)
+        header.setSpacing(4)
+        column.addWidget(self.chat_header)
         self.chat_title = label("Choose an agent", "heading")
-        column.addWidget(self.chat_title)
+        header.addWidget(self.chat_title)
         self.chat_subtitle = label("Start a conversation with a connected device.", "muted")
-        column.addWidget(self.chat_subtitle)
+        header.addWidget(self.chat_subtitle)
         coordinator_row = QHBoxLayout()
         coordinator_row.addWidget(label("Jev coordinator", "muted"))
         self.coordinator_picker = Select()
@@ -777,15 +817,34 @@ class MainWindow(QMainWindow):
         chat_actions.addWidget(self.chat_agent_count)
         chat_actions.addWidget(self.share_conversation_button)
         chat_actions.addStretch()
-        column.addLayout(chat_actions)
+        # Managing the conversation is one button that opens the same menu a
+        # right-click gives, rather than a button per action. Two text buttons
+        # needed about 485px between them, the panel is 1020px wide, and the
+        # rest of this row already wanted 918: the row overflowed and Qt laid
+        # the buttons out past the edge of the window, where they looked fine
+        # and could not be clicked. A menu also has room to spell the actions
+        # out, and it is where the context menu already put them.
+        self.manage_button = action("Manage", self.show_manage_menu, name="ghost")
+        self.manage_button.setToolTip(
+            "Clear or delete this conversation, and what else it can be given")
+        chat_actions.addWidget(self.manage_button)
+        header.addLayout(chat_actions)
         self.messages_scroll = QScrollArea()
         self.messages_scroll.setWidgetResizable(True)
         self.messages_widget = QWidget()
         self.messages = QVBoxLayout(self.messages_widget)
-        self.messages.setContentsMargins(0, 16, 5, 16)
+        # Inset here rather than on the column, because the column no longer has
+        # margins of its own: the header needs to reach the panel's edges for
+        # its own surface and hairline to read as an edge.
+        self.messages.setContentsMargins(22, 16, 17, 16)
         self.messages.setSpacing(16)
         self.messages.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.messages_scroll.setWidget(self.messages_widget)
+        # A bubble that hugs its text has to be told where to stop, and the
+        # ceiling moves with the panel. Recapped on every viewport resize
+        # rather than only on render, so dragging the window narrower wraps
+        # the next message instead of leaving it running off the edge.
+        self.messages_scroll.viewport().installEventFilter(self)
         column.addWidget(self.messages_scroll, 1)
         self.composer = Composer()
         self.composer.setPlaceholderText("What would you like to work on?")
@@ -797,7 +856,7 @@ class MainWindow(QMainWindow):
         # move; what it lacked was any sign that it was a different surface
         # from the messages above it. A hairline is what says that.
         self.composer_bar, composer_column = frame("composerBar")
-        composer_column.setContentsMargins(0, 12, 0, 14)
+        composer_column.setContentsMargins(22, 12, 22, 14)
         composer_column.setSpacing(8)
         composer_column.addLayout(self.attachment_rows)
         composer_column.addWidget(self.composer)
@@ -808,7 +867,17 @@ class MainWindow(QMainWindow):
         self.attach_button.setToolTip(
             "Attach images or PDFs. An image is only read by an agent with vision enabled.")
         footer.addWidget(self.attach_button)
-        footer.addWidget(label("Enter to send · Shift + Enter for a new line", "muted"))
+        # This hint used to be a plain unwrapped label, so its whole line was a
+        # hard minimum width for the composer, and the composer's minimum was
+        # the chat panel's minimum: 1111px inside a panel that is 1020px. The
+        # panel then laid its header out at the wider figure, which put anything
+        # after the header's stretch past the right edge of the window, where
+        # the conversation buttons sat visible and unclickable. Wrapping lets it
+        # shrink to its longest word instead of to its whole sentence.
+        self.composer_hint = label("Enter to send · Shift + Enter for a new line", "muted", True)
+        self.composer_hint.setWordWrap(True)
+        self.composer_hint.setMinimumWidth(120)
+        footer.addWidget(self.composer_hint)
         footer.addStretch()
         self.send_button = action("Send request  ↑", self.send_message, True)
         self.send_button.setToolTip("Send this message to the selected agent")
@@ -1422,6 +1491,264 @@ class MainWindow(QMainWindow):
         self.update_chat_controls()
         self.render_imported_models()
 
+    def forget_conversation(self, target, store=None):
+        """Drop a conversation from this device: its chat and its saved rooms.
+
+        ``store`` is another workspace's history store, so a conversation can
+        be forgotten in a workspace that is not the one being viewed.
+
+        The room record and the ``("ui","state")`` blob are edited separately
+        because they are stored separately: a room is one record of its own,
+        while every chat in a workspace shares one blob and has to be read,
+        edited and written back.
+        """
+        if store is None:
+            store = self.history_store
+        self.conversations.pop(target, None)
+        self.chats.pop(target, None)
+        if self.selected == target:
+            self.selected = None
+        if store:
+            store.delete("rooms", target)
+            state = store.load("ui").get("state", {})
+            if state.get("chats", {}).pop(target, None) is not None \
+                    or target in state.get("conversations", {}):
+                state.get("conversations", {}).pop(target, None)
+                if state.get("selected") == target:
+                    state["selected"] = None
+                store.save("ui", "state", state)
+        return target
+
+    def clear_conversation(self, target):
+        """Empty a conversation but keep the thread open.
+
+        For a shared conversation this clears the copy on this device only. The
+        thread still exists on the relay for everyone else, and comes back the
+        next time somebody posts in it, so the confirmation says so rather than
+        letting it read as a delete. The room's revision is copied over to keep
+        the next poll from rebuilding the messages from the relay straight
+        away, which is what it does when the revision has moved on.
+        """
+        chat = self.chats.get(target)
+        if not chat:
+            return
+        room = self.conversations.get(target)
+        chat["messages"] = []
+        chat["unread"] = 0
+        chat["local_pending"] = False
+        if room:
+            chat["revision"] = room["revision"]
+        if target == self.selected:
+            self.render_messages()
+        self.render_agents()
+        self.persist_history()
+
+    def row_note(self, target):
+        """Why a conversation's row will still be in the list after it is emptied.
+
+        A row is rebuilt from the connected devices and agents on every poll, so
+        one that names a live device cannot be taken away by emptying its
+        messages. Without saying so, a delete that worked looks exactly like one
+        that did not: the conversation empties and the row sits there still.
+        """
+        if target not in {agent["id"] for agent in self.agents}:
+            return ""
+        return ("\n\nIts row will stay in the list: it is there because the "
+                "device is connected, so only the messages are removed.")
+
+    def answered_yes(self, answer):
+        """Whether a confirmation dialog was answered Yes.
+
+        Compared with ``!=``, never with ``is not``. A dialog returns a plain
+        ``int`` -- 16384 -- while ``QMessageBox.StandardButton.Yes`` is a
+        Shiboken flag enum. The two are equal by value and are never the same
+        object, so an identity test always said no and the confirmation became a
+        no-op: the dialog opened, the answer was given, and the action quietly
+        did nothing. Every test of it passed, because they all replaced the
+        dialog with one returning the very enum member being compared against.
+        """
+        return answer == QMessageBox.StandardButton.Yes
+
+    def delete_conversation(self, target):
+        """Remove a conversation's history from this device, after asking."""
+        room = self.conversations.get(target)
+        count = len((self.chats.get(target) or {}).get("messages") or [])
+        note = self.row_note(target)
+        if room:
+            title = room["title"]
+            question = (f"Delete this conversation from this device?\n\n"
+                        f"Its {count} messages will be removed and cannot be "
+                        f"read again.\n\nIt is shared, so it stays on the relay "
+                        f"for the other devices and will come back at the next "
+                        f"poll. Deleting it for everyone needs the "
+                        f"conversation's owner." + note)
+        else:
+            title = target
+            question = (f"Delete this conversation from this device?\n\n"
+                        f"Its {count} messages will be removed and cannot be "
+                        f"read again." + note)
+        if not self.answered_yes(QMessageBox.question(
+                self, "Delete conversation", f"{title}\n\n{question}",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel)):
+            return
+        # Forgot before anything is drawn, because render_messages() ends by
+        # saving the history: redrawing first would write the conversation back
+        # out again on the way past.
+        self.forget_conversation(target)
+        self.render_agents()
+        self.render_messages()
+        self.render_attachments()
+        self.persist_history()
+        self.notice(f"{count} messages deleted from this device. " + (
+            "The row stays while the device is connected."
+            if note else "The conversation is gone from this device."))
+
+    def clear_conversation_confirm(self, target):
+        """Ask before emptying a conversation, saying what it will and will not do."""
+        room = self.conversations.get(target)
+        title = room["title"] if room else target
+        count = len((self.chats.get(target) or {}).get("messages") or [])
+        note = self.row_note(target)
+        if room:
+            detail = (f"This clears your copy of the conversation on this device.\n\n"
+                      f"Its {count} messages will be removed. It is shared, so "
+                      f"they stay on the relay for the other devices and reappear "
+                      f"here the next time somebody posts in it." + note)
+        else:
+            detail = (f"This removes the {count} messages in this conversation "
+                      f"on this device. They cannot be read again." + note)
+        if not self.answered_yes(QMessageBox.question(
+                self, "Clear conversation", f"{title}\n\n{detail}",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel)):
+            return
+        self.clear_conversation(target)
+        self.notice(f"{count} messages cleared. " + (
+            "The row stays while the device is connected."
+            if note else "The conversation is still open."))
+
+    def conversation_actions(self, target):
+        """What can be done to a conversation, as ``(text, tooltip, callback)``.
+
+        Described rather than built, so the header and the context menu make
+        their own controls from one list and cannot drift apart. Each consumer
+        builds only what it needs: a button for the header, a menu entry for a
+        right-click.
+
+        A shared conversation follows the workspace's own rule: whoever started
+        it may end it, and anyone else steps out of it. Delete and leave go to
+        the relay first, so what is claimed to the reader is what happens.
+        """
+        if not target:
+            return []
+        chat = self.chats.get(target) or {}
+        room = self.conversations.get(target)
+        entries = []
+        if chat.get("messages"):
+            entries.append((
+                "Clear messages",
+                "Empty your copy of this conversation on this device, and keep the thread",
+                lambda id=target: self.clear_conversation_confirm(id)))
+        if room:
+            owned = room["owner"] == self.identity
+            entries.append((
+                "Delete for everyone" if owned else "Leave conversation",
+                "End this conversation for every device in it" if owned
+                else "Step out of this conversation, keeping it for the others",
+                lambda id=target, remove=owned: self.end_conversation(id, remove)))
+        else:
+            entries.append((
+                "Delete conversation",
+                "Remove this conversation and its messages from this device",
+                lambda id=target: self.delete_conversation(id)))
+        return entries
+
+    def end_conversation(self, target, delete):
+        """Ask the relay to end a shared conversation, then forget it here.
+
+        The local copy goes only once the relay has agreed. Forgetting it first
+        would leave the row on screen until the next poll brought it back, which
+        reads as though the delete had failed.
+        """
+        room = self.conversations.get(target)
+        title = room["title"] if room else target
+        count = len((self.chats.get(target) or {}).get("messages") or [])
+        if delete:
+            question = (f"Delete this conversation for every device in it?\n\n"
+                        f"Its {count} messages will be removed from the relay "
+                        f"and cannot be read again by anyone.")
+        else:
+            question = (f"Leave this conversation?\n\n"
+                        f"You will stop seeing it, and its {count} messages stay "
+                        f"for everyone else in it.")
+        if not self.answered_yes(QMessageBox.question(
+                self, "Delete conversation" if delete else "Leave conversation",
+                f"{title}\n\n{question}",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel)):
+            return
+        method = "delete_conversation" if delete else "leave_conversation"
+        self.chat_busy = True
+        self.update_chat_controls()
+        def failed(message):
+            self.chat_busy = False
+            self.notice(message, error=True)
+            self.update_chat_controls()
+        def done(result):
+            self.chat_busy = False
+            self.forget_conversation(target)
+            self.render_agents()
+            self.render_messages()
+            self.render_attachments()
+            self.persist_history()
+            self.notice("Conversation deleted." if delete
+                        else "You have left the conversation.")
+        self.command(method, target, success=done, failure=failed)
+
+    def build_conversation_menu(self, target):
+        """A menu of what can be done to a conversation, or None if nothing can.
+
+        Built from the same description the header and the right-click both use,
+        so there is one answer to what a conversation can be given and it is the
+        same in every place it is offered.
+        """
+        entries = self.conversation_actions(target)
+        if not entries:
+            return None
+        menu = QMenu(self)
+        for text, tip, callback in entries:
+            entry = menu.addAction(text)
+            entry.setToolTip(tip)
+            entry.setEnabled(not self.chat_busy)
+            entry.triggered.connect(lambda checked=False, run=callback: run())
+        return menu
+
+    def show_manage_menu(self):
+        """Open the conversation menu from the header, under the button."""
+        menu = self.build_conversation_menu(self.selected)
+        if menu:
+            menu.exec(self.manage_button.mapToGlobal(
+                QPoint(0, self.manage_button.height())))
+
+    def show_conversation_menu(self, point):
+        """Right-click a conversation for the same menu the header offers.
+
+        On whichever list was clicked, so the sidebar and the conversation list
+        behave as one. A click on empty space below the rows is not a
+        conversation and gets no menu: acting on whatever happened to be
+        selected instead would delete something the pointer was nowhere near.
+        """
+        listing = self.sender()
+        if not isinstance(listing, QListWidget):
+            return
+        item = listing.itemAt(point)
+        if item is None:
+            return
+        menu = self.build_conversation_menu(item.data(Qt.ItemDataRole.UserRole))
+        if menu:
+            menu.exec(listing.viewport().mapToGlobal(point))
+
     @staticmethod
     def model_purpose_summary(agent):
         profile = agent.get("profile") or agent
@@ -1482,6 +1809,17 @@ class MainWindow(QMainWindow):
                 subtitle = "Start your coordinator and a model with delegation enabled" if agent["delegating"] else "Connect or start a model to use General chat"
         self.chat_subtitle.setText((f"Shared with {len(room['members'])} devices · " if room else "") + subtitle)
         self.share_conversation_button.setEnabled(bool(self.ready and not self.remote and agent and agent["online"] and not pending))
+        # The header's one conversation button is always the same widget. It
+        # used to be two, rebuilt from scratch on every agents poll, and the
+        # poll threw them away mid-click; and then two text buttons overflowed
+        # the panel and were laid out past the edge of the window, where they
+        # could not be clicked at all. It is held and only enabled or disabled.
+        entries = self.conversation_actions(self.selected)
+        self.manage_button.setEnabled(bool(entries) and not self.chat_busy)
+        self.manage_button.setToolTip(
+            f"Clear or delete this conversation: {len(entries)} "
+            + ("action on offer" if len(entries) == 1 else "actions on offer")
+            if entries else "There is nothing to do to this conversation yet")
 
     def select_agent(self, agent_id):
         self.selected = agent_id
@@ -1559,16 +1897,22 @@ class MainWindow(QMainWindow):
             button.setToolTip(entry["name"])
             button.setChecked(entry["id"] == self.workspace_id)
 
-    def speaker_avatar(self, speaker, role):
+    def speaker_avatar(self, speaker, role, provider=None, kind=None):
         """The mark beside a message.
 
         The provider's own logo when the speaker is a known model agent, so
-        a conversation between providers can be read at a glance, and the
-        shared device mark otherwise. Both are painted rather than styled,
-        so they follow the theme on the same terms as the orbit art.
+        a conversation can be read at a glance, and the shared device mark
+        otherwise. Both are painted rather than styled, so they follow the
+        theme on the same terms as the orbit art.
+
+        The provider is passed in rather than looked up again, because the
+        caller has already resolved it and looking it up by the speaker's
+        display name fails as soon as that name is the provider's.
         """
         if role == "user":
             return device_avatar(self.theme, self.identity, SPEAKER_AVATAR)
+        if provider:
+            return provider_logo(provider, self.theme, SPEAKER_AVATAR)
         agent = next((entry for entry in self.agents if entry["id"] == speaker), None)
         if agent and agent.get("provider"):
             return provider_logo(agent["provider"], self.theme, SPEAKER_AVATAR)
@@ -1578,10 +1922,239 @@ class MainWindow(QMainWindow):
         """Put a message on the clipboard.
 
         Says so afterwards, because nothing on screen changes when a copy
-        succeeds and silence would leave the button looking inert.
+        succeeds and silence would leave the button looking inert. It is gone
+        in a second: this confirms something the user just watched happen,
+        rather than telling them something they have to act on.
         """
         QApplication.clipboard().setText(text)
-        self.notice("Message copied.")
+        self.notice("Message Copied", duration=COPY_TOAST_MS)
+
+    def speaker_identity(self, role, room=None):
+        """Who is speaking, as ``(name, subtitle, provider, kind)``.
+
+        Resolved in one place because it used to be spread across the role map
+        and a fallback that labelled a message with whatever conversation
+        happened to be open. Two roles fell through that fallback: ``peer``,
+        which named another device's message after the reader's own agent, and
+        any assistant whose id the reader then had to decode.
+
+        ``kind`` drives the layout rather than the role string, so a peer's
+        message and an agent's are told apart by the bubble and not by the
+        text alone.
+
+        The subtitle carries the agent's own id when it differs from the
+        provider name, which is what tells two Ollama agents apart.
+        """
+        if role == "user":
+            return ("You", "", None, "user")
+        if role == "error":
+            return ("Request unsuccessful", "", None, "error")
+        if role == "local_agent":
+            return self.agent_identity(room["target"] if room else self.selected)
+        if role.startswith("local_agent:"):
+            # This device's own agent answering a peer's request. The responder
+            # is named in the role, so it is read from there rather than
+            # resolved. The fallback below could not do it: there is no room in
+            # a peer conversation, so ``self.selected`` is the peer who asked
+            # the question, and the reply came out headed by the asker with the
+            # real responder left inline in the body text.
+            return self.agent_identity(role.removeprefix("local_agent:"))
+        if role == "peer":
+            # Another device. It has no provider of ours and no avatar, so it
+            # is named by its own identity and tinted as a peer.
+            #
+            # The sender is the key of the chat the message is in, which is
+            # ``self.selected`` whenever this is being rendered: a peer chat is
+            # opened by the sender's identity and has no room behind it, since
+            # rooms only ever exist for agents. So ``self.selected`` is who
+            # wrote it.
+            #
+            # Deliberately not ``room["target"]``, the way the fallback at the
+            # end of this method resolves an agent: that names the local agent
+            # the reader is talking to, which would label another device's
+            # message with the reader's own agent.
+            return (self.selected or "Another device", "", None, "peer")
+
+        speaker = role.removeprefix("member:") if role.startswith("member:") else None
+        if speaker is not None:
+            return (speaker, "", None, "peer")
+
+        return self.agent_identity(room["target"] if room else self.selected)
+
+    def agent_identity(self, agent_id):
+        """An agent's display name, subtitle and provider.
+
+        Falls back to the raw id when the agent is not in the current list,
+        which is the honest thing to show rather than a placeholder.
+        """
+        entry = next((agent for agent in self.agents if agent["id"] == agent_id), None)
+        if entry is None:
+            return (agent_id, "", None, "agent")
+        provider = entry.get("provider")
+        name = provider_names(self.theme).get(provider, (agent_id,))[0] if provider else agent_id
+        subtitle = agent_id if agent_id and agent_id != name else ""
+        return (name, subtitle, provider, "agent")
+
+    def message_bubble_fill(self, provider, kind):
+        """The fill behind a message, which is what tells them apart.
+
+        Your own messages get the neutral raised surface. An agent's is tinted
+        toward that provider's own accent, so which model is answering reads
+        without the name. A failure is tinted with the theme's danger colour
+        rather than a provider's, because a failed call is not that model's
+        fault to be branded with.
+        """
+        surface = color(self.theme, "surface")
+        if kind == "user":
+            return color(self.theme, "surface_raised")
+        if kind == "error":
+            return color(self.theme, "danger_bg")
+        if provider:
+            return mix(provider_color(self.theme, provider), surface, 0.14)
+        return color(self.theme, "surface")
+
+    def message_title_colour(self, provider, kind):
+        if kind == "error":
+            return color(self.theme, "error")
+        if provider:
+            return provider_color(self.theme, provider)
+        return color(self.theme, "agent_title")
+
+    def cap_message_widths(self):
+        """Give every bubble its own size: as wide as its text, up to a share of the panel.
+
+        Set explicitly rather than left to the layout's size policy. A bubble
+        has to be told where to stop or one long line runs off the edge, and
+        it has to be told how big it is as well: relying on the box layout
+        inside a freshly built row left it at the widget's default 640x480,
+        which is the full-bleed slab this replaced.
+
+        The width is ``min(preferred, limit)``: a short reply gets the width of
+        its text and reads as a bubble, a long one gets the ceiling and wraps.
+
+        The height is worked out from each child's own idea of its height, not
+        read back from the bubble. Both obvious readings are wrong:
+
+        ``column.sizeHint()`` reports whatever the column is currently laid out
+        at, and the height used to be pinned from that reading. Once pinned, the
+        column's hint reports the pin back, so the pin became its own input and
+        the height could never change again. A message laid out at a wide panel
+        kept that height, and narrowing the panel re-wrapped the text into a
+        bubble far too short for it, cutting off the bottom of the message.
+
+        Reading a child's ``height()`` is wrong too. A plain label in a fresh row
+        still has whatever height it was last given, which is the widget
+        default, so a one-line title came out hundreds of pixels tall. So each
+        kind is asked the way it decides for itself: a Markdown reply works its
+        height out from its text, a wrapped label from ``heightForWidth`` at the
+        width it has just been given, and a plain label from its size hint.
+
+        The pin goes back on at the end, because the scrolling panel squeezes
+        its rows to fit rather than scrolling them, which left every bubble one
+        line high. It is set from what the children actually need, so it holds
+        the text rather than cutting it.
+        """
+        available = self.messages_scroll.viewport().width()
+        limit = max(240, int(available * 0.74)) if available > 0 else 240
+        for bubble in self.message_bubbles:
+            width = bubble.preferred_width()
+            bubble.setFixedWidth(max(1, min(width if width > 0 else limit, limit)))
+            # Released before anything is measured: a fixed height is one of
+            # the column's inputs, so a pin left from the last render is what
+            # this one would be measured against.
+            bubble.setMinimumHeight(0)
+            bubble.setMaximumHeight(UNPINNED)
+            # The column first, so the body is handed the new width and can set
+            # its wrap. Measuring before the layout ran gave the height of one
+            # enormous line: 24000px for a paragraph.
+            bubble.column.activate()
+            margins = bubble.column.contentsMargins()
+            children = [bubble.column.itemAt(index).widget()
+                        for index in range(bubble.column.count())]
+            needed = margins.top() + margins.bottom()
+            for child in children:
+                refit = getattr(child, "fit_height", None)
+                if callable(refit):
+                    refit()
+                    needed += child.height()
+                elif isinstance(child, QLabel) and child.wordWrap():
+                    # A wrapped label does not re-wrap on its own once a height
+                    # has been fixed on it, so it has to be told.
+                    child.setFixedHeight(child.heightForWidth(child.width()))
+                    needed += child.height()
+                else:
+                    needed += child.sizeHint().height()
+            needed += bubble.column.spacing() * max(0, len(children) - 1)
+            bubble.setFixedHeight(max(1, needed))
+
+    def settle_message_layout(self):
+        """Force the chat's layout to run now.
+
+        A render leaves rows at their default size until the event loop gets
+        round to them, so anything reading the geometry straight afterwards
+        sees an unlaid-out widget. Invalidating alone only resizes the row, it
+        does not reach inside it, so each row's own layout is activated too,
+        and the bubbles are sized before the pass that places them.
+        """
+        for row in self.messages_widget.findChildren(HoverRow):
+            row.outer.invalidate()
+        self.messages.invalidate()
+        self.messages.activate()
+        self.cap_message_widths()
+        for row in self.messages_widget.findChildren(HoverRow):
+            row.outer.activate()
+            row.content.activate()
+            # The stack holding the bubble and the actions under it. Left out,
+            # the bubble sits at its default 640x480 geometry until the event
+            # loop gets to it, which is the same fault one level down.
+            row.message.activate()
+            if row.has_actions:
+                row.actions.layout().activate()
+            for bubble in row.findChildren(MessageBubble):
+                # The bubble's own column, or the title and body keep their
+                # default 640x480 geometry and the bubble ends up one line
+                # tall whatever its size hint says.
+                bubble.column.activate()
+
+    def eventFilter(self, watched, event):
+        # The filter is installed on the viewport, so ``watched`` is always the
+        # viewport and never the scroll widget. Asking for both used to be a
+        # test nothing could pass: a widget is never identical to its own
+        # viewport, so the branch was dead and bubble widths were never
+        # re-capped when the window was resized, which is the whole reason
+        # this filter is installed.
+        scroll = getattr(self, "messages_scroll", None)
+        if scroll is not None and watched is scroll.viewport() \
+                and event.type() == QEvent.Type.Resize:
+            self.cap_message_widths()
+        return super().eventFilter(watched, event)
+
+    def split_legacy_responder(self, role, text):
+        """Recover the responder from replies saved before the role carried it.
+
+        Those replies arrived with this device's agent id glued onto the front
+        of the text as ``id:\\n``, because there was nowhere else to put it. With
+        no room to resolve, the only identity available was the chat's key,
+        which is the peer who asked, so those conversations render with the
+        asker heading a reply their own agent wrote.
+
+        Split only when that first line is an agent currently in the list. The
+        old prefix and an ordinary opening line are both bare words within the
+        same character set, so the shape alone cannot tell them apart, and a
+        reply that begins "Note:" must not lose its first line. The colon the
+        old prefix ended with is kept as a second test, so a first line with no
+        colon is never split at all.
+
+        Rendering only: the stored message is left as it was, so saving the
+        history again writes the same bytes and this reapplies cleanly.
+        """
+        if role != "local_agent" or "\n" not in text:
+            return role, text
+        head, _, rest = text.partition("\n")
+        identity = head[:-1] if head.endswith(":") else ""
+        if rest and identity and any(agent["id"] == identity for agent in self.agents):
+            return "local_agent:" + identity, rest
+        return role, text
 
     def render_messages(self):
         clear_layout(self.messages)
@@ -1601,7 +2174,6 @@ class MainWindow(QMainWindow):
                 self.messages.addWidget(
                     label("Pick a conversation or an agent on the left, or connect a "
                           "model from Providers to start one.", "muted", True))
-        names = {"user": "You", "error": "Request unsuccessful", "local_agent": "Agent on this device"}
         room = self.conversations.get(self.selected)
         routing = chat.get("routing", {})
         if routing:
@@ -1610,47 +2182,99 @@ class MainWindow(QMainWindow):
             detail = routing["reason"] if routing.get("mode") == "direct" else "Jev · " + (assignments or "Clarification") + (
                 " · " + routing["reason"] if routing.get("reason") else "")
             self.messages.addWidget(label(detail, "muted", True))
+        self.message_bubbles = []
         previous = None
-        for role, text in chat.get("messages", []):
-            speaker = role.removeprefix("member:") if role.startswith("member:") else names.get(role, room["target"] if room else self.selected)
-            if speaker == GENERAL_TARGET:
-                speaker = routing["coordinator"] if routing.get("mode") == "direct" else "Jev"
+        messages = [self.split_legacy_responder(role, text)
+                    for role, text in chat.get("messages", [])]
+        # Every speaker, resolved once up front. The run a message belongs to
+        # is decided by what comes after it, so the whole history has to be
+        # known before the first row can be laid out.
+        resolved = [self.speaker_identity(role, room) for role, _ in messages]
+        identities = [(name, subtitle, provider, kind)
+                      for name, subtitle, provider, kind in resolved]
+        for index, (role, text) in enumerate(messages):
+            name, subtitle, provider, kind = resolved[index]
             # Discord groups consecutive messages from one speaker under a
             # single header rather than boxing each one. A row per message
             # with a card around it reads as a stack of documents, which is
             # what this used to look like.
-            grouped = speaker == previous
-            row = HoverRow()
+            #
+            # The identity is the name, the subtitle and the provider together,
+            # not the name on its own. Two agents on the same provider are both
+            # called "Ollama", so grouping on the name alone tucked one
+            # agent's reply under another agent's header and dropped the
+            # subtitle that tells them apart.
+            identity = identities[index]
+            grouped = identity == previous
+            # The last message of a run, which is where the actions go. Putting
+            # them under every message instead would stack a copy button under
+            # each of a run's replies with nothing between them.
+            last_of_run = index + 1 >= len(identities) \
+                or identities[index + 1] != identity
+            mine = kind == "user"
+            row = HoverRow(mine=mine)
             if grouped:
-                # Keep the text aligned under the first message's text
-                # rather than sliding it left under the absent avatar.
-                spacer = QWidget()
-                spacer.setFixedWidth(SPEAKER_AVATAR)
-                row.add_content(spacer, 0, Qt.AlignmentFlag.AlignTop)
+                # Hold the place the mark would take, so a follow-on message
+                # lines up under the one above instead of sliding across.
+                mark = QWidget()
+                mark.setFixedWidth(SPEAKER_AVATAR)
             else:
-                row.add_content(self.speaker_avatar(speaker, role), 0,
-                                Qt.AlignmentFlag.AlignTop)
-            column = QVBoxLayout()
-            column.setSpacing(4)
-            row.add_content(column, 1)
+                mark = self.speaker_avatar(name, role, provider, kind)
+
+            bubble = MessageBubble()
+            bubble.set_background(self.message_bubble_fill(provider, kind))
+            bubble.setAccessibleName(f"{name}: {text[:60]}")
             if not grouped:
-                title = label(speaker)
+                title = label(name)
                 title.setStyleSheet("font-weight:650; color:"
-                                    + color(self.theme, "error" if role == "error" else "agent_title") + ";")
-                column.addWidget(title)
-            if role in ("assistant", "local_agent"):
+                                    + self.message_title_colour(provider, kind) + ";")
+                title.setAlignment(Qt.AlignmentFlag.AlignRight if mine
+                                   else Qt.AlignmentFlag.AlignLeft)
+                bubble.add_content(title)
+                if subtitle:
+                    detail = label(subtitle, "muted", True)
+                    detail.setAlignment(Qt.AlignmentFlag.AlignRight if mine
+                                        else Qt.AlignmentFlag.AlignLeft)
+                    bubble.add_content(detail)
+            # ``local_agent:<id>`` is a reply from an agent too, so it is matched
+            # by prefix rather than by equality. Compared exactly, it would stop
+            # matching the moment the responder's id rode along in the role, and
+            # the reply would quietly fall back to being drawn as raw text with
+            # its markdown left in it.
+            if role == "assistant" or role.startswith("local_agent"):
                 body = MarkdownMessage(text, theme_name=self.theme)
             else:
                 body = label(text, wrap=True)
                 body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            column.addWidget(body)
-            copy = action("Copy", lambda checked=False, value=text: self.copy_message(value), name="ghost")
-            copy.setToolTip("Copy this message")
-            row.add_action(copy)
+            bubble.add_content(body)
+            self.message_bubbles.append(bubble)
+
+            # Your messages sit on the right with the mark beside them, an
+            # agent's on the left. The stretch is what carries the bubble to
+            # that side, so the row itself still spans the panel.
+            row.set_message(bubble)
+            row.add_mark(mark)
+
+            # Copy belongs to the reply, the way it does in a browser
+            # assistant, and only the last of a run carries it. Your own
+            # messages have none: there is nothing there to want back, and a
+            # button under every question would be a row of them.
+            if kind in ("agent", "peer") and last_of_run:
+                copy = action("Copy",
+                              lambda checked=False, value=text: self.copy_message(value),
+                              name="ghost")
+                copy.setToolTip("Copy this message")
+                row.add_action(copy)
             self.messages.addWidget(row)
-            previous = speaker
+            previous = identity
+        self.cap_message_widths()
         if chat.get("pending") or chat.get("local_pending"):
             self.messages.addWidget(label("● ● ●   Waiting for your agent…", "muted"))
+        # Force the layout now rather than on the next event-loop turn. A
+        # bubble that has not been laid out has no width, so the width cap
+        # below it and anything that reads the geometry afterwards would be
+        # working from a widget still sitting at its default size.
+        self.settle_message_layout()
         self.update_chat_controls()
         self.persist_history()
         QTimer.singleShot(0, lambda: self.messages_scroll.verticalScrollBar().setValue(self.messages_scroll.verticalScrollBar().maximum()))
@@ -1812,11 +2436,24 @@ class MainWindow(QMainWindow):
         while self.activity_list.count() > 8:
             self.activity_list.takeItem(self.activity_list.count() - 1)
 
-    def notice(self, message, error=False):
+    def notice(self, message, error=False, duration=None):
+        """Show the toast, then take it away again.
+
+        ``duration`` is how long it stays. It defaults to 7.5s because a
+        failure has to be read and acted on, but a copy has already happened:
+        it is only confirming something the user just watched succeed, so it
+        gets a second and gone. Long enough to notice, short enough not to be
+        left sitting across the chat.
+
+        The window's one timer is restarted rather than a new one scheduled, so
+        the notice that is actually on screen owns the countdown. Anything else
+        and a stale timer from a previous notice hides this one early, which is
+        at its worst on a short notice followed by a long one.
+        """
         self.style_toast(error)
         self.toast.setText(message)
         self.toast.show()
-        QTimer.singleShot(7500, self.toast.hide)
+        self.toast_timer.start(TOAST_MS if duration is None else duration)
 
     def command(self, method, *args, success=None, failure=None):
         if not self.ready and method != "close":
@@ -1960,6 +2597,19 @@ class MainWindow(QMainWindow):
             changed = set(self.conversations) != {room["id"] for room in data}
             self.conversations = {room["id"]: room for room in data}
             selected_changed = False
+            # A room that is no longer listed is gone: deleted on another
+            # device, or the reader was removed from it. This used to leave the
+            # matching chat behind, and leave ``selected`` pointing at it, so
+            # the conversation stayed in the list and stayed open. Pruned here
+            # so a removal made anywhere is reflected everywhere.
+            gone = [target for target in self.chats
+                    if target.startswith("conversation-") and target not in self.conversations]
+            for target in gone:
+                self.chats.pop(target, None)
+                if self.selected == target:
+                    self.selected = None
+                    selected_changed = True
+                changed = True
             for room in data:
                 chat = self.chats.setdefault(room["id"], {"messages": [], "history": [], "pending": False})
                 if chat.get("revision") == room["revision"]:
@@ -1997,7 +2647,15 @@ class MainWindow(QMainWindow):
                 self.add_activity(f"Message from {source}", f"Received by {data['to']}")
                 self.notice(f"Message from {source}. Open their conversation to view it.")
             else:
-                chat["messages"].append(("error" if data.get("error") else "local_agent", data["to"] + ":\n" + data["text"]))
+                # ``data["to"]`` is this device's own agent, which is the one
+                # that answered: ``data["from"]`` is the peer that asked, and
+                # is the chat we are filing this under. The responder's id
+                # travels in the role rather than glued onto the front of the
+                # text, so the reply is headed by whoever actually replied
+                # instead of by the peer who asked. A role with an id in it is
+                # the same shape as ``member:<id>`` has always used.
+                role = "error" if data.get("error") else "local_agent:" + data["to"]
+                chat["messages"].append((role, data["text"]))
             self.render_agents()
             self.persist_history()
             if self.selected == source:

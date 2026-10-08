@@ -148,8 +148,8 @@ class DesktopRuntime:
                 store = self.engines[workspace_id].history_store
                 state = store.load("ui").get("state", {})
                 chat = state.setdefault("chats", {}).setdefault(data["from"], {"messages": [], "history": [], "pending": False})
-                role = "peer" if event == "incoming" else "error" if data.get("error") else "local_agent"
-                chat["messages"].append([role, data["text"] if event == "incoming" else data["to"] + ":\n" + data["text"]])
+                role = "peer" if event == "incoming" else "error" if data.get("error") else "local_agent:" + data["to"]
+                chat["messages"].append([role, data["text"]])
                 chat["unread"] = chat.get("unread", 0) + (event == "incoming")
                 store.save("ui", "state", state)
             elif event == "conversations" and self.engines[workspace_id].remote == (self.entry(workspace_id)["kind"] == "remote"):
@@ -157,8 +157,16 @@ class DesktopRuntime:
                 state = engine.history_store.load("ui").get("state", {})
                 previous = state.get("conversations", {})
                 state["conversations"] = {room["id"]: room for room in data}
+                chats = state.setdefault("chats", {})
+                # Rooms that dropped off the listing are gone, and their saved
+                # chats go with them. Only added to before, so a conversation
+                # deleted on another device stayed in this workspace's archive
+                # for good, and came back if the room ever reappeared.
+                for target in [key for key in chats
+                               if key.startswith("conversation-") and key not in state["conversations"]]:
+                    del chats[target]
                 for room in data:
-                    chat = state.setdefault("chats", {}).setdefault(room["id"], {"messages": [], "history": []})
+                    chat = chats.setdefault(room["id"], {"messages": [], "history": []})
                     old_ids = {message["id"] for message in previous.get(room["id"], {}).get("messages", [])}
                     chat["unread"] = chat.get("unread", 0) + len({message["id"] for message in room["messages"]} - old_ids)
                     chat["revision"] = room["revision"]
@@ -388,6 +396,67 @@ class DesktopRuntime:
         if self.entry()["kind"] != "local":
             raise ValueError("Only the workspace owner can remove members")
         await self.engine.remove_member(member)
+
+    async def _conversation_request(self, conversation_id, path, method):
+        """Ask the relay to change a shared conversation, tolerating an old one.
+
+        Only 200 and 404 mean it is done. 404 means the room is not here, and it
+        is also what a relay predating these routes answers for an unregistered
+        path, so an older host lands here too and the local copy is forgotten
+        with nothing to lose.
+
+        401 and 501 are refusals, and they do not transfer from
+        delete_workspace, which tolerates both. There, a 401 means the token is
+        gone, so the membership is gone and forgetting it locally is right, and
+        a 501 means an operator manages membership. Neither is true of a
+        conversation: 401 says this device may not make the change and 501 says
+        the relay declined to, while the room and everyone else's messages of it
+        are still there. Reporting either as success makes the window forget a
+        conversation that has gone nowhere, and the next poll brings it straight
+        back -- a delete that looks like it worked and did not.
+
+        501 in particular can never come from this relay's conversation routes;
+        they answer 200, 401, 403 and 404 only. Tolerating it was dead code
+        that would have fired only against something else, and firing would
+        report success for an operation the relay refused to perform.
+        """
+        engine = self.connected_engine()
+        base = relay_http_url(engine.active_url, True)
+        try:
+            call = getattr(engine.relay_http(), method)
+            response = await call(base + f"/conversations/{conversation_id}{path}",
+                                  headers={"Authorization": "Bearer " + engine.active_token},
+                                  timeout=10)
+        except httpx.HTTPError:
+            # The host is unreachable. A local device cannot change a shared
+            # room, so this is reported rather than quietly faked.
+            raise RuntimeError("Could not reach the host, so the conversation was not changed.") from None
+        if response.status_code == 401:
+            raise RuntimeError(
+                "This device is not a member of that conversation any more, so "
+                "it was not changed. Ask the host to remove your device and "
+                "reconnect.")
+        if response.status_code == 501:
+            raise RuntimeError(
+                "This host does not support ending a conversation, so nothing "
+                "was changed. Ask the owner to delete it from their desktop.")
+        if response.status_code in (200, 404):
+            return True
+        try:
+            reason = response.json().get("error")
+        except ValueError:
+            reason = None
+        raise RuntimeError(reason or "The host could not change that conversation.")
+
+    async def delete_conversation(self, conversation_id):
+        async with self.mutation:
+            await self._conversation_request(conversation_id, "", "delete")
+            self.engine.history_store.delete("rooms", conversation_id)
+            return True
+
+    async def leave_conversation(self, conversation_id):
+        async with self.mutation:
+            return await self._conversation_request(conversation_id, "/leave", "post")
 
     def _credential_names_for(self, storage):
         """Every credential name a workspace owns, before anything is deleted.
