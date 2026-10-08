@@ -80,24 +80,29 @@ class MarkdownMessage(QTextBrowser):
     def natural_width(self):
         """How wide this reply would be if it were not wrapping.
 
-        Measured on a throwaway document rather than by lifting the wrap on
-        this one. Lifting it looks like the obvious way and does not work: the
-        change emits ``documentSizeChanged``, which re-enters ``fit_height``,
-        and that puts the wrap straight back before the width is read. Worse,
-        the layout is cached, so after a reply has been wrapped even once the
-        reading comes back as the width it already had -- which made every
-        measurement depend on the current layout, so a reply only ever matched
-        the width it was already at.
+        Measured on a clone of this reply's own document rather than by lifting
+        the wrap on the live one. Lifting it looks like the obvious way and does
+        not work: the change emits ``documentSizeChanged``, which re-enters
+        ``fit_height``, and that puts the wrap straight back before the width is
+        read. Worse, the layout is cached, so after a reply has been wrapped even
+        once the reading comes back as the width it already had.
 
-        A new document has no cached layout, so its size is the real one. The
-        result is cached because a reply's text never changes after it is built,
-        and this runs on every render and on every window resize.
+        Cloning and then setting an unconstrained text width gives the real one.
+        The clone is what makes it honest: a fresh document was the other option
+        and measured every reply at body-text width, because a new document has
+        none of this one's fonts or Markdown character formats, so headings, code
+        blocks and links all came out as if they were plain prose. The clone
+        carries them. ``setTextWidth(-1)`` is what discards the inherited
+        layout's wrap, since the clone starts out wrapped at the current width.
+
+        The result is cached because a reply's text never changes after it is
+        built, and this runs on every render and on every window resize.
         """
         if self._natural is None:
-            probe = QTextDocument()
-            probe.setDocumentMargin(self.document().documentMargin())
-            probe.setPlainText(self.document().toPlainText())
+            probe = self.document().clone()
+            probe.setTextWidth(-1)
             self._natural = probe.documentLayout().documentSize().width()
+            del probe
         return self._natural
 
     def fit_height(self, *args):

@@ -164,31 +164,30 @@ class MessageBubble(QFrame):
     def preferred_width(self):
         """How wide this bubble would like to be, before the panel's ceiling.
 
-        The layout's own hint is not enough, because a Markdown reply reports
-        the width it is currently laid out at rather than the width of its
-        text. Without this a long reply is measured against the width of the
-        first short one and never grows to fill the space it should have.
+        The widest child, not the layout's own hint, because a Markdown reply
+        reports the width it is currently laid out at rather than the width of
+        its text. Without this a long reply is measured against the width of
+        the first short one and never grows to fill the space it should have.
+
+        A child that offers ``natural_width`` is measured that way; anything
+        else is measured by its ``sizeHint``, and one whose measurement raises
+        falls back to its hint too. Margins are added once at the end rather
+        than once per child, so a bubble holding a name, a subtitle and a copy
+        button is padded once rather than three times.
         """
-        width = self.column.sizeHint().width()
+        margins = self.column.contentsMargins()
+        width = 0
         for index in range(self.column.count()):
             child = self.column.itemAt(index).widget()
+            if child is None:
+                continue
             measure = getattr(child, "natural_width", None)
-            if not callable(measure):
-                continue
             try:
-                natural = measure()
+                natural = int(measure()) if callable(measure) else child.sizeHint().width()
             except (RuntimeError, ValueError):
-                continue
-            # Replace the reply's contribution rather than taking the larger of
-            # the two. It reports the width it is currently laid out at, which
-            # is the panel's, so a short reply would otherwise inherit the
-            # width of a long one and every reply would come out the same.
-            hint = child.sizeHint().width()
-            if hint:
-                width -= hint
-            width += int(natural) + self.column.contentsMargins().left() \
-                + self.column.contentsMargins().right()
-        return width
+                natural = child.sizeHint().width()
+            width = max(width, natural)
+        return width + margins.left() + margins.right()
 
 
 class Select(QComboBox):
