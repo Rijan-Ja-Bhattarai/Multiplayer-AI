@@ -1472,13 +1472,17 @@ def test_one_timer_owns_the_toast(window) -> None:
         "the toast timer is not single-shot, so it will fire repeatedly")
 
     window.copy_message("a message")
-    assert window.toast_timer.remainingTime() == win.COPY_TOAST_MS, (
+    assert window.toast_timer.isActive() is True, (
+        f"a copy did not start the toast timer, which is {window.toast_timer.interval()}ms")
+    assert window.toast_timer.interval() == win.COPY_TOAST_MS, (
         f"a copy should start a {win.COPY_TOAST_MS}ms countdown, got "
-        f"{window.toast_timer.remainingTime()}")
+        f"{window.toast_timer.interval()}ms")
     window.notice("Something failed.", error=True)
-    assert window.toast_timer.remainingTime() == win.TOAST_MS, (
+    assert window.toast_timer.isActive() is True, (
+        f"a failure did not restart the toast timer, which is {window.toast_timer.interval()}ms")
+    assert window.toast_timer.interval() == win.TOAST_MS, (
         f"a failure should restart the countdown at {win.TOAST_MS}ms, got "
-        f"{window.toast_timer.remainingTime()}")
+        f"{window.toast_timer.interval()}ms")
     assert window.toast_timer.parent() is window, (
         "the timer is not owned by the window, so it can outlive it")
 
