@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (QComboBox, QFrame, QHBoxLayout, QLabel,
                              QPushButton, QPlainTextEdit, QSizePolicy,
                              QVBoxLayout, QWidget)
 
+from .icons import provider_pixmap
 from .theme import DARK, color, mix
 
 
@@ -235,9 +236,13 @@ class OrbitArt(QWidget):
     travel and cycle are set so the movement is perceptible without being
     hurried.
     """
-    # (label, glyph, token) for the chips orbiting the centre mark.
-    _CHIPS = (("Ollama", "O", "orbit_ollama"), ("Claude", "✳", "orbit_claude"),
-              ("Gemini", "✦", "orbit_gemini"), ("OpenAI", "◎", "orbit_openai"))
+    # (label, provider) for the chips orbiting the centre mark. The mark is the
+    # provider's own bundled artwork rather than a glyph, so the same brand is
+    # seen here, on the agent cards and in the connect form. The glyphs this
+    # replaced were typed into the font that happened to resolve, so the mark
+    # looked different per machine and none of them matched the real logo.
+    _CHIPS = (("Ollama", "ollama"), ("Claude", "anthropic"),
+              ("Gemini", "gemini"), ("OpenAI", "openai"))
     # The ellipse the chips travel, the sway either side of their resting
     # place in radians, and how long one full breath takes. At this sway a
     # chip drifts about 40px across eight seconds. The sway is also what
@@ -253,6 +258,13 @@ class OrbitArt(QWidget):
     # stated here rather than being retyped into a minimum size.
     _CHIP_W = 74.0
     _CHIP_H = 66.0
+    # The side the brand mark is drawn at inside the chip. Square, because
+    # every bundled mark is a square logo, and drawn in the upper part of the
+    # chip with the name beneath it, so the chip's own box and therefore
+    # ``required_size`` are unchanged by this. Small enough that the 9px name
+    # below it keeps its clearance and the four marks do not compete with the
+    # centre tile for attention.
+    _CHIP_MARK = 26.0
 
     @classmethod
     def required_size(cls):
@@ -285,6 +297,11 @@ class OrbitArt(QWidget):
         self.setMinimumSize(*self.required_size())
         self._phase = 0.0
         self._theme = theme
+        # Loaded once per theme and held, because this paints on every frame
+        # of the animation and ``provider_pixmap`` reads a 640x640 PNG from
+        # disk each time it is called. Four chips at sixty frames a second is
+        # the difference between a quiet orbit and a busy disk.
+        self._marks = {}
         self.animation = QPropertyAnimation(self, b"phase", self)
         self.animation.setStartValue(0.0)
         self.animation.setEndValue(math.tau)
@@ -319,8 +336,26 @@ class OrbitArt(QWidget):
         return (self.width() / 2 + math.cos(angle) * self._CHIP_RX,
                 self.height() / 2 + math.sin(angle) * self._CHIP_RY)
 
+    def chip_mark(self, provider):
+        """The provider's brand mark for this theme, loaded once and kept.
+
+        Cached against the theme name rather than for the lifetime of the
+        widget, because each theme ships its own light or dark mark and a
+        widget that outlived a theme change would otherwise keep drawing the
+        old one's, which on the light theme is a mark that is too light to see.
+        A provider with no bundled mark still returns a connection symbol,
+        which is what the agent cards show for a custom endpoint.
+        """
+        cached = self._marks.get(provider)
+        if cached is None:
+            cached = self._marks[provider] = provider_pixmap(
+                provider, self._theme, round(self._CHIP_MARK))
+        return cached
+
     def set_theme(self, name):
         """Adopt another theme and repaint with its colours."""
+        if name != self._theme:
+            self._marks.clear()
         self._theme = name
         self.update()
 
@@ -369,15 +404,25 @@ class OrbitArt(QWidget):
         painter.setPen(accent("on_accent"))
         painter.drawText(QRectF(cx - 31, cy - 31, 62, 62),
                          Qt.AlignmentFlag.AlignCenter, "M")
-        for index, (name, glyph, token) in enumerate(self._CHIPS):
+        for index, (name, provider) in enumerate(self._CHIPS):
             x, y = self.chip_position(index, self._phase)
             painter.setPen(QPen(accent("orbit_chip_ring"), 1))
             painter.setBrush(accent("orbit_chip_bg"))
             painter.drawRoundedRect(QRectF(x - 37, y - 33, 74, 66), 12, 12)
-            painter.setPen(accent(token))
-            painter.setFont(QFont("Segoe UI", 21))
-            painter.drawText(QRectF(x - 35, y - 31, 70, 36),
-                             Qt.AlignmentFlag.AlignCenter, glyph)
+            # The mark is centred in the chip's upper half rather than in the
+            # chip, so the name below it stays on the chip's own centre line
+            # instead of riding up under the logo.
+            side = self._CHIP_MARK
+            mark = self.chip_mark(provider)
+            # Four arguments, with the source rect as well as the target,
+            # because PySide6's two-argument overload only takes a QRect and
+            # rounding to whole pixels here would put the mark back on the grid
+            # that every other part of this paint deliberately leaves it off.
+            # The mark arrives with a device pixel ratio of 2, which the
+            # explicit source rect makes irrelevant.
+            painter.drawPixmap(QRectF(x - side / 2, y - 31 + (36 - side) / 2,
+                                      side, side), mark,
+                               QRectF(0, 0, mark.width(), mark.height()))
             painter.setPen(accent("orbit_chip_text"))
             painter.setFont(QFont("Segoe UI", 9))
             painter.drawText(QRectF(x - 35, y + 6, 70, 20),
