@@ -23,13 +23,15 @@ from network_a2a.persistence import HistoryStore, model_context
 from network_a2a.content import MAX_MESSAGE_BYTES, content_summary, validate_content
 from network_a2a.adapters import PROVIDERS
 from network_a2a.web_search import validate_search_settings
+from network_a2a.orchestration import GENERAL_TARGET, TASK_TYPES, general_chat_state
 
 from .bridge import NetworkThread
-from .dialogs import InviteDialog, parse_invitation
+from .dialogs import InviteDialog, available_agent_name, parse_invitation
 from .icons import navigation_icon, provider_logo, provider_pixmap
 from .lan import lan_addresses
 from .layout import minimum_size, sidebar_should_collapse, window_size
 from .markdown import MarkdownMessage
+from .model_purpose import ModelPurpose
 from .resources import ResourceSampler
 from .theme import (DARK, LIGHT, PROVIDER_NAMES, THEME_CHOICES, color, mix,
                    provider_color, provider_entry, provider_names, resolve_theme,
@@ -672,6 +674,8 @@ class MainWindow(QMainWindow):
         form.addRow("Instructions", self.model_system)
         column.addLayout(form)
 
+        self.model_purpose = ModelPurpose()
+        column.addWidget(self.model_purpose)
         self.model_autostart = QCheckBox("Start this agent automatically when the app opens")
         self.model_autostart.setChecked(True)
         self.model_autostart.setSizePolicy(
@@ -791,6 +795,18 @@ class MainWindow(QMainWindow):
         header.addWidget(self.chat_title)
         self.chat_subtitle = label("Start a conversation with a connected device.", "muted")
         header.addWidget(self.chat_subtitle)
+        coordinator_row = QHBoxLayout()
+        coordinator_row.addWidget(label("Jev coordinator", "muted"))
+        self.coordinator_picker = Select()
+        self.coordinator_picker.setToolTip("Choose the model that reads general-chat requests and assigns work using model purposes")
+        coordinator_row.addWidget(self.coordinator_picker, 1)
+        self.coordinator_save = action("Use coordinator", self.save_coordinator)
+        self.coordinator_save.setToolTip("Save the selected coordinator for this workspace")
+        coordinator_row.addWidget(self.coordinator_save)
+        self.general_chat_button = action("General chat", lambda: self.select_agent(GENERAL_TARGET))
+        self.general_chat_button.setToolTip("Ask Jev to delegate a request to models using their purposes and permitted tasks")
+        coordinator_row.addWidget(self.general_chat_button)
+        column.addLayout(coordinator_row)
         self.share_conversation_button = action("Invite to conversation", self.invite_conversation)
         self.share_conversation_button.setToolTip(
             "Invite another device into this conversation")
@@ -1309,7 +1325,16 @@ class MainWindow(QMainWindow):
         agents = [agent for agent in self.agents if self.is_model_agent(agent)]
         if chat_only:
             room = self.conversations.get(self.selected)
-            identities = {room["target"], *room["members"]} if room else {self.selected}
+            target = room["target"] if room else self.selected
+            if target == GENERAL_TARGET:
+                routing = (room or self.chats.get(self.selected, {})).get("routing", {})
+                coordinator = general_chat_state(agents, self.workspace_meta.get("coordinator"))["coordinator"]
+                identities = {coordinator["id"] if coordinator else None,
+                              *(task["agent_id"] for task in routing.get("assignments", []))}
+                if not routing:
+                    identities.update(agent["id"] for agent in agents if agent.get("delegation_enabled"))
+            else:
+                identities = {room["target"], *room["members"]} if room else {self.selected}
             agents = [agent for agent in agents if agent["id"] in identities]
         return agents
 
@@ -1339,6 +1364,7 @@ class MainWindow(QMainWindow):
             copy = QVBoxLayout()
             copy.addWidget(label(agent["id"], "heading"))
             copy.addWidget(label(f"{agent.get('provider') or 'Model'} · {agent.get('model') or 'Configured model'}", "muted", True))
+            copy.addWidget(label(self.model_purpose_summary(agent), "muted", True))
             profile = agent.get("profile", {})
             search = profile.get("web_search", "off")
             if profile:
@@ -1403,6 +1429,7 @@ class MainWindow(QMainWindow):
                 column.addLayout(top)
                 column.addWidget(label(agent["id"], "heading", True))
                 column.addWidget(label(agent.get("model") or info[0], "muted", True))
+                column.addWidget(label(self.model_purpose_summary(agent), "muted", True))
                 column.addSpacing(7)
                 talk = action("Open conversation  →", lambda checked=False, id=agent["id"]: self.select_agent(id))
                 talk.setEnabled(agent["online"])
@@ -1418,6 +1445,13 @@ class MainWindow(QMainWindow):
                                index % 3 if grid is self.overview_cards else index % 2)
         for listing in (self.sidebar_agents, self.chat_agents):
             listing.clear()
+            if models or self.selected == GENERAL_TARGET:
+                item = QListWidgetItem("General chat")
+                item.setData(Qt.ItemDataRole.UserRole, GENERAL_TARGET)
+                item.setToolTip("Jev chooses models using their purposes and permitted tasks")
+                listing.addItem(item)
+                if self.selected == GENERAL_TARGET:
+                    listing.setCurrentItem(item)
             for room in self.conversations.values():
                 unread = self.chats.get(room["id"], {}).get("unread", 0)
                 item = QListWidgetItem("▤  " + room["title"] + (f"  ({unread} new)" if unread else ""))
@@ -1434,7 +1468,7 @@ class MainWindow(QMainWindow):
                 listing.addItem(item)
                 if agent["id"] == self.selected:
                     listing.setCurrentItem(item)
-            current_ids = {agent["id"] for agent in self.agents} | set(self.conversations)
+            current_ids = {agent["id"] for agent in self.agents} | set(self.conversations) | {GENERAL_TARGET}
             for target, chat in self.chats.items():
                 if target in current_ids or not chat.get("messages"):
                     continue
@@ -1715,10 +1749,47 @@ class MainWindow(QMainWindow):
         if menu:
             menu.exec(listing.viewport().mapToGlobal(point))
 
-    def update_chat_controls(self):
+    @staticmethod
+    def model_purpose_summary(agent):
+        profile = agent.get("profile") or agent
+        tasks = ", ".join(TASK_TYPES[key] for key in profile.get("tasks", []) if key in TASK_TYPES)
+        return (profile.get("purpose") or "Set this model's purpose to use automatic delegation") + (
+            " · " + tasks if tasks else "") + (" · Jev enabled" if profile.get("delegation_enabled") else " · Direct chat only")
+
+    def chat_target_agent(self):
         room = self.conversations.get(self.selected)
         target = room["target"] if room else self.selected
-        agent = next((item for item in self.agents if item["id"] == target), None)
+        if target != GENERAL_TARGET:
+            return next((item for item in self.agents if item["id"] == target), None)
+        state = general_chat_state(self.model_agents(), self.workspace_meta.get("coordinator"))
+        return {"id": GENERAL_TARGET, "kind": "model", "online": state["online"], "vision": state["vision"],
+                "delegating": state["delegating"], "coordinator": state["coordinator"]["id"] if state["coordinator"] else None}
+
+    def refresh_coordinator_controls(self):
+        models = self.model_agents()
+        coordinator = general_chat_state(models, self.workspace_meta.get("coordinator"))["coordinator"]
+        current = coordinator["id"] if coordinator else None
+        signature = (self.workspace_id, current, tuple((agent["id"], agent.get("model")) for agent in models))
+        if getattr(self, "_coordinator_signature", None) != signature:
+            self._coordinator_signature = signature
+            self.coordinator_picker.clear()
+            self.coordinator_picker.addItem("Automatic · first connected model", None)
+            for agent in models:
+                self.coordinator_picker.addItem(agent["id"] + " · " + (agent.get("model") or "Configured model"), agent["id"])
+            self.coordinator_picker.setCurrentIndex(max(0, self.coordinator_picker.findData(current)))
+        self.coordinator_picker.setEnabled(self.ready and not self.remote)
+        self.coordinator_save.setEnabled(self.ready and not self.remote)
+        self.general_chat_button.setEnabled(self.ready and bool(models))
+
+    def save_coordinator(self):
+        self.command("set_coordinator", self.coordinator_picker.currentData(),
+                     success=lambda result: self.notice("Jev coordinator saved for this workspace."))
+
+    def update_chat_controls(self):
+        self.refresh_coordinator_controls()
+        room = self.conversations.get(self.selected)
+        target = room["target"] if room else self.selected
+        agent = self.chat_target_agent()
         chat = self.chats.get(self.selected, {})
         pending = chat.get("pending") or chat.get("local_pending")
         self.send_button.setEnabled(bool(agent and agent["online"] and not pending and not self.preparing_files))
@@ -1727,8 +1798,15 @@ class MainWindow(QMainWindow):
         self.chat_agent_count.setText(f"{count} " + ("agent" if count == 1 else "agents"))
         self.chat_agent_count.setEnabled(bool(self.selected))
         self.send_button.setText("Working…" if pending else "Send request  ↑")
-        self.chat_title.setText(room["title"] if room else self.selected or "Choose an agent")
+        self.chat_title.setText(room["title"] if room else "General chat" if target == GENERAL_TARGET else self.selected or "Choose an agent")
         subtitle = "Your agent is working…" if pending else "Online · Ready to collaborate" if agent and agent["online"] else "Start this agent on its device to continue" if agent else "Choose a connected agent to begin"
+        if target == GENERAL_TARGET:
+            if pending:
+                subtitle = "Jev is planning and delegating…" if agent["delegating"] else "Your model is working…"
+            elif agent["online"]:
+                subtitle = "Jev assigns work using model purposes and permitted tasks" if agent["delegating"] else "Online · Ready to chat with " + agent["coordinator"]
+            else:
+                subtitle = "Start your coordinator and a model with delegation enabled" if agent["delegating"] else "Connect or start a model to use General chat"
         self.chat_subtitle.setText((f"Shared with {len(room['members'])} devices · " if room else "") + subtitle)
         self.share_conversation_button.setEnabled(bool(self.ready and not self.remote and agent and agent["online"] and not pending))
         # The header's one conversation button is always the same widget. It
@@ -1781,6 +1859,9 @@ class MainWindow(QMainWindow):
         state = self.history_store.load("ui").get("state", {})
         self.chats = state.get("chats", {})
         self.conversations = state.get("conversations", {})
+        for room in self.conversations.values():
+            if room["target"] == GENERAL_TARGET and room["title"] == "General chat · Jev":
+                room["title"] = "General chat"
         self.workspace_meta = state.get("workspace_info", {})
         self.selected = state.get("selected")
         self.composer.setPlainText(state.get("draft", ""))
@@ -2094,6 +2175,13 @@ class MainWindow(QMainWindow):
                     label("Pick a conversation or an agent on the left, or connect a "
                           "model from Providers to start one.", "muted", True))
         room = self.conversations.get(self.selected)
+        routing = chat.get("routing", {})
+        if routing:
+            assignments = ", ".join(task["agent_id"] + " (" + TASK_TYPES.get(task["task_type"], task["task_type"]) + ")"
+                                    for task in routing.get("assignments", []))
+            detail = routing["reason"] if routing.get("mode") == "direct" else "Jev · " + (assignments or "Clarification") + (
+                " · " + routing["reason"] if routing.get("reason") else "")
+            self.messages.addWidget(label(detail, "muted", True))
         self.message_bubbles = []
         previous = None
         messages = [self.split_legacy_responder(role, text)
@@ -2221,9 +2309,7 @@ class MainWindow(QMainWindow):
             self.prepare_files(paths)
 
     def prepare_files(self, paths):
-        room = self.conversations.get(self.selected)
-        identity = room["target"] if room else self.selected
-        agent = next((agent for agent in self.agents if agent["id"] == identity), None)
+        agent = self.chat_target_agent()
         if not agent or not self.is_model_agent(agent) or self.preparing_files:
             return
         workspace_id, target, store = self.workspace_id, self.selected, self.history_store
@@ -2329,6 +2415,8 @@ class MainWindow(QMainWindow):
             if not isinstance(response, str):
                 response = json.dumps(result, indent=2)
             chat["messages"].append(("assistant", response))
+            if isinstance(result, dict) and result.get("routing"):
+                chat["routing"] = result["routing"]
             if isinstance(result, dict) and result.get("provider"):
                 chat["history"] = [*chat["history"], {"role": "user", "content": content}, {"role": "assistant", "content": response}]
             chat["pending"] = False
@@ -2494,12 +2582,16 @@ class MainWindow(QMainWindow):
             changed = self.workspace_meta != data
             self.workspace_meta = data
             self.workspace_label.setText(data["name"])
+            self.update_chat_controls()
             if changed:
                 self.persist_history()
         elif event == "agents":
             self.agents = data["agents"]
             self.connection_status.setText("●  Relay connected" if data["connected"] else "●  Reconnecting…")
-            self.render_agents()
+            if not self.selected and any(agent["online"] for agent in self.model_agents()):
+                self.select_agent(GENERAL_TARGET)
+            else:
+                self.render_agents()
             self.render_workspace_page()
         elif event == "conversations":
             changed = set(self.conversations) != {room["id"] for room in data}
@@ -2534,6 +2626,10 @@ class MainWindow(QMainWindow):
                     else "member:" + message["from"] if message["role"] == "user" else message["role"], content_summary(message["content"]))
                     for message in room["messages"]]
                 chat["pending"] = room["pending"]
+                if room.get("routing"):
+                    chat["routing"] = room["routing"]
+                else:
+                    chat.pop("routing", None)
             self.render_agents()
             if selected_changed:
                 self.render_messages()
@@ -2590,7 +2686,7 @@ class MainWindow(QMainWindow):
         key = self.model_provider.currentData()
         spec = PROVIDERS[key]
         if self.model_profile_id is None:
-            self.model_name.setText(f"{key}-agent")
+            self.model_name.setText(available_agent_name(key, self.agents))
         if self.remote:
             self.model_name.setText(self.identity)
             self.model_name.setReadOnly(True)
@@ -2745,7 +2841,9 @@ class MainWindow(QMainWindow):
                    if self.model_internet.isChecked() else "off",
                    "search_provider": self.model_search_provider.currentData(),
                    "searxng_url": self.model_search_url.text().strip(),
-                   "searxng_allow_insecure": self.model_search_insecure.isChecked()}
+                   "searxng_allow_insecure": self.model_search_insecure.isChecked(),
+                   **self.model_purpose.values()}
+        connecting = self.model_profile_id is None
         self.model_save_button.setEnabled(False)
 
         def success(result):
@@ -2753,7 +2851,10 @@ class MainWindow(QMainWindow):
             self.model_form_title.setText("Connect a model")
             self.model_save_button.setText("Connect agent")
             self.reset_model_form()
-            self.navigate(AGENTS_PAGE)
+            if connecting:
+                self.select_agent(GENERAL_TARGET)
+            else:
+                self.navigate(AGENTS_PAGE)
             self.notice(f"{profile['id']} is connected.")
 
         def failure(message):
@@ -2784,6 +2885,7 @@ class MainWindow(QMainWindow):
         self.model_key.clear()
         self.model_search_key.clear()
         self.model_system.clear()
+        self.model_purpose.load({})
         self.model_search_url.clear()
         self.model_search_status.setText("")
         self.model_name.clear()
@@ -2852,6 +2954,7 @@ class MainWindow(QMainWindow):
         self.model_id.setCurrentText(profile.get("model") or "")
         self.model_base.setText(profile.get("base_url") or "")
         self.model_system.setPlainText(profile.get("system_prompt") or "")
+        self.model_purpose.load(profile)
         self.model_autostart.setChecked(profile.get("autostart", True))
         self.model_insecure.setChecked(profile.get("allow_insecure", False))
         self.model_vision.setChecked(profile.get("vision", False))

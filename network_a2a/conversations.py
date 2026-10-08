@@ -6,6 +6,7 @@ from starlette.responses import JSONResponse
 
 from .persistence import model_context
 from .content import MAX_MESSAGE_BYTES, validate_content
+from .orchestration import GENERAL_TARGET
 
 
 class Conversations:
@@ -14,6 +15,10 @@ class Conversations:
         self.store = store
         self.rooms = store.load("rooms") if store else {}
         for room in self.rooms.values():
+            if room["target"] == GENERAL_TARGET and room["title"] == "General chat · Jev":
+                room["title"] = "General chat"
+                room["revision"] += 1
+                self.save(room)
             if room.get("pending"):
                 room["pending"] = False
                 self._append(room, "error", "The host stopped during this request. It was not replayed.", room["target"])
@@ -23,11 +28,11 @@ class Conversations:
             self.store.save("rooms", room["id"], room)
 
     def create(self, owner, target, messages=()):
-        if not self.relay.allowed(owner, target):
+        if not self.relay.allowed(owner, owner if target == GENERAL_TARGET else target):
             raise ValueError("Choose an agent in this workspace")
         if len(self.rooms) >= 100:
             raise ValueError("This workspace has reached its conversation limit")
-        room = {"id": "conversation-" + uuid4().hex, "title": f"Chat with {target}",
+        room = {"id": "conversation-" + uuid4().hex, "title": "General chat" if target == GENERAL_TARGET else f"Chat with {target}",
                 "target": target, "owner": owner, "members": [owner],
                 "messages": [], "pending": False, "revision": 0}
         for message in messages:
@@ -179,18 +184,32 @@ class Conversations:
             return JSONResponse({"error": "Enter a message to send"}, 400)
         if room["pending"]:
             return JSONResponse({"error": "Wait for the current AI reply before sending another message"}, 409)
-        if room["target"] not in self.relay.peers:
+        general = room["target"] == GENERAL_TARGET
+        if general:
+            try:
+                self.relay.orchestrator.coordinator(source)
+            except ConnectionError as exc:
+                return JSONResponse({"error": str(exc)}, 503)
+        elif room["target"] not in self.relay.peers:
             return JSONResponse({"error": "The conversation's agent is offline"}, 503)
         room["pending"] = True
         self._append(room, "user", text, source)
         history = model_context(room["messages"])
         try:
-            result = await self.relay.invoke(source, room["target"], {"messages": history}, conversation_id=room["id"])
+            if general:
+                room.pop("routing", None)
+                def on_plan(routing):
+                    room["routing"] = routing
+                    room["revision"] += 1
+                    self.save(room)
+                result = await self.relay.orchestrator.run(source, {"messages": history}, room["id"], on_plan)
+            else:
+                result = await self.relay.invoke(source, room["target"], {"messages": history}, conversation_id=room["id"])
             reply = result.get("text") if isinstance(result, dict) else result
             if not isinstance(reply, str):
                 reply = json.dumps(result)
             self._append(room, "assistant", reply, room["target"])
-        except (PermissionError, ConnectionError, OverflowError, TimeoutError) as exc:
+        except (PermissionError, ConnectionError, OverflowError, TimeoutError, ValueError) as exc:
             error = str(exc) or "The request timed out; it was not replayed"
             self._append(room, "error", error, room["target"])
             return JSONResponse({"error": error}, 503)
