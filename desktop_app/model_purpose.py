@@ -1,9 +1,9 @@
 """Shared model-purpose controls for the connection page and legacy dialog."""
-from PySide6.QtWidgets import QCheckBox, QGridLayout, QPlainTextEdit, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QGridLayout, QPlainTextEdit, QVBoxLayout, QWidget
 
 from network_a2a.orchestration import TASK_TYPES
 
-from .widgets import label
+from .widgets import TickCheckBox, label
 
 
 class ModelPurpose(QWidget):
@@ -11,7 +11,7 @@ class ModelPurpose(QWidget):
         super().__init__()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(label("What should this model do?", "heading"))
+        layout.addWidget(label("Specialist routing (optional)", "heading"))
         self.purpose = QPlainTextEdit()
         self.purpose.setMaximumHeight(80)
         self.purpose.setPlaceholderText("Describe its strengths and your preferences, e.g. Python coding and debugging; avoid creative writing.")
@@ -19,21 +19,26 @@ class ModelPurpose(QWidget):
         layout.addWidget(label("Permitted tasks", "muted"))
         grid = QGridLayout()
         self.tasks = {}
-        for index, (key, title) in enumerate(TASK_TYPES.items()):
-            checkbox = QCheckBox(title)
+        self._legacy_general = False
+        tasks = [(key, title) for key, title in TASK_TYPES.items() if key != "general"]
+        for index, (key, title) in enumerate(tasks):
+            checkbox = TickCheckBox(title)
             self.tasks[key] = checkbox
             grid.addWidget(checkbox, index // 2, index % 2)
         layout.addLayout(grid)
-        self.enabled = QCheckBox("Allow Jev to assign work to this model")
+        self.enabled = TickCheckBox("Allow automatic delegation to this model")
         layout.addWidget(self.enabled)
-        layout.addWidget(label("General chat works immediately with your connected model. Configure these optional preferences to let Jev delegate work across models. Purpose and permitted tasks are shared with your workspace and coordinator.", "muted", True))
+        layout.addWidget(label("The first imported model is your default. Add these preferences to route specialist work to other models. They are shared with your workspace.", "muted", True))
 
     def values(self):
         return {"purpose": self.purpose.toPlainText().strip(),
-                "tasks": [key for key, checkbox in self.tasks.items() if checkbox.isChecked()],
+                "tasks": (["general"] if self._legacy_general else []) +
+                         [key for key, checkbox in self.tasks.items() if checkbox.isChecked()],
                 "delegation_enabled": self.enabled.isChecked()}
 
     def load(self, profile):
+        # Preserve older permissions on edit without offering General chat as a task.
+        self._legacy_general = "general" in profile.get("tasks", [])
         self.purpose.setPlainText(profile.get("purpose", ""))
         for key, checkbox in self.tasks.items():
             checkbox.setChecked(key in profile.get("tasks", []))

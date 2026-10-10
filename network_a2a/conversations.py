@@ -5,8 +5,8 @@ from uuid import uuid4
 from starlette.responses import JSONResponse
 
 from .persistence import model_context
-from .content import MAX_MESSAGE_BYTES, validate_content
-from .orchestration import GENERAL_TARGET
+from .content import MAX_MESSAGE_BYTES, images, validate_content
+from .orchestration import GENERAL_TARGET, is_greeting
 
 
 class Conversations:
@@ -15,8 +15,8 @@ class Conversations:
         self.store = store
         self.rooms = store.load("rooms") if store else {}
         for room in self.rooms.values():
-            if room["target"] == GENERAL_TARGET and room["title"] == "General chat · Jev":
-                room["title"] = "General chat"
+            if room["target"] == GENERAL_TARGET and room["title"] in ("General chat · Jev", "General chat"):
+                room["title"] = "Chat"
                 room["revision"] += 1
                 self.save(room)
             if room.get("pending"):
@@ -32,7 +32,7 @@ class Conversations:
             raise ValueError("Choose an agent in this workspace")
         if len(self.rooms) >= 100:
             raise ValueError("This workspace has reached its conversation limit")
-        room = {"id": "conversation-" + uuid4().hex, "title": "General chat" if target == GENERAL_TARGET else f"Chat with {target}",
+        room = {"id": "conversation-" + uuid4().hex, "title": "Chat" if target == GENERAL_TARGET else f"Chat with {target}",
                 "target": target, "owner": owner, "members": [owner],
                 "messages": [], "pending": False, "revision": 0}
         for message in messages:
@@ -40,8 +40,14 @@ class Conversations:
                     or "content" not in message):
                 raise ValueError("Conversation history must contain user and assistant text")
             content = validate_content(message["content"], message["role"])
+            responder = message.get("responder") if message["role"] == "assistant" else None
+            if responder is not None and (not isinstance(responder, dict)
+                    or set(responder) != {"agent_id", "model", "provider"}
+                    or any(not isinstance(value, str) or not 1 <= len(value) <= 1000 for value in responder.values())):
+                raise ValueError("Conversation replies must identify a valid answering model")
             self._append(room, message["role"], content,
-                         owner if message["role"] == "user" else target)
+                         owner if message["role"] == "user" else responder["agent_id"] if responder else target,
+                         responder)
         self.rooms[room["id"]] = room
         self.save(room)
         return room
@@ -108,11 +114,13 @@ class Conversations:
             return None
         return room
 
-    def _append(self, room, role, text, source):
+    def _append(self, room, role, text, source, responder=None):
         while isinstance(text, str) and len(json.dumps(text).encode()) > 180000:
             text = text[:len(text) // 2] + "\n[Response shortened]"
-        room["messages"].append({"id": uuid4().hex, "role": role,
-                                 "content": text, "from": source})
+        message = {"id": uuid4().hex, "role": role, "content": text, "from": source}
+        if responder:
+            message["responder"] = dict(responder)
+        room["messages"].append(message)
         room["revision"] += 1
         if room["id"] in self.rooms:
             self.save(room)
@@ -187,7 +195,8 @@ class Conversations:
         general = room["target"] == GENERAL_TARGET
         if general:
             try:
-                self.relay.orchestrator.coordinator(source)
+                needs_vision = any(images(message["content"]) for message in model_context(room["messages"])) or bool(images(text))
+                self.relay.orchestrator.coordinator(source, greeting=is_greeting(text), needs_vision=needs_vision)
             except ConnectionError as exc:
                 return JSONResponse({"error": str(exc)}, 503)
         elif room["target"] not in self.relay.peers:
@@ -208,7 +217,13 @@ class Conversations:
             reply = result.get("text") if isinstance(result, dict) else result
             if not isinstance(reply, str):
                 reply = json.dumps(result)
-            self._append(room, "assistant", reply, room["target"])
+            responder = result.get("responder") if isinstance(result, dict) else None
+            if not responder:
+                profile = self.relay.agent_description(room["target"])
+                metadata = result if isinstance(result, dict) else {}
+                responder = {"agent_id": room["target"], "model": metadata.get("model") or profile.get("model") or room["target"],
+                             "provider": metadata.get("provider") or profile.get("provider") or "model"}
+            self._append(room, "assistant", reply, responder["agent_id"], responder)
         except (PermissionError, ConnectionError, OverflowError, TimeoutError, ValueError) as exc:
             error = str(exc) or "The request timed out; it was not replayed"
             self._append(room, "error", error, room["target"])

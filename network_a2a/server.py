@@ -70,9 +70,20 @@ class Relay:
         profile = self.agent_profiles.get(identity, {})
         model = bool(profile.get("model") or identity in self.workspace.get("models", []))
         return {"id": identity, "kind": "model" if model else "device",
+                "orchestration_authorized": self.orchestration_authorized(identity),
                 "online": identity in self.peers and (not model or profile.get("running", True)),
                 "provider": profile.get("provider"), "model": profile.get("model"), "vision": profile.get("vision", False),
                 **routing_profile(profile)}
+
+    def orchestration_authorized(self, identity):
+        """Only operator-owned configuration grants automatic history disclosure.
+
+        Self-published profiles describe capabilities; they never grant access.
+        Importing a model or explicitly choosing a coordinator approves it for
+        General chat across the workspace, independently of room membership.
+        """
+        return (identity in self.workspace.get("models", [])
+                or identity == self.workspace.get("coordinator"))
 
     async def describe_self(self, request):
         source = self.authenticate(request.headers.get("authorization", ""))
@@ -295,7 +306,7 @@ class Relay:
         except (ConnectionError, OverflowError) as exc:
             return JSONResponse({"error": str(exc)}, 503)
         except TimeoutError:
-            return JSONResponse({"error": "Jev timed out; this request was not replayed"}, 504)
+            return JSONResponse({"error": "Model orchestration timed out; this request was not replayed"}, 504)
 
 
 def create_app(credentials, timeout=60, max_pending=256, conversation_store=None, workspace=None):

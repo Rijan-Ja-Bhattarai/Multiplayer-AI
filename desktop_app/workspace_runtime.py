@@ -55,6 +55,7 @@ class WorkspaceRuntime:
         self.poller = None
         self.closed = False
         self.generation = 0
+        self._ollama_availability = {}
         self.mutation = asyncio.Lock()
 
     async def start(self):
@@ -422,17 +423,19 @@ class WorkspaceRuntime:
         public = self.public_profile(profile, running)
         if not self.remote:
             self.app.state.relay.set_agent_profile(profile["id"], public)
+            return True
         else:
             base = relay_http_url(self.active_url, allow_insecure=True)
             try:
                 response = await self.relay_http().post(base + "/agent-profile", json=public,
                     headers={"Authorization": "Bearer " + self.active_token}, timeout=5)
                 if response.status_code in (200, 404):
-                    return
+                    return True
             except httpx.HTTPError:
                 pass
             if not self.closed:
                 self.emit("notice", "Your model connected, but its details could not be published to the workspace.")
+            return False
 
     async def _launch_profile(self, profile, allow_insecure=False):
         """Load vault credentials and replace the profile's running model client."""
@@ -443,17 +446,20 @@ class WorkspaceRuntime:
         await self._remove_runner(profile["id"])
         await self._attach(profile["id"], token, adapter, allow_insecure)
         await self.publish_profile(profile)
+        self._ollama_availability.pop(profile["id"], None)
         configured = self.storage.settings.get("coordinator")
         if not self.remote and (not configured or not self.app.state.relay.allowed(self.active_id, configured)
                                 or self.app.state.relay.agent_description(configured)["kind"] != "model"):
+            default = next((item["id"] for item in self.storage.settings.get("agents", [])
+                            if self.app.state.relay.allowed(self.active_id, item["id"])), profile["id"])
             previous = self.storage.settings
-            self.storage.settings = {**previous, "coordinator": profile["id"]}
+            self.storage.settings = {**previous, "coordinator": default}
             try:
                 self.storage.save()
             except BaseException:
                 self.storage.settings = previous
                 raise
-            self.app.state.relay.workspace["coordinator"] = profile["id"]
+            self.app.state.relay.workspace["coordinator"] = default
 
     async def save_agent(self, profile, key=None, search_key=None):
         """Validate and transactionally persist a model and its keys before restarting it."""
@@ -480,6 +486,7 @@ class WorkspaceRuntime:
             if not self.remote:
                 self.credentials = updated
                 self.app.state.relay.credentials = updated
+                self.app.state.relay.workspace["models"] = [item["id"] for item in self.storage.settings.get("agents", [])]
             if not finalized:
                 self.emit("notice", "The model was saved, but its saved credentials need another check. Unlock your credential store and restart the app to finish it.")
             await self._launch_profile(profile, self.storage.settings.get("remote", {}).get("allow_insecure", False))
@@ -512,24 +519,68 @@ class WorkspaceRuntime:
                                    self.storage.settings.get("remote", {}).get("allow_insecure", False))
             await self.refresh()
 
+    async def refresh_ollama_availability(self, profiles):
+        """Publish actual provider availability, independently of relay connectivity."""
+        generation = self.generation
+        active = {identity: profile for identity, profile in profiles.items()
+                  if profile.get("provider") == "ollama" and identity in self.runners}
+        runners = {identity: self.runners[identity] for identity in active}
+        endpoints = {}
+        for identity, profile in active.items():
+            endpoint = (profile.get("base_url") or PROVIDERS["ollama"].base_url,
+                        self.storage.vault.get("provider:" + identity), profile.get("allow_insecure", False))
+            endpoints.setdefault(endpoint, []).append(identity)
+
+        async def available(endpoint):
+            base, key, insecure = endpoint
+            try:
+                config = ProviderConfig("ollama", "availability", base, api_key=key, allow_insecure=insecure)
+                response = await self.http.get(config.base_url.rstrip("/") + "/api/tags",
+                    headers={"Authorization": "Bearer " + key} if key else {}, timeout=2)
+                response.raise_for_status()
+                return {item["name"] for item in response.json()["models"]}
+            except (httpx.HTTPError, ValueError, KeyError, TypeError):
+                return set()
+
+        results = await asyncio.gather(*(available(endpoint) for endpoint in endpoints))
+        if generation != self.generation:
+            return {}
+        availability = {}
+        for identities, models in zip(endpoints.values(), results):
+            for identity in identities:
+                if self.runners.get(identity) is not runners[identity]:
+                    continue
+                model = active[identity]["model"]
+                tagged = model if ":" in model.rsplit("/", 1)[-1] else model + ":latest"
+                running = model in models or tagged in models
+                availability[identity] = running
+                if self._ollama_availability.get(identity) != running:
+                    if await self.publish_profile(active[identity], running=running):
+                        self._ollama_availability[identity] = running
+        return availability
+
     async def refresh(self):
         if not self.active_token:
             return
         generation = self.generation
         base = relay_http_url(self.active_url, allow_insecure=True)
         http = self.relay_http()
-        response = await http.get(base + "/agents", headers={"Authorization": "Bearer " + self.active_token}, timeout=8)
-        response.raise_for_status()
-        if generation != self.generation:
-            return
         profiles = {p["id"]: p for p in self.storage.settings.get("agents", [])}
         remote_profile = self.storage.settings.get("remote_agent")
         if self.remote:
             profiles = {remote_profile["id"]: remote_profile} if remote_profile and remote_profile.get("relay") == self.active_url else {}
+        availability = await self.refresh_ollama_availability(profiles)
+        if generation != self.generation:
+            return
+        response = await http.get(base + "/agents", headers={"Authorization": "Bearer " + self.active_token}, timeout=8)
+        response.raise_for_status()
+        if generation != self.generation:
+            return
         agents = []
         for item in response.json()["agents"]:
             profile = profiles.get(item["id"], {})
             agents.append({**item, "kind": "model" if profile else item.get("kind", "device"),
+                           "online": item["online"] and availability.get(item["id"], True),
                            "provider": profile.get("provider", item.get("provider")), "model": profile.get("model", item.get("model")),
                            "vision": profile.get("vision", item.get("vision", False)),
                            "local": item["id"] in self.runners, "profile": profile})
@@ -609,16 +660,16 @@ class WorkspaceRuntime:
         return [item["name"] for item in response.json()["models"]]
 
     async def set_coordinator(self, agent_id):
-        """The workspace owner chooses the model that plans general-chat work."""
+        """Save the owner's default model, retaining import order for Automatic."""
         async with self.mutation:
             if self.remote:
-                raise ValueError("The workspace owner chooses the Jev coordinator")
+                raise ValueError("The workspace owner chooses the default model")
             relay = self.app.state.relay
             if not agent_id:
-                agent_id = next((model["id"] for model in relay.orchestrator.models(self.active_id) if model["online"]), None)
+                agent_id = next((model["id"] for model in relay.orchestrator.models(self.active_id)), None)
             if agent_id and (not relay.allowed(self.active_id, agent_id)
                              or relay.agent_description(agent_id)["kind"] != "model"):
-                raise ValueError("Choose a model in this workspace as the Jev coordinator")
+                raise ValueError("Choose a model in this workspace as the default")
             previous = dict(self.storage.settings)
             self.storage.settings["coordinator"] = agent_id or None
             try:
@@ -639,11 +690,41 @@ class WorkspaceRuntime:
                 key = self.storage.vault.get("provider:" + agent_id)
         config = ProviderConfig(provider, "discovery", base_url, api_key=key, allow_insecure=allow_insecure)
         path = "/api/tags" if provider == "ollama" else "/models"
-        response = await self.http.get(config.base_url.rstrip("/") + path,
-            headers={"Authorization": "Bearer " + key} if key else {}, timeout=8)
-        response.raise_for_status()
-        payload = response.json()
-        return [item["name"] for item in payload["models"]] if provider == "ollama" else [item["id"] for item in payload["data"]]
+        headers = {"Authorization": "Bearer " + key} if key else {}
+        params = {}
+        if provider in ("anthropic", "gemini") and not key:
+            raise ValueError("Enter an API key to list available models")
+        if provider == "anthropic":
+            headers = {"x-api-key": key, "anthropic-version": "2023-06-01"}
+            params = {"limit": 1000}
+        elif provider == "gemini":
+            headers = {"x-goog-api-key": key}
+            params = {"pageSize": 1000}
+        models, cursors = [], set()
+        async with asyncio.timeout(30):
+            for _ in range(100):
+                response = await self.http.get(config.base_url.rstrip("/") + path,
+                    headers=headers, params=params, timeout=8, follow_redirects=False)
+                response.raise_for_status()
+                payload = response.json()
+                if provider == "ollama":
+                    models.extend(item["name"] for item in payload["models"])
+                elif provider == "gemini":
+                    models.extend(item["name"].removeprefix("models/") for item in payload.get("models", [])
+                                  if "generateContent" in item.get("supportedGenerationMethods", []))
+                else:
+                    models.extend(item["id"] for item in payload["data"])
+                cursor = (payload.get("nextPageToken") if provider == "gemini" else
+                          payload.get("last_id") if payload.get("has_more") else None)
+                if payload.get("has_more") and not cursor:
+                    raise ValueError("The provider's model list is missing its next-page cursor. Try refreshing the list.")
+                if not cursor:
+                    return list(dict.fromkeys(models))
+                if cursor in cursors:
+                    raise ValueError("The provider repeated a model-list page. Try refreshing the list.")
+                cursors.add(cursor)
+                params["pageToken" if provider == "gemini" else "after_id"] = cursor
+        raise ValueError("The provider's model list could not be completed. Try refreshing the list.")
 
     async def test_web_search(self, url="", allow_insecure=False, provider="searxng", key=None, agent_id=None):
         """Return a probe result count, reusing the saved hosted search key if needed."""

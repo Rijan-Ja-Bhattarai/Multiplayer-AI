@@ -513,7 +513,7 @@ QFrame#joinCard { background: @@surface@@; border: 1px solid @@border@@; border-
 QFrame#inviteCard { background: @@surface@@; border: 1px solid @@border@@; border-left: 3px solid @@eyebrow@@; border-radius: 12px; }
 QLabel { background: transparent; }
     QWidget#messageRow { background: transparent; border-radius: 8px; }
-    QWidget#messageRow:hover { background: @@surface_row_hover@@; }
+    QWidget#messageRow:hover { background: transparent; }
     QWidget#messageActions { background: transparent; }
     QFrame#composerBar { background: @@surface_base@@; border: none; border-top: 1px solid @@border@@; }
     QFrame#chatHeader { background: @@surface_base@@; border: none; border-bottom: 1px solid @@border@@; }
@@ -550,11 +550,18 @@ QPushButton#ghost:hover { background: @@surface_hover@@; }
 QPushButton#danger { background: @@danger_bg@@; color: @@error@@; }
 QLineEdit, QPlainTextEdit, QComboBox { background: @@input_bg@@; color: @@text@@; border: 1px solid @@border_strong@@; border-radius: 7px; padding: 10px; selection-background-color: @@accent@@; selection-color: @@on_accent@@; }
 QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus { border: 1px solid @@accent@@; }
+QLineEdit[invalid="true"], QPlainTextEdit[invalid="true"], QComboBox[invalid="true"] { border: 1px solid @@error@@; }
+QPushButton[invalid="true"] { border: 1px solid @@error@@; }
+QCheckBox[invalid="true"]::indicator { border: 1px solid @@error@@; }
+QFrame#createCard[invalid="true"] { border: 1px solid @@error@@; }
+QWidget#messageRow[invalid="true"] { border: 1px solid @@error@@; }
 QComboBox::drop-down { border: 0; width: 24px; }
 QComboBox QAbstractItemView { background: @@combo_popup_bg@@; color: @@text@@; selection-background-color: @@accent@@; padding: 5px; border: 1px solid @@border_strong@@; }
 QCheckBox { spacing: 8px; color: @@text_list@@; background: transparent; }
 QCheckBox::indicator { width: 16px; height: 16px; border-radius: 4px; background: @@checkbox_bg@@; border: 1px solid @@checkbox_border@@; }
 QCheckBox::indicator:checked { background: @@accent@@; border-color: @@accent_press@@; }
+TickCheckBox { qproperty-tickColor: @@success@@; }
+TickCheckBox::indicator:checked { background: transparent; border: none; }
 QScrollArea { background: transparent; border: none; }
 QScrollArea > QWidget > QWidget { background: transparent; }
 QScrollBar:vertical { background: @@scrollbar_track@@; width: 7px; margin: 3px; }
