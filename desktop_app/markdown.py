@@ -11,6 +11,8 @@ from .theme import DARK, color
 class MarkdownMessage(QTextBrowser):
     def __init__(self, text, parent=None, theme_name=DARK):
         super().__init__(parent)
+        self._fitting = False
+        self._natural = None
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setReadOnly(True)
         self.setOpenLinks(False)
@@ -22,6 +24,14 @@ class MarkdownMessage(QTextBrowser):
         foreground = color(theme_name, "text")
         background = color(theme_name, "surface")
         link = color(theme_name, "agent_title")
+        # Transparent, so the bubble behind shows through. It used to paint an
+        # opaque surface of its own, which is what made a reply read as a
+        # full-width slab of slightly different grey with square corners and
+        # no padding, while a plain label beside it had no fill at all.
+        #
+        # Padding is deliberately not set here: fit_height measures
+        # contentsMargins(), which a stylesheet's padding does not reach, so
+        # text would be clipped. The bubble's layout margins do the padding.
         self.setStyleSheet("QTextBrowser { background: transparent; color: " + foreground
                           + "; font-size: 14px; border: none; padding: 0; selection-background-color: "
                           + color(theme_name, "accent") + "; selection-color: "
@@ -30,6 +40,7 @@ class MarkdownMessage(QTextBrowser):
         palette.setColor(QPalette.ColorRole.Link, QColor(link))
         palette.setColor(QPalette.ColorRole.Text, QColor(foreground))
         palette.setColor(QPalette.ColorRole.Base, QColor(Qt.GlobalColor.transparent))
+        palette.setColor(QPalette.ColorRole.Window, QColor(Qt.GlobalColor.transparent))
         self.setPalette(palette)
         self.setAutoFillBackground(False)
         self.viewport().setAutoFillBackground(False)
@@ -89,9 +100,55 @@ class MarkdownMessage(QTextBrowser):
         if url.scheme().lower() in ("http", "https", "mailto"):
             QDesktopServices.openUrl(url)
 
+    def natural_width(self):
+        """How wide this reply would be if it were not wrapping.
+
+        Measured on a clone of this reply's own document rather than by lifting
+        the wrap on the live one. Lifting it looks like the obvious way and does
+        not work: the change emits ``documentSizeChanged``, which re-enters
+        ``fit_height``, and that puts the wrap straight back before the width is
+        read. Worse, the layout is cached, so after a reply has been wrapped even
+        once the reading comes back as the width it already had.
+
+        Cloning and then setting an unconstrained text width gives the real one.
+        The clone is what makes it honest: a fresh document was the other option
+        and measured every reply at body-text width, because a new document has
+        none of this one's fonts or Markdown character formats, so headings, code
+        blocks and links all came out as if they were plain prose. The clone
+        carries them. ``setTextWidth(-1)`` is what discards the inherited
+        layout's wrap, since the clone starts out wrapped at the current width.
+
+        The result is cached because a reply's text never changes after it is
+        built, and this runs on every render and on every window resize.
+        """
+        if self._natural is None:
+            probe = self.document().clone()
+            probe.setTextWidth(-1)
+            self._natural = probe.documentLayout().documentSize().width()
+            del probe
+        return self._natural
+
     def fit_height(self, *args):
+        """Size this reply to the text at whatever width it currently has.
+
+        The wrap is set here rather than only in ``resizeEvent`` because the
+        viewport is not always resized along with the widget: a reply that has
+        just been moved into a bubble can be handed a new width while its
+        viewport is still the 640px one it started with, and measuring against
+        that reports one enormous line. Setting the width from whichever of
+        the two is real makes the height correct whenever it is asked for,
+        which is what the bubble sizing relies on.
+        """
+        if self._fitting:
+            return
         margins = self.contentsMargins()
-        height = math.ceil(self.document().size().height()) + margins.top() + margins.bottom()
+        width = self.viewport().width() or self.width()
+        self._fitting = True
+        try:
+            self.document().setTextWidth(max(1, width))
+            height = math.ceil(self.document().size().height()) + margins.top() + margins.bottom()
+        finally:
+            self._fitting = False
         if self.horizontalScrollBar().isVisible():
             height += self.horizontalScrollBar().height()
         if self.height() != max(1, height):
@@ -99,5 +156,4 @@ class MarkdownMessage(QTextBrowser):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self.document().setTextWidth(max(1, self.viewport().width()))
         self.fit_height()

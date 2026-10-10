@@ -1,0 +1,162 @@
+"""Checks on the shape of the source, rather than on what it does."""
+import ast
+import pathlib
+
+import pytest
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+SOURCES = sorted(list((ROOT / "desktop_app").glob("*.py"))
+                 + list((ROOT / "network_a2a").glob("*.py")))
+
+
+def classes(path):
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    return [node for node in ast.walk(tree) if isinstance(node, ast.ClassDef)]
+
+
+def accessor_companion(item):
+    """Whether this definition is a property's setter, getter or deleter.
+
+    Those are written as a second ``def`` with the same name, which is the
+    idiom rather than a mistake: ``@http.setter def http(self, value)`` attaches
+    to the property built by the first one. Only an undecorated repeat is a
+    real redefinition.
+
+    The decorator has to name *this* function. ``@other.setter def http`` is a
+    plain redefinition that happens to carry an accessor decorator, and letting
+    it through on the strength of the word "setter" hides exactly the sort of
+    shadowing this check exists to catch.
+    """
+    for decorator in item.decorator_list:
+        if not isinstance(decorator, ast.Attribute):
+            continue
+        if decorator.attr not in ("setter", "getter", "deleter"):
+            continue
+        if isinstance(decorator.value, ast.Name) and decorator.value.id == item.name:
+            return True
+    return False
+
+
+@pytest.mark.parametrize("path", SOURCES, ids=lambda path: path.name)
+def test_no_class_defines_the_same_method_twice(path):
+    """A repeated ``def`` in one class silently replaces the earlier one.
+
+    Nothing complains and the file still imports, so the first definition
+    simply stops being reachable. Both halves of this have happened here: a
+    header button builder that was kept after its replacement landed beside
+    it, and an HTTP handler whose name matched the method it called, which
+    replaced it and made the model method uncallable. Both were found by
+    reading the traceback, not by a failure.
+    """
+    clashes = []
+    for node in classes(path):
+        seen = {}
+        for item in node.body:
+            if not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if item.name in seen and not accessor_companion(item):
+                clashes.append(
+                    f"{path.name}: {node.name}.{item.name} is defined at "
+                    f"line {seen[item.name]} and again at line {item.lineno}, "
+                    f"so the first one cannot be reached")
+            seen[item.name] = item.lineno
+    assert not clashes, "\n".join(clashes)
+
+
+ACCESOR_CASES = {
+    # The idiom: a property and the accessor that completes it.
+    "class T:\n    def http(self): pass\n    @http.setter\n    def http(self, v): pass": [],
+    "class T:\n    def http(self): pass\n    @http.getter\n    def http(self): pass": [],
+    "class T:\n    def http(self): pass\n    @http.deleter\n    def http(self): pass": [],
+    # The same words, a different name: a plain redefinition wearing an
+    # accessor decorator, which is what letting any ".setter" through hides.
+    "class T:\n    def http(self): pass\n    @other.setter\n    def http(self, v): pass": ["http"],
+    # A dotted target is not a name this function could own either.
+    "class T:\n    def http(self): pass\n    @a.b.setter\n    def http(self, v): pass": ["http"],
+    # No decorator at all.
+    "class T:\n    def http(self): pass\n    def http(self, v): pass": ["http"],
+    # Two different names are two different methods, decorator or not.
+    "class T:\n    def http(self): pass\n    @x.setter\n    def other(self, v): pass": [],
+}
+
+
+@pytest.mark.parametrize("source", ACCESOR_CASES,
+                         ids=[f"case{index}" for index in range(len(ACCESOR_CASES))])
+def test_the_accessor_exemption_needs_the_matching_name(source):
+    """An accessor only excuses a repeat when it names the function itself.
+
+    ``@other.setter def http`` shadows the earlier ``http`` and is not an
+    accessor of anything called ``http``; exempting it on the strength of the
+    word "setter" lets exactly the shadowing this check exists to find pass
+    through. A dotted target is no better: ``@a.b.setter`` attaches to whatever
+    ``a.b`` is, which is not the name being defined.
+    """
+    tree = ast.parse(source)
+    names = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        seen = set()
+        for item in node.body:
+            if not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if item.name in seen and not accessor_companion(item):
+                names.append(item.name)
+            seen.add(item.name)
+    assert names == ACCESOR_CASES[source], (
+        f"expected {ACCESOR_CASES[source]} to be reported, got {names}")
+
+
+@pytest.mark.parametrize("path", SOURCES, ids=lambda path: path.name)
+def test_a_module_defines_no_function_twice_either(path):
+    """The same trap at module level, where the later name also wins."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    seen = {}
+    clashes = []
+    for node in tree.body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name in seen:
+            clashes.append(
+                f"{path.name}: {node.name} is defined at line {seen[node.name]} "
+                f"and again at line {node.lineno}")
+        seen[node.name] = node.lineno
+    assert not clashes, "\n".join(clashes)
+
+
+IDENTITY_OPERATORS = (ast.Is, ast.IsNot)
+
+
+@pytest.mark.parametrize("path", SOURCES, ids=lambda path: path.name)
+def test_no_dialog_result_is_compared_with_is(path):
+    """Never ask a dialog whether the answer was No using ``is``.
+
+    ``QMessageBox.question`` returns a plain ``int``; ``StandardButton.Yes`` is
+    a Shiboken flag enum. They are equal by value and are never the same
+    object, so ``is not Yes`` is always true and every confirmation behind it
+    silently returns before doing anything -- the dialog opens, the answer is
+    given, and nothing happens.
+
+    It reads as a harmless way to say "not yes", it fails no test and raises
+    nothing, and it cost three confirmations here before anyone noticed that
+    Clear and Delete had never once worked. Compared with ``==`` it is always
+    wrong and never says so.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    offenders = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Compare):
+            continue
+        operands = [node.left] + list(node.comparators)
+        mentions_standard_button = any(
+            isinstance(child, ast.Attribute) and child.attr == "StandardButton"
+            for operand in operands for child in ast.walk(operand))
+        if not mentions_standard_button:
+            continue
+        for operator in node.ops:
+            if isinstance(operator, IDENTITY_OPERATORS):
+                word = "is" if isinstance(operator, ast.Is) else "is not"
+                offenders.append(
+                    f"{path.name}: line {node.lineno} compares a StandardButton "
+                    f"with '{word}'")
+    assert not offenders, "\n".join(offenders)

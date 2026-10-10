@@ -118,21 +118,31 @@ class SharedConversationUITests(unittest.TestCase):
         text = "## Model heading\n\nHere is **bold text** and `inline code`."
         self.host.select_agent(self.host.identity)
         chat = self.host.chats[self.host.identity]
-        chat["messages"] = [("user", text), ("assistant", text), ("local_agent", text)]
+        # The local responder's id rides along in the role now, so both forms
+        # of an agent reply are covered: the bare role is still what a saved
+        # conversation holds, and the suffixed one is what arrives today. They
+        # are matched by prefix, so both have to go through the renderer --
+        # compared exactly, the suffixed form would quietly be drawn as raw
+        # text with its markdown left in it.
+        chat["messages"] = [("user", text), ("assistant", text),
+                            ("local_agent", text),
+                            ("local_agent:" + self.host.identity, text)]
         self.host.render_messages()
         # render_messages() rebuilds the bubble layout from scratch, and
         # render_agents() is reachable from a queued poller signal, so the
         # reply widgets are settled on rather than read the instant they are
         # created. Every other test in this file waits for the UI; this one
         # used to assert a single synchronous snapshot.
-        self.wait(lambda: len(self.host.messages_widget.findChildren(MarkdownMessage)) == 2)
+        self.wait(lambda: len(self.host.messages_widget.findChildren(MarkdownMessage)) == 3)
         replies = self.host.messages_widget.findChildren(MarkdownMessage)
-        self.assertEqual(len(replies), 2)
+        self.assertEqual(len(replies), 3)
         for reply in replies:
             self.assertEqual(reply.document().begin().blockFormat().headingLevel(), 2)
             self.assertNotIn("**", reply.toPlainText())
             self.assertIn("bold text", reply.toPlainText())
-        self.assertEqual(chat["messages"], [("user", text), ("assistant", text), ("local_agent", text)])
+        self.assertEqual(chat["messages"], [("user", text), ("assistant", text),
+                                            ("local_agent", text),
+                                            ("local_agent:" + self.host.identity, text)])
         self.wait(lambda: self.host.messages.count() > 0)
         # The user's own text is rendered plainly, with the markdown left
         # in it, while the two replies above went through the renderer. It

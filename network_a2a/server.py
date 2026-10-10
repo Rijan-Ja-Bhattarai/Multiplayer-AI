@@ -318,6 +318,8 @@ def create_app(credentials, timeout=60, max_pending=256, conversation_store=None
         Route("/orchestrate", relay.http_orchestrate, methods=["POST"]),
         Route("/conversations", relay.conversations.listing),
         Route("/conversations/{conversation_id}", relay.conversations.detail),
+        Route("/conversations/{conversation_id}", relay.conversations.http_delete, methods=["DELETE"]),
+        Route("/conversations/{conversation_id}/leave", relay.conversations.http_leave, methods=["POST"]),
         Route("/conversations/{conversation_id}/messages", relay.conversations.send, methods=["POST"]),
         WebSocketRoute("/connect", relay.websocket)])
     app.state.relay = relay

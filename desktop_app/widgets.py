@@ -3,11 +3,12 @@ import math
 from PySide6.QtCore import (Property, QAbstractAnimation, QEasingCurve, QPointF, QRectF,
                             QPropertyAnimation, Qt, Signal)
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QPixmap
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QHBoxLayout, QLabel, QPushButton,
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QPushButton,
                              QPlainTextEdit, QSizePolicy, QStyle, QStyleOptionButton,
                              QVBoxLayout, QWidget)
 
-from .theme import DARK, color
+from .icons import provider_pixmap
+from .theme import DARK, color, mix
 
 
 def app_mark(theme_name=DARK, initial="M", size=64):
@@ -148,6 +149,83 @@ class ErrorLine(QWidget):
         self.hide()
 
 
+def _lighten(colour):
+    """A fill slightly lighter than ``colour``, for the bubble's hairline.
+
+    Derived rather than tokenised so it follows the fill, which for an agent
+    bubble is already derived from that provider's accent. A border the same
+    value as the fill would be invisible, which is what made the old slab look
+    unfinished.
+    """
+    return mix("#ffffff", colour, 0.10)
+
+
+class MessageBubble(QFrame):
+    """One message's fill: the title, the body, and the background behind them.
+
+    A child of HoverRow rather than a replacement for it. The row spans the
+    panel and keeps the hover action slot, so revealing the actions cannot
+    change the row's width; the bubble inside it hugs its own text instead.
+
+    Horizontal size policy is Maximum, which is what makes it hug: it takes
+    its size hint up to a ceiling rather than filling whatever it is given.
+    Without that a bubble either runs the full width of the panel as a slab,
+    or the layout has to be told the width by hand.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("bubble")
+        self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Minimum)
+        self.column = QVBoxLayout(self)
+        self.column.setContentsMargins(14, 10, 14, 10)
+        self.column.setSpacing(3)
+        self.set_background("#2b2d31")
+
+    def set_background(self, colour):
+        """Fill and outline the bubble.
+
+        Set per widget rather than through the application sheet, because the
+        agent fill is derived from that provider's accent and so is not one of
+        the three themes' tokens.
+        """
+        self.setStyleSheet(
+            "QFrame#bubble { background: " + colour + "; border: 1px solid "
+            + _lighten(colour) + "; border-radius: 14px; }")
+
+    def add_content(self, widget):
+        self.column.addWidget(widget)
+        return widget
+
+    def preferred_width(self):
+        """How wide this bubble would like to be, before the panel's ceiling.
+
+        The widest child, not the layout's own hint, because a Markdown reply
+        reports the width it is currently laid out at rather than the width of
+        its text. Without this a long reply is measured against the width of
+        the first short one and never grows to fill the space it should have.
+
+        A child that offers ``natural_width`` is measured that way; anything
+        else is measured by its ``sizeHint``, and one whose measurement raises
+        falls back to its hint too. Margins are added once at the end rather
+        than once per child, so a bubble holding a name, a subtitle and a copy
+        button is padded once rather than three times.
+        """
+        margins = self.column.contentsMargins()
+        width = 0
+        for index in range(self.column.count()):
+            child = self.column.itemAt(index).widget()
+            if child is None:
+                continue
+            measure = getattr(child, "natural_width", None)
+            try:
+                natural = int(measure()) if callable(measure) else child.sizeHint().width()
+            except (RuntimeError, ValueError):
+                natural = child.sizeHint().width()
+            width = max(width, natural)
+        return width + margins.left() + margins.right()
+
+
 class Select(QComboBox):
     """A dropdown that only changes when it is actually used.
 
@@ -193,9 +271,13 @@ class OrbitArt(QWidget):
     travel and cycle are set so the movement is perceptible without being
     hurried.
     """
-    # (label, glyph, token) for the chips orbiting the centre mark.
-    _CHIPS = (("Ollama", "O", "orbit_ollama"), ("Claude", "✳", "orbit_claude"),
-              ("Gemini", "✦", "orbit_gemini"), ("OpenAI", "◎", "orbit_openai"))
+    # (label, provider) for the chips orbiting the centre mark. The mark is the
+    # provider's own bundled artwork rather than a glyph, so the same brand is
+    # seen here, on the agent cards and in the connect form. The glyphs this
+    # replaced were typed into the font that happened to resolve, so the mark
+    # looked different per machine and none of them matched the real logo.
+    _CHIPS = (("Ollama", "ollama"), ("Claude", "anthropic"),
+              ("Gemini", "gemini"), ("OpenAI", "openai"))
     # The ellipse the chips travel, the sway either side of their resting
     # place in radians, and how long one full breath takes. At this sway a
     # chip drifts about 40px across eight seconds. The sway is also what
@@ -211,6 +293,13 @@ class OrbitArt(QWidget):
     # stated here rather than being retyped into a minimum size.
     _CHIP_W = 74.0
     _CHIP_H = 66.0
+    # The side the brand mark is drawn at inside the chip. Square, because
+    # every bundled mark is a square logo, and drawn in the upper part of the
+    # chip with the name beneath it, so the chip's own box and therefore
+    # ``required_size`` are unchanged by this. Small enough that the 9px name
+    # below it keeps its clearance and the four marks do not compete with the
+    # centre tile for attention.
+    _CHIP_MARK = 26.0
 
     @classmethod
     def required_size(cls):
@@ -243,6 +332,11 @@ class OrbitArt(QWidget):
         self.setMinimumSize(*self.required_size())
         self._phase = 0.0
         self._theme = theme
+        # Loaded once per theme and held, because this paints on every frame
+        # of the animation and ``provider_pixmap`` reads a 640x640 PNG from
+        # disk each time it is called. Four chips at sixty frames a second is
+        # the difference between a quiet orbit and a busy disk.
+        self._marks = {}
         self.animation = QPropertyAnimation(self, b"phase", self)
         self.animation.setStartValue(0.0)
         self.animation.setEndValue(math.tau)
@@ -277,8 +371,26 @@ class OrbitArt(QWidget):
         return (self.width() / 2 + math.cos(angle) * self._CHIP_RX,
                 self.height() / 2 + math.sin(angle) * self._CHIP_RY)
 
+    def chip_mark(self, provider):
+        """The provider's brand mark for this theme, loaded once and kept.
+
+        Cached against the theme name rather than for the lifetime of the
+        widget, because each theme ships its own light or dark mark and a
+        widget that outlived a theme change would otherwise keep drawing the
+        old one's, which on the light theme is a mark that is too light to see.
+        A provider with no bundled mark still returns a connection symbol,
+        which is what the agent cards show for a custom endpoint.
+        """
+        cached = self._marks.get(provider)
+        if cached is None:
+            cached = self._marks[provider] = provider_pixmap(
+                provider, self._theme, round(self._CHIP_MARK))
+        return cached
+
     def set_theme(self, name):
         """Adopt another theme and repaint with its colours."""
+        if name != self._theme:
+            self._marks.clear()
         self._theme = name
         self.update()
 
@@ -327,15 +439,25 @@ class OrbitArt(QWidget):
         painter.setPen(accent("on_accent"))
         painter.drawText(QRectF(cx - 31, cy - 31, 62, 62),
                          Qt.AlignmentFlag.AlignCenter, "M")
-        for index, (name, glyph, token) in enumerate(self._CHIPS):
+        for index, (name, provider) in enumerate(self._CHIPS):
             x, y = self.chip_position(index, self._phase)
             painter.setPen(QPen(accent("orbit_chip_ring"), 1))
             painter.setBrush(accent("orbit_chip_bg"))
             painter.drawRoundedRect(QRectF(x - 37, y - 33, 74, 66), 12, 12)
-            painter.setPen(accent(token))
-            painter.setFont(QFont("Segoe UI", 21))
-            painter.drawText(QRectF(x - 35, y - 31, 70, 36),
-                             Qt.AlignmentFlag.AlignCenter, glyph)
+            # The mark is centred in the chip's upper half rather than in the
+            # chip, so the name below it stays on the chip's own centre line
+            # instead of riding up under the logo.
+            side = self._CHIP_MARK
+            mark = self.chip_mark(provider)
+            # Four arguments, with the source rect as well as the target,
+            # because PySide6's two-argument overload only takes a QRect and
+            # rounding to whole pixels here would put the mark back on the grid
+            # that every other part of this paint deliberately leaves it off.
+            # The mark arrives with a device pixel ratio of 2, which the
+            # explicit source rect makes irrelevant.
+            painter.drawPixmap(QRectF(x - side / 2, y - 31 + (36 - side) / 2,
+                                      side, side), mark,
+                               QRectF(0, 0, mark.width(), mark.height()))
             painter.setPen(accent("orbit_chip_text"))
             painter.setFont(QFont("Segoe UI", 9))
             painter.drawText(QRectF(x - 35, y + 6, 70, 20),
@@ -343,17 +465,26 @@ class OrbitArt(QWidget):
 
 
 class HoverRow(QWidget):
-    """A row that keeps a slot for actions it only shows while hovered.
+    """One message: its speaker's mark, its bubble, and the actions beneath it.
 
-    The actions stay in the layout whether or not they are visible, so
-    revealing them cannot reflow the row and a message cannot shift as the
-    pointer passes over it. The row itself is one widget rather than a
-    layout, because ``:hover`` in a stylesheet matches widgets, and a bare
-    layout has nothing to match on.
+    The actions are always there and sit under the bubble, the way a browser
+    assistant keeps a copy button under every reply. They used to occupy a
+    slot beside the mark and appear only on hover, which was wrong twice
+    over: it read as a pop-up, and it moved the message, because a hidden
+    widget hands its space back to the layout, so revealing the actions took
+    about 90px off the bubble and re-wrapped the text under the pointer.
+
+    ``mine`` is the reader's own message. It puts the bubble and the mark on
+    the right of the panel and the stretch on the left, rather than the other
+    way round, so both sides of the conversation are built from one row.
+
+    The row is a widget rather than a layout because ``:hover`` in a
+    stylesheet matches widgets, and a bare layout has nothing to match on.
     """
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, mine=False):
         super().__init__(parent)
+        self.mine = mine
         self.setObjectName("messageRow")
         self.outer = QHBoxLayout(self)
         self.outer.setContentsMargins(0, 0, 0, 0)
@@ -361,61 +492,57 @@ class HoverRow(QWidget):
         self.content = QHBoxLayout()
         self.content.setSpacing(12)
         self.outer.addLayout(self.content, 1)
-        self._actions = QWidget()
-        self._actions.setObjectName("messageActions")
-        self._actions_layout = QHBoxLayout(self._actions)
-        self._actions_layout.setContentsMargins(8, 0, 0, 0)
+        # The bubble and the strip under it are stacked, so the strip can sit
+        # beneath the bubble and still line up with the bubble's own edge
+        # instead of floating off against the panel.
+        self.message = QVBoxLayout()
+        self.message.setContentsMargins(0, 0, 0, 0)
+        self.message.setSpacing(4)
+        self.actions = QWidget()
+        self.actions.setObjectName("messageActions")
+        self._actions_layout = QHBoxLayout(self.actions)
+        self._actions_layout.setContentsMargins(0, 0, 0, 0)
         self._actions_layout.setSpacing(4)
-        self.outer.addWidget(self._actions, 0, Qt.AlignmentFlag.AlignTop)
-        self._actions.setVisible(False)
-        self._revealed = False
+        self._actions_shown = False
+        if mine:
+            self.content.addStretch(1)
+        # Stretch 1, and the bubble aligned inside it rather than filling it.
+        # Left to size itself the stack sometimes matched the panel exactly
+        # and Qt centred the row, so a grouped reply and the header above it
+        # could start at different x; which rows centred depended on whether
+        # they happened to carry an action, because that changed the stack's
+        # hint. Filling the row and hugging inside it is the same every time.
+        self.content.addLayout(self.message, 1)
 
-    def add_content(self, item, stretch=0, alignment=None):
-        """Add a widget or a sub-layout to the part that is always shown.
-
-        Qt keeps these in two methods, so a caller holding a layout rather
-        than a widget has to know which to reach for. Here the type decides,
-        and a caller can pass either without keeping track.
-        """
-        if isinstance(item, QWidget):
-            if alignment is None:
-                self.content.addWidget(item, stretch)
-            else:
-                self.content.addWidget(item, stretch, alignment)
+    def add_mark(self, widget):
+        """Put the speaker's mark on that speaker's side of the row."""
+        if self.mine:
+            self.content.addWidget(widget, 0, Qt.AlignmentFlag.AlignTop)
         else:
-            self.content.addLayout(item, stretch)
-        return item
+            self.content.insertWidget(0, widget, 0, Qt.AlignmentFlag.AlignTop)
+        return widget
+
+    def set_message(self, widget):
+        self.message.addWidget(widget, 0, Qt.AlignmentFlag.AlignTop
+                               | (Qt.AlignmentFlag.AlignRight if self.mine
+                                  else Qt.AlignmentFlag.AlignLeft))
+        return widget
 
     def add_action(self, widget):
+        """Add an action under the bubble.
+
+        The strip is only parented into the row once there is something to put
+        in it, so a row with no actions carries no empty gap underneath.
+        """
+        if not self._actions_shown:
+            self._actions_shown = True
+            self.message.addWidget(self.actions, 0, Qt.AlignmentFlag.AlignLeft)
         self._actions_layout.addWidget(widget)
         return widget
 
     @property
-    def actions_revealed(self):
-        return self._revealed
-
-    def reveal_actions(self, revealed):
-        """Show or hide the action slot.
-
-        A no-op when it is already in that state, so the enter and leave
-        events of a pointer crossing a child widget cannot fight each other
-        into a flicker.
-        """
-        if revealed == self._revealed:
-            return
-        self._revealed = revealed
-        self._actions.setVisible(revealed)
-        self.setProperty("actionsShown", revealed)
-        self.style().unpolish(self)
-        self.style().polish(self)
-
-    def enterEvent(self, event):
-        self.reveal_actions(True)
-        super().enterEvent(event)
-
-    def leaveEvent(self, event):
-        self.reveal_actions(False)
-        super().leaveEvent(event)
+    def has_actions(self):
+        return self._actions_shown
 
 
 class WorkspaceButton(QPushButton):

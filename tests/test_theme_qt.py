@@ -449,6 +449,15 @@ def test_theme_switch_preserves_markdown_links_and_chat_history(window, name) ->
     assert body is not None
     assert not body.viewport().autoFillBackground()
     assert body.palette().color(QPalette.ColorRole.Text).name() == color(name, "text")
+    # The Base role no longer has to be the surface. A reply is now drawn on
+    # the bubble behind it, so it paints nothing of its own; what has to hold
+    # across a theme switch is that it is still told to paint nothing. The
+    # palette is not the thing that decides this: the app-level QWidget rule
+    # resolves Base back to an opaque colour under this stylesheet whatever
+    # the widget sets, so the rule on the reply itself is the one to check.
+    assert "background: transparent" in body.styleSheet(), (
+        "the reply lost its transparency across a theme switch, so it paints "
+        "an opaque slab over the bubble again")
     link_format = body.document().find("Website").charFormat()
     assert link_format.anchorHref() == "https://example.test"
     assert link_format.foreground().color().name() == color(name, "agent_title")

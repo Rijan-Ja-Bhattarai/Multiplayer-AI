@@ -33,6 +33,19 @@ class HistoryStore:
             database.execute("INSERT INTO records VALUES (?, ?, ?) ON CONFLICT(namespace, key) DO UPDATE SET value=excluded.value",
                              (namespace, key, encoded))
 
+    def delete(self, namespace, key):
+        """Drop one record, leaving every other namespace and key alone.
+
+        ``clear`` is the only other way to remove anything and it empties the
+        whole table, which is right when a workspace is deleted and far too
+        much for removing a single conversation. Anything held in a ``("ui",
+        "state")`` blob is not one record per conversation and still has to be
+        read, edited and written back by its owner.
+        """
+        with self.connection() as database:
+            database.execute("DELETE FROM records WHERE namespace = ? AND key = ?",
+                             (namespace, key))
+
     def clear(self):
         with self.connection() as database:
             database.execute("DELETE FROM records")

@@ -143,6 +143,61 @@ class WorkspacePersistenceTests(unittest.IsolatedAsyncioTestCase):
         saved = self.host.engine.history_store.load("ui")["state"]["chats"]["guest"]
         self.assertIn("Works while owner views another workspace", saved["messages"][0][1])
 
+    async def test_a_background_workspace_forgets_a_room_deleted_elsewhere(self):
+        """A room gone from a background workspace's listing goes from its archive.
+
+        This branch only ever added rooms, so a conversation deleted on another
+        device stayed in that workspace's saved chats for good, and came back
+        if the room ever reappeared.
+        """
+        first_id = self.host.active_workspace_id
+        await self.host.create_workspace("Elsewhere")
+        store = self.host.engines[first_id].history_store
+
+        room = {"id": "conversation-abc", "title": "Room", "target": "llama3",
+                "owner": "owner", "members": ["owner", "guest"], "messages": [],
+                "revision": 2, "pending": False}
+        self.host.forward(first_id, "conversations", [room])
+        saved = store.load("ui")["state"]
+        self.assertIn("conversation-abc", saved["chats"])
+        self.assertIn("conversation-abc", saved["conversations"])
+
+        # It disappears from the relay: deleted on another device, or this one
+        # was removed from it.
+        self.host.forward(first_id, "conversations", [])
+        saved = store.load("ui")["state"]
+        self.assertNotIn("conversation-abc", saved["chats"], (
+            "the archive kept a conversation the relay no longer lists"))
+        self.assertNotIn("conversation-abc", saved["conversations"])
+
+    async def test_a_background_reply_records_the_local_responder_in_the_role(self):
+        """A reply reaching a background workspace keeps the responder readable.
+
+        This branch used to write the agent id onto the front of the message
+        text, which made it the only record of who had replied: the speaker
+        logic could not see it, so those saved conversations render under the
+        name of the peer who asked. It travels in the role now, the same way the
+        active branch and ``member:<id>`` already do.
+        """
+        first_id = self.host.active_workspace_id
+        await self.host.create_workspace("Elsewhere")
+        self.assertNotEqual(self.host.active_workspace_id, first_id)
+        store = self.host.engines[first_id].history_store
+
+        self.host.forward(first_id, "incoming_reply", {
+            "from": "guest", "to": "research-model", "text": "**Hi** from my agent."})
+        saved = store.load("ui")["state"]["chats"]["guest"]
+        self.assertEqual(saved["messages"],
+                         [["local_agent:research-model", "**Hi** from my agent."]])
+
+        # A failure names no responder, because nothing replied.
+        self.host.forward(first_id, "incoming_reply", {
+            "from": "guest", "to": "research-model",
+            "text": "The local agent could not complete this request.", "error": True})
+        saved = store.load("ui")["state"]["chats"]["guest"]
+        self.assertEqual(saved["messages"][1],
+                         ["error", "The local agent could not complete this request."])
+
     async def test_member_removal_revokes_tokens_and_shared_history_access_permanently(self):
         """Verify member removal revokes access and deletes the member's stored search key."""
         invitation = await self.host.invite("guest", self.host.active_url, target=self.host.active_id)
