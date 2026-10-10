@@ -1,4 +1,4 @@
-"""Connect a model, define its purpose, choose Jev, and send through the native UI."""
+"""Connect a model, define its purpose, choose a coordinator, and send through the native UI."""
 import json
 import os
 import tempfile
@@ -14,11 +14,14 @@ pytest.importorskip("PySide6.QtWidgets")
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 from PySide6.QtGui import QImage
-from PySide6.QtWidgets import QApplication, QLabel
+from PySide6.QtWidgets import QApplication, QLabel, QStyle, QStyleOptionButton
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from desktop_app.storage import Storage
+from desktop_app.model_purpose import ModelPurpose
+from desktop_app.theme import DARK, LIGHT, MIKU, color, stylesheet
+from desktop_app.widgets import TickCheckBox
 from desktop_app.window import CONVERSATIONS_PAGE, MainWindow
 from network_a2a.orchestration import GENERAL_TARGET
 from tests.test_desktop_runtime import MemoryVault
@@ -39,6 +42,50 @@ class OrchestrationUITests(unittest.TestCase):
             time.sleep(.01)
         self.app.processEvents()
 
+    def test_import_form_has_specialist_tasks_and_visible_ticks_in_every_theme(self):
+        form = ModelPurpose()
+        try:
+            self.assertNotIn("general", form.tasks)
+            self.assertEqual(set(form.tasks), {"coding", "debugging", "reasoning", "research", "writing"})
+            self.assertIsInstance(form.enabled, TickCheckBox)
+            checkbox = form.tasks["coding"]
+            for theme in (DARK, LIGHT, MIKU):
+                with self.subTest(theme=theme):
+                    form.setStyleSheet(stylesheet(theme))
+                    form.show()
+                    checkbox.setChecked(False)
+                    self.app.processEvents()
+                    option = QStyleOptionButton()
+                    checkbox.initStyleOption(option)
+                    rect = checkbox.style().subElementRect(QStyle.SubElement.SE_CheckBoxIndicator, option, checkbox)
+                    QTest.mouseClick(checkbox, Qt.MouseButton.LeftButton, pos=rect.center())
+                    self.assertTrue(checkbox.isChecked())
+                    self.app.processEvents()
+                    image = checkbox.grab().toImage().copy(rect)
+                    tick = color(theme, "success")
+                    pixels = sum(image.pixelColor(x, y).name() == tick
+                                 for x in range(image.width()) for y in range(image.height()))
+                    self.assertGreater(pixels, 10, "The checked indicator must contain a painted tick")
+                    self.assertLess(pixels, image.width() * image.height() // 2,
+                                    "The checked indicator must not be a filled box")
+                    corner = image.pixelColor(1, 1)
+                    self.assertTrue(corner.alpha() == 0 or corner.name() == color(theme, "surface_base"),
+                                    "The tick's background must stay transparent")
+                    checkbox.setFocus()
+                    QTest.keyClick(checkbox, Qt.Key.Key_Space)
+                    self.assertFalse(checkbox.isChecked())
+        finally:
+            form.close()
+
+    def test_editing_legacy_general_permissions_preserves_them_and_new_import_resets(self):
+        form = ModelPurpose()
+        profile = {"purpose": "Conversation", "tasks": ["general"], "delegation_enabled": True}
+        form.load(profile)
+        self.assertEqual(form.values(), profile)
+        self.assertNotIn("general", form.tasks)
+        form.load({})
+        self.assertEqual(form.values(), {"purpose": "", "tasks": [], "delegation_enabled": False})
+
     def test_default_ollama_import_with_saved_empty_coordinator_can_send_immediately(self):
         with tempfile.TemporaryDirectory() as directory:
             storage = Storage(directory, MemoryVault())
@@ -56,18 +103,25 @@ class OrchestrationUITests(unittest.TestCase):
                     return JSONResponse({"message": {"content": answer}, "done": True, "done_reason": "stop"})
 
                 window.network.runtime.app.router.routes.append(Route("/mock/api/chat", provider, methods=["POST"]))
+                async def model_catalog(request):
+                    return JSONResponse({"models": [{"name": "first-model-id"}, {"name": "second-model-id"}]})
+                window.network.runtime.app.router.routes.append(Route("/mock/api/tags", model_catalog))
                 for model in ("first-model-id", "second-model-id"):
                     window.add_agent("ollama")
                     name = window.model_name.text()
                     self.assertEqual(name, "ollama-agent" if model == "first-model-id" else "ollama-agent-2")
                     window.model_id.setCurrentText(model)
                     window.model_base.setText(f"http://127.0.0.1:{window.port}/mock")
+                    self.wait(lambda: window.model_id.count() == 2)
+                    self.assertEqual({window.model_id.itemText(index) for index in range(window.model_id.count())},
+                                     {"first-model-id", "second-model-id"})
+                    self.assertEqual(window.model_id.currentText(), model)
                     self.assertEqual(window.model_purpose.values(), {"purpose": "", "tasks": [], "delegation_enabled": False})
                     QTest.mouseClick(window.model_save_button, Qt.MouseButton.LeftButton)
                     self.wait(lambda: window.selected == GENERAL_TARGET and window.stack.currentIndex() == CONVERSATIONS_PAGE
                               and window.send_button.isEnabled() and any(agent["id"] == name for agent in window.model_agents()))
                     self.assertEqual(window.coordinator_picker.currentData(), "ollama-agent")
-                    self.assertEqual(window.chat_title.text(), "General chat")
+                    self.assertEqual(window.chat_title.text(), "Chat")
                     self.assertEqual(window.chat_agent_count.text(), "1 agent")
                     self.assertIn("Ready to chat", window.chat_subtitle.text())
                     prompt = "Make a hello world program" if model == "first-model-id" else "Now use a function"
@@ -78,10 +132,26 @@ class OrchestrationUITests(unittest.TestCase):
                     self.assertEqual(seen[-1]["model"], "first-model-id")
                     self.assertEqual(seen[-1]["messages"][-1]["content"], prompt)
                     self.assertEqual(window.chats[GENERAL_TARGET]["messages"][-1], ("assistant", answer))
+                    self.assertEqual(window.chats[GENERAL_TARGET]["responders"][str(expected * 2 - 1)],
+                                     {"agent_id": "ollama-agent", "model": "first-model-id", "provider": "ollama"})
+                    self.assertTrue(any(child.text() == "first-model-id" for child in window.messages_widget.findChildren(QLabel)))
                 self.assertEqual(len(window.model_agents()), 2)
                 self.assertEqual(len(seen[-1]["messages"]), 3)
                 self.assertEqual(seen[-1]["messages"][0]["content"], "Make a hello world program")
                 self.assertEqual(window.chats[GENERAL_TARGET]["routing"]["mode"], "direct")
+                window.command("stop_agent", "ollama-agent")
+                self.wait(lambda: any(agent["id"] == "ollama-agent" and not agent["online"]
+                                      for agent in window.model_agents()) and window.send_button.isEnabled())
+                self.assertIn("Ready to chat with ollama-agent-2", window.chat_subtitle.text())
+                window.composer.setPlainText("Add error handling to the function")
+                QTest.mouseClick(window.send_button, Qt.MouseButton.LeftButton)
+                self.wait(lambda: len(seen) == 3 and not window.chats[GENERAL_TARGET]["pending"])
+                self.assertEqual(seen[-1]["model"], "second-model-id")
+                self.assertEqual(seen[-1]["messages"][-1]["content"], "Add error handling to the function")
+                self.assertEqual(window.chats[GENERAL_TARGET]["routing"]["mode"], "direct")
+                self.assertEqual(window.chats[GENERAL_TARGET]["routing"]["assignments"], [])
+                self.assertEqual(window.coordinator_picker.currentData(), "ollama-agent")
+                self.assertEqual(window.workspace_meta["coordinator"], "ollama-agent")
             finally:
                 window.close()
                 self.wait(lambda: not window.network.isRunning())
@@ -97,7 +167,7 @@ class OrchestrationUITests(unittest.TestCase):
                 async def provider(request):
                     body = await request.json()
                     seen.append(body)
-                    if body["messages"][-1]["content"].startswith("You are Jev, the task coordinator"):
+                    if body["messages"][-1]["content"].startswith("You are the task coordinator"):
                         answer = json.dumps({"tasks": [{"agent_id": "python-model", "task_type": "debugging",
                                                          "instruction": "Debug the original code"}], "reason": "Python specialist", "reply": ""})
                     else:
@@ -118,7 +188,7 @@ class OrchestrationUITests(unittest.TestCase):
                 self.wait(lambda: window.selected == GENERAL_TARGET and window.workspace_meta.get("coordinator") == "python-model"
                           and window.send_button.isEnabled() and window.model_profile_id is None)
                 self.assertEqual(window.stack.currentIndex(), CONVERSATIONS_PAGE)
-                self.assertEqual(window.chat_title.text(), "General chat")
+                self.assertEqual(window.chat_title.text(), "Chat")
                 self.assertEqual(window.coordinator_picker.currentData(), "python-model")
                 image = QImage(20, 20, QImage.Format.Format_RGB32)
                 image.fill(0xff000000)
@@ -126,7 +196,8 @@ class OrchestrationUITests(unittest.TestCase):
                 self.assertTrue(image.save(str(image_path)))
                 window.prepare_files([str(image_path)])
                 self.wait(lambda: not window.preparing_files)
-                self.assertEqual(len(window.chats[GENERAL_TARGET]["draft_attachments"]), 1)
+                self.assertEqual(len(window.chats[GENERAL_TARGET].get("draft_attachments", [])), 1,
+                                 window.toast.text())
                 code = "Debug y\n```python\ndef f(): return 1 / 0\n```"
                 window.composer.setPlainText(code)
                 QTest.mouseClick(window.send_button, Qt.MouseButton.LeftButton)
@@ -135,8 +206,10 @@ class OrchestrationUITests(unittest.TestCase):
                 self.assertEqual(worker_content[0]["text"], code)
                 self.assertEqual(worker_content[1]["type"], "image_url")
                 self.assertEqual(window.chats[GENERAL_TARGET]["history"][0]["content"][0]["text"], code)
-                self.assertEqual(window.chat_title.text(), "General chat")
+                self.assertEqual(window.chat_title.text(), "Chat")
                 self.assertTrue(any("Python specialist" in child.text() for child in window.messages_widget.findChildren(QLabel)))
+                self.assertTrue(any(child.text() == "any-model-id" for child in window.messages_widget.findChildren(QLabel)))
+                self.assertFalse(any(child.text() == "Jev" for child in window.messages_widget.findChildren(QLabel)))
 
                 chat = window.chats[GENERAL_TARGET]
                 saved_history = list(chat["history"])
@@ -154,11 +227,9 @@ class OrchestrationUITests(unittest.TestCase):
                 self.assertEqual(window.workspace_meta["coordinator"], "python-model")
                 self.assertIs(window.chats[GENERAL_TARGET], chat)
                 self.assertEqual(chat["history"], saved_history)
-                for listing in (window.chat_agents, window.sidebar_agents):
-                    general_rows = [listing.item(index) for index in range(listing.count())
-                                    if listing.item(index).data(Qt.ItemDataRole.UserRole) == GENERAL_TARGET]
-                    self.assertEqual(len(general_rows), 1)
-                    self.assertEqual(general_rows[0].text(), "General chat")
+                self.assertEqual(window.conversation_picker.count(), 1)
+                self.assertEqual(window.conversation_picker.currentData(), GENERAL_TARGET)
+                self.assertTrue(window.conversation_picker.isHidden())
 
                 agent = next(agent for agent in window.agents if agent["id"] == "python-model")
                 window.edit_agent(agent)
@@ -170,6 +241,14 @@ class OrchestrationUITests(unittest.TestCase):
                 self.assertFalse(window.model_purpose.enabled.isChecked())
                 self.assertEqual(window.model_purpose.purpose.toPlainText(), "")
                 self.assertFalse(any(checkbox.isChecked() for checkbox in window.model_purpose.tasks.values()))
+                window.select_agent(GENERAL_TARGET)
+                previous_calls = len(seen)
+                window.composer.setPlainText("Good morning!")
+                QTest.mouseClick(window.send_button, Qt.MouseButton.LeftButton)
+                self.wait(lambda: len(seen) == previous_calls + 1 and not window.chats[GENERAL_TARGET]["pending"])
+                self.assertEqual(seen[-1]["messages"][-1]["content"], "Good morning!")
+                self.assertEqual(window.chats[GENERAL_TARGET]["routing"]["mode"], "conversation")
+                self.assertEqual(window.chats[GENERAL_TARGET]["routing"]["assignments"], [])
             finally:
                 window.close()
                 self.wait(lambda: not window.network.isRunning())

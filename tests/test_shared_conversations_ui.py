@@ -50,7 +50,7 @@ class SharedConversationUITests(unittest.TestCase):
         # signal. Everything below runs in the same QApplication, which is
         # shared with every other UI test file, so that signal can land
         # after this test starts poking at state unless it is drained here.
-        self.wait(lambda: self.host.chat_agents.count() > 0)
+        self.wait(lambda: bool(self.host.agents))
 
     def tearDown(self):
         self.host.close()
@@ -99,9 +99,11 @@ class SharedConversationUITests(unittest.TestCase):
         self.assertEqual(self.guest.selected, room_id)
         for window in (self.host, self.guest):
             self.assertIn(room_id, window.conversations)
-            self.assertTrue(any(window.chat_agents.item(i).data(Qt.ItemDataRole.UserRole) == room_id
-                                for i in range(window.chat_agents.count())))
+            self.assertGreaterEqual(window.conversation_picker.findData(room_id), 0)
             self.assertTrue(any(text == "Before the guest joined" for _, text in window.chats[room_id]["messages"]))
+            window.select_agent("@jev")
+            window.conversation_picker.activated.emit(window.conversation_picker.findData(room_id))
+            self.assertEqual(window.selected, room_id)
         self.send(self.guest, "Guest message")
         self.wait(lambda: any(text == "AI: Guest message" for _, text in self.host.chats[room_id]["messages"]))
         self.send(self.host, "Host message")

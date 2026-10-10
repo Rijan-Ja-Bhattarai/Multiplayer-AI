@@ -139,43 +139,6 @@ def test_the_rows_built_on_demand_explain_themselves(window) -> None:
         "a column of identical Remove buttons is ambiguous")
 
 
-def test_the_sidebar_says_when_there_is_nothing_to_chat_to(window) -> None:
-    """An empty list read as a hole rather than as an absence of anything."""
-    window.agents = []
-    window.conversations = {}
-    window.render_agents()
-
-    assert not window.chats_hint.isHidden()
-    assert "Nothing" in window.chats_hint.text()
-
-
-def test_the_sidebar_hint_goes_once_there_is_something(window) -> None:
-    window.agents = []
-    window.render_agents()
-    assert not window.chats_hint.isHidden()
-
-    window.agents = [{"id": "model", "online": True, "provider": "ollama", "model": "m"}]
-    window.render_agents()
-
-    assert window.chats_hint.isHidden()
-
-
-def test_the_sidebar_hint_ignores_this_device(window) -> None:
-    """The hint used to key off the row count, and this device is always a row.
-
-    On a first run the sidebar holds one entry, this device, which is
-    nothing a new user can talk to. Counting rows therefore hid the hint
-    precisely when it was needed. It now agrees with the welcome panel.
-    """
-    window.agents = [{"id": "device-abc123", "kind": "device", "online": True}]
-    window.conversations = {}
-    window.render_agents()
-
-    assert window.sidebar_agents.count() == 1, "this test needs the device listed"
-    assert not window.chats_hint.isHidden(), (
-        "the hint stayed hidden because this device is always a row in the list")
-
-
 def test_the_welcome_appears_although_this_device_is_listed(window) -> None:
     """A first run always lists this device in the sidebar, and so it always did.
 
@@ -358,9 +321,9 @@ def test_consecutive_messages_from_one_speaker_are_grouped(window) -> None:
     assert "You" not in row_labels(rows[1]), (
         "a follow-on message repeats the name above it")
 
-    assert "local-llama" in row_labels(rows[2]), (
+    assert "llama3" in row_labels(rows[2]), (
         "a new speaker should be named")
-    assert "local-llama" not in row_labels(rows[3]), (
+    assert "llama3" not in row_labels(rows[3]), (
         "a follow-on message repeats the name above it")
 
 
@@ -382,6 +345,27 @@ def test_a_grouped_message_lines_up_under_the_one_above(window, qt_app) -> None:
     assert text_indent(rows[0]) == text_indent(rows[1]), (
         f"a grouped message sits at {text_indent(rows[1])} while the one above "
         f"it sits at {text_indent(rows[0])}")
+
+
+def test_general_chat_keeps_each_answering_model_after_routing_changes_and_restore(window, tmp_path) -> None:
+    window.agents = [{"id": "planner", "kind": "model", "online": True, "model": "planner-v2", "provider": "ollama"}]
+    window.selected = win.GENERAL_TARGET
+    window.chats = {win.GENERAL_TARGET: {"messages": [
+        ("user", "Write a parser"), ("assistant", "Here is the parser"),
+        ("user", "Review it"), ("assistant", "Here is the review")],
+        "responders": {"1": {"agent_id": "coder", "model": "code-model-v1", "provider": "bionic"},
+                       "3": {"agent_id": "reviewer", "model": "review-model-v3", "provider": "ollama"}},
+        "routing": {"coordinator": "planner", "assignments": [{"agent_id": "reviewer", "task_type": "debugging"}],
+                    "reason": "Review specialist"}}}
+    window.history_store = win.HistoryStore(tmp_path)
+    window.persist_history()
+    window.chats = {}
+    window.restore_history(tmp_path)
+    window.render_messages()
+    rows = window.messages_widget.findChildren(win.HoverRow)
+    assert "code-model-v1" in row_labels(rows[1])
+    assert "review-model-v3" in row_labels(rows[3])
+    assert all("planner-v2" not in row_labels(row) and "Jev" not in row_labels(row) for row in rows)
 
 
 def test_the_action_slot_keeps_its_place_when_revealed(window, qt_app) -> None:
@@ -436,6 +420,50 @@ def test_the_composer_is_set_apart_from_the_messages(window, qt_app) -> None:
     assert window.composer_bar.geometry().y() >= window.messages_scroll.geometry().y(), (
         "the composer overlaps the message area")
     assert window.composer_bar.objectName() == "composerBar"
+
+
+@pytest.mark.parametrize("send_method", ("enter", "button"))
+def test_sending_in_default_chat_keeps_latest_messages_visible(window, qt_app, send_method) -> None:
+    from PySide6.QtTest import QTest
+
+    window.show()
+    deadline = time.monotonic() + 10
+    while not window.ready or not window.agents:
+        pump(qt_app, .01)
+        assert time.monotonic() < deadline
+    window.workspace_list = [{"id": window.workspace_id}]
+    window.agents = [{"id": "model", "online": True, "kind": "model",
+                      "model": "chat-model", "provider": "ollama"}]
+    window.workspace_meta = {"coordinator": "model"}
+    reply = "\n\n".join(f"Paragraph {index}: " + "A detailed explanation. " * 15 for index in range(12))
+    window.chats[win.GENERAL_TARGET] = {
+        "messages": [(role, text) for index in range(8)
+                     for role, text in (("user", f"Question {index}"), ("assistant", reply))],
+        "history": [], "pending": False,
+    }
+    window.select_agent(win.GENERAL_TARGET)
+    pump(qt_app, .15)
+    bar = window.messages_scroll.verticalScrollBar()
+    assert bar.maximum() > 0
+    bar.setValue(bar.maximum())
+    callbacks = {}
+    window.command = lambda name, *args, **kwargs: callbacks.update(kwargs)
+    window.composer.setPlainText("Continue with an example")
+    if send_method == "enter":
+        QTest.keyClick(window.composer, Qt.Key.Key_Return)
+    else:
+        QTest.mouseClick(window.send_button, Qt.MouseButton.LeftButton)
+    pump(qt_app, .15)
+    assert bar.value() == bar.maximum(), "Sending moved the view away from the newest message"
+    callbacks["success"]({"text": reply, "provider": "ollama", "model": "chat-model",
+                          "routing": {"coordinator": "model", "mode": "direct", "assignments": [],
+                                      "reason": "Answered by model"}})
+    pump(qt_app, .15)
+    assert bar.value() == bar.maximum(), "The reply moved the view away from the newest message"
+    bar.setValue(bar.maximum() // 3)
+    window.resize(900, 700)
+    pump(qt_app, .15)
+    assert bar.value() < bar.maximum(), "Resizing should let the user keep reading older messages"
 
 
 @pytest.mark.parametrize("name", THEME_NAMES)
@@ -1261,6 +1289,94 @@ def test_a_failed_model_save_is_reported_on_the_card(window) -> None:
     # And it belongs to this card alone.
     assert not window.workspace_create_line.message.text()
     assert not window.workspace_join_line.message.text()
+
+
+def test_failed_model_save_returns_to_the_field_and_clears_when_edited(window, qt_app) -> None:
+    window.ready = True
+    window.add_agent("ollama")
+    window.model_id.setCurrentText("llama3.2")
+    window.show()
+    qt_app.processEvents()
+    callbacks = {}
+    window.command = lambda name, *args, **kwargs: callbacks.update(kwargs)
+    window.save_model()
+    window.navigate(win.OVERVIEW_PAGE)
+    callbacks["failure"]("The provider refused that API key")
+    qt_app.processEvents()
+    assert window.stack.currentIndex() == win.AGENTS_PAGE
+    assert window.model_key.hasFocus()
+    assert window.model_key.property("invalid")
+    assert window.model_card.property("invalid")
+    window.model_key.setText("corrected-key")
+    assert not window.model_key.property("invalid")
+    assert not window.model_card.property("invalid")
+
+
+def test_failed_chat_opens_its_conversation_after_the_user_leaves(window) -> None:
+    window.ready = True
+    window.workspace_id = "test-workspace"
+    window.workspace_list = [{"id": window.workspace_id}]
+    window.agents = [{"id": "model", "online": True, "kind": "model", "model": "chat-model", "provider": "ollama"}]
+    window.select_agent("model")
+    window.composer.setPlainText("Hello")
+    callbacks = {}
+    window.command = lambda name, *args, **kwargs: callbacks.update(kwargs)
+    window.send_message()
+    window.navigate(win.AGENTS_PAGE)
+    callbacks["failure"]("The model is unavailable")
+    assert window.stack.currentIndex() == win.CONVERSATIONS_PAGE
+    assert window.selected == "model"
+    assert window.chats["model"]["messages"][-1][0] == "error"
+    assert not window.composer_bar.property("invalid")
+    assert window.messages.itemAt(window.messages.count() - 1).widget().property("invalid")
+
+
+def test_model_list_results_for_an_old_endpoint_are_ignored(window) -> None:
+    window.ready = True
+    window.add_agent("ollama")
+    callbacks = {}
+    window.command = lambda name, *args, **kwargs: callbacks.update(kwargs)
+    window.find_models()
+    window.model_base.setText("http://localhost:11435")
+    callbacks["success"](["model-from-old-endpoint"])
+    assert window.model_id.findText("model-from-old-endpoint") == -1
+    assert window.model_models_button.isEnabled()
+
+
+def test_attachment_failure_returns_to_its_chat_and_preserves_the_draft(window) -> None:
+    window.ready = True
+    window.workspace_id = "test-workspace"
+    window.workspace_list = [{"id": window.workspace_id}]
+    window.agents = [{"id": "model", "online": True, "kind": "model", "model": "vision-model", "provider": "ollama", "vision": True}]
+    window.select_agent("model")
+    window.composer.setPlainText("Understand this image")
+    callbacks = {}
+    window.command = lambda name, *args, **kwargs: callbacks.update(kwargs)
+    window.prepare_files(["unreadable.png"])
+    window.navigate(win.AGENTS_PAGE)
+    callbacks["failure"]("Could not read image: unreadable.png")
+    assert window.stack.currentIndex() == win.CONVERSATIONS_PAGE
+    assert window.composer.toPlainText() == "Understand this image"
+    assert not window.composer_bar.property("invalid")
+    assert "unreadable.png" in window.chats["model"]["send_error"]
+    assert not window.preparing_files
+
+
+def test_an_oversized_message_stays_editable_and_reports_in_its_chat(window) -> None:
+    window.ready = True
+    window.workspace_id = "test-workspace"
+    window.workspace_list = [{"id": window.workspace_id}]
+    window.agents = [{"id": "model", "online": True, "kind": "model", "model": "chat-model", "provider": "ollama"}]
+    window.select_agent("model")
+    draft = "x" * 180001
+    window.composer.setPlainText(draft)
+    calls = []
+    window.command = lambda name, *args, **kwargs: calls.append(name)
+    window.send_message()
+    assert not calls
+    assert window.composer.toPlainText() == draft
+    assert "too large" in window.chats["model"]["send_error"]
+    assert not window.composer_bar.property("invalid")
 
 
 def test_a_search_failure_points_at_the_search_settings(window) -> None:
@@ -2399,15 +2515,6 @@ def test_the_workspaces_page_never_scrolls_sideways(window, qt_app) -> None:
             f"but has {page.viewport().width()}px, so it scrolls sideways")
 
 
-def test_the_sidebar_list_does_not_scroll_sideways(window, qt_app) -> None:
-    """A long agent name used to grow a scrollbar under the list."""
-    window.agents = [{"id": "a-very-long-agent-name-for-testing-wrap", "online": True,
-                      "provider": "ollama", "model": "m"}]
-    window.render_agents()
-    assert not window.sidebar_agents.horizontalScrollBar().isVisible(), (
-        "the agent list has a horizontal scrollbar; the names should wrap")
-
-
 # --- the settings controls ----------------------------------------------
 
 
@@ -2742,27 +2849,41 @@ def test_the_chat_does_not_claim_a_collaboration_that_has_not_started(window) ->
         "an opened conversation with no messages yet is still a beginning")
 
 
-def test_the_chat_hides_its_own_agent_list_while_it_is_empty(window) -> None:
-    """Two empty 200px columns either side of an empty conversation.
-
-    The sidebar already carries the same list, so the copy on the chat page
-    was width nobody could use until something was connected.
-    """
+def test_sidebar_has_navigation_without_chat_or_agent_lists(window) -> None:
     window.agents = []
     window.conversations = {}
-    # Wide enough that the narrow-window rule is not what is hiding it, so
-    # this tests the empty-list rule rather than the collapse rule.
     window.resize(1400, 900)
     window.render_agents()
     window.apply_sidebar_density()
 
-    assert window.chat_agents.isHidden()
+    assert not window.stack.widget(win.CONVERSATIONS_PAGE).findChildren(win.QListWidget)
+    assert not window.sidebar.findChildren(win.QListWidget)
 
-    window.agents = [{"id": "model", "online": True, "provider": "ollama", "model": "m"}]
+    window.agents = [{"id": "model", "online": True, "provider": "ollama", "model": "m"},
+                     {"id": "guest-device", "kind": "device", "online": True}]
     window.render_agents()
     window.apply_sidebar_density()
 
-    assert not window.chat_agents.isHidden(), "a populated list has to be reachable"
+    assert not window.sidebar.findChildren(win.QListWidget)
+    assert "CHATS, MODELS AND DEVICES" not in " ".join(child.text() for child in window.sidebar.findChildren(QLabel))
+    assert window.conversation_picker.count() == 1
+    assert window.conversation_picker.isHidden()
+
+
+def test_a_narrow_window_can_open_workspace_navigation(window, qt_app) -> None:
+    window.resize(900, 700)
+    window.show()
+    window.agents = [{"id": "device", "online": True}]
+    window.render_agents()
+    qt_app.processEvents()
+    assert window.sidebar.isHidden()
+    assert window.sidebar_toggle.isVisible()
+    assert window.sidebar_toggle.text() == "Menu"
+    window.sidebar_toggle.click()
+    assert window.sidebar.isVisible()
+    window.nav_buttons[win.AGENTS_PAGE].click()
+    assert window.stack.currentIndex() == win.AGENTS_PAGE
+    assert window.sidebar.isHidden()
 
 
 def test_the_welcome_and_the_statistics_are_never_shown_together(window) -> None:

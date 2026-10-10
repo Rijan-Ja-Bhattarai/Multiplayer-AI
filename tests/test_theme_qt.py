@@ -447,7 +447,8 @@ def test_theme_switch_preserves_markdown_links_and_chat_history(window, name) ->
     window.apply_theme(name)
     body = window.messages.itemAt(0).widget().findChild(MarkdownMessage)
     assert body is not None
-    assert body.palette().color(QPalette.ColorRole.Base).name() == color(name, "surface")
+    assert not body.viewport().autoFillBackground()
+    assert body.palette().color(QPalette.ColorRole.Text).name() == color(name, "text")
     link_format = body.document().find("Website").charFormat()
     assert link_format.anchorHref() == "https://example.test"
     assert link_format.foreground().color().name() == color(name, "agent_title")

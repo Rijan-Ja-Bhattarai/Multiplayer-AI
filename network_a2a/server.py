@@ -306,7 +306,7 @@ class Relay:
         except (ConnectionError, OverflowError) as exc:
             return JSONResponse({"error": str(exc)}, 503)
         except TimeoutError:
-            return JSONResponse({"error": "Jev timed out; this request was not replayed"}, 504)
+            return JSONResponse({"error": "Model orchestration timed out; this request was not replayed"}, 504)
 
 
 def create_app(credentials, timeout=60, max_pending=256, conversation_store=None, workspace=None):

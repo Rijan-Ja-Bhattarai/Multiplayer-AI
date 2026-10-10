@@ -46,12 +46,11 @@ Provider adapters support Ollama, Bionic GPT, OpenAI, Claude, Gemini, Groq,
 DeepSeek, Mistral, OpenRouter, and custom OpenAI-compatible endpoints. See
 [provider setup and examples](PROVIDER_ADAPTERS.md).
 
-Imported models can carry a user-defined purpose and permitted tasks. General
-chat uses a user-selected **Jev coordinator** model to plan and delegate requests
-across those models, including contextual coding, debugging, and mixed tasks.
-Workspace access, online status, and task permissions are checked before dispatch;
-model selection comes from the coordinator. See the
-[general chat guide](DESKTOP_GUIDE.md#general-chat-and-jev-orchestration).
+Chat uses the first imported model as its default, with another available imported
+model taking over while it is offline. Optional model purposes and permitted tasks
+enable specialist routing. If planning fails, the default answers the original
+request directly. Workspace access, online status, and task permissions are checked
+before dispatch. See the [chat guide](DESKTOP_GUIDE.md#chat-and-model-orchestration).
 
 The client Connection Server and agent relay are separate applications with
 different WebSocket message formats. They are not wired together. Run them on
@@ -92,7 +91,7 @@ with the client Connection Server is not built yet — see [Scope](#scope).
 | `scripts/demo_client.py` | Command-line client for manual testing |
 | `network_a2a/server.py` | Authenticated multi-device agent relay |
 | `network_a2a/conversations.py` | Shared AI chat history and conversation membership |
-| `network_a2a/orchestration.py` | Jev planning, validated model assignments, and synthesis |
+| `network_a2a/orchestration.py` | Model planning, validated assignments, and synthesis |
 | `network_a2a/persistence.py` | SQLite chat archives and bounded model context |
 | `desktop_app/runtime.py` | Saved workspace catalog and switching |
 | `desktop_app/workspace_runtime.py` | Per-workspace relays, agents, and membership |

@@ -446,14 +446,16 @@ class WorkspaceRuntime:
         configured = self.storage.settings.get("coordinator")
         if not self.remote and (not configured or not self.app.state.relay.allowed(self.active_id, configured)
                                 or self.app.state.relay.agent_description(configured)["kind"] != "model"):
+            default = next((item["id"] for item in self.storage.settings.get("agents", [])
+                            if self.app.state.relay.allowed(self.active_id, item["id"])), profile["id"])
             previous = self.storage.settings
-            self.storage.settings = {**previous, "coordinator": profile["id"]}
+            self.storage.settings = {**previous, "coordinator": default}
             try:
                 self.storage.save()
             except BaseException:
                 self.storage.settings = previous
                 raise
-            self.app.state.relay.workspace["coordinator"] = profile["id"]
+            self.app.state.relay.workspace["coordinator"] = default
 
     async def save_agent(self, profile, key=None, search_key=None):
         """Validate and transactionally persist a model and its keys before restarting it."""
@@ -480,6 +482,7 @@ class WorkspaceRuntime:
             if not self.remote:
                 self.credentials = updated
                 self.app.state.relay.credentials = updated
+                self.app.state.relay.workspace["models"] = [item["id"] for item in self.storage.settings.get("agents", [])]
             if not finalized:
                 self.emit("notice", "The model was saved, but its saved credentials need another check. Unlock your credential store and restart the app to finish it.")
             await self._launch_profile(profile, self.storage.settings.get("remote", {}).get("allow_insecure", False))
@@ -609,16 +612,16 @@ class WorkspaceRuntime:
         return [item["name"] for item in response.json()["models"]]
 
     async def set_coordinator(self, agent_id):
-        """The workspace owner chooses the model that plans general-chat work."""
+        """Save the owner's default model, retaining import order for Automatic."""
         async with self.mutation:
             if self.remote:
-                raise ValueError("The workspace owner chooses the Jev coordinator")
+                raise ValueError("The workspace owner chooses the default model")
             relay = self.app.state.relay
             if not agent_id:
-                agent_id = next((model["id"] for model in relay.orchestrator.models(self.active_id) if model["online"]), None)
+                agent_id = next((model["id"] for model in relay.orchestrator.models(self.active_id)), None)
             if agent_id and (not relay.allowed(self.active_id, agent_id)
                              or relay.agent_description(agent_id)["kind"] != "model"):
-                raise ValueError("Choose a model in this workspace as the Jev coordinator")
+                raise ValueError("Choose a model in this workspace as the default")
             previous = dict(self.storage.settings)
             self.storage.settings["coordinator"] = agent_id or None
             try:
@@ -639,11 +642,41 @@ class WorkspaceRuntime:
                 key = self.storage.vault.get("provider:" + agent_id)
         config = ProviderConfig(provider, "discovery", base_url, api_key=key, allow_insecure=allow_insecure)
         path = "/api/tags" if provider == "ollama" else "/models"
-        response = await self.http.get(config.base_url.rstrip("/") + path,
-            headers={"Authorization": "Bearer " + key} if key else {}, timeout=8)
-        response.raise_for_status()
-        payload = response.json()
-        return [item["name"] for item in payload["models"]] if provider == "ollama" else [item["id"] for item in payload["data"]]
+        headers = {"Authorization": "Bearer " + key} if key else {}
+        params = {}
+        if provider in ("anthropic", "gemini") and not key:
+            raise ValueError("Enter an API key to list available models")
+        if provider == "anthropic":
+            headers = {"x-api-key": key, "anthropic-version": "2023-06-01"}
+            params = {"limit": 1000}
+        elif provider == "gemini":
+            headers = {"x-goog-api-key": key}
+            params = {"pageSize": 1000}
+        models, cursors = [], set()
+        async with asyncio.timeout(30):
+            for _ in range(100):
+                response = await self.http.get(config.base_url.rstrip("/") + path,
+                    headers=headers, params=params, timeout=8, follow_redirects=False)
+                response.raise_for_status()
+                payload = response.json()
+                if provider == "ollama":
+                    models.extend(item["name"] for item in payload["models"])
+                elif provider == "gemini":
+                    models.extend(item["name"].removeprefix("models/") for item in payload.get("models", [])
+                                  if "generateContent" in item.get("supportedGenerationMethods", []))
+                else:
+                    models.extend(item["id"] for item in payload["data"])
+                cursor = (payload.get("nextPageToken") if provider == "gemini" else
+                          payload.get("last_id") if payload.get("has_more") else None)
+                if payload.get("has_more") and not cursor:
+                    raise ValueError("The provider's model list is missing its next-page cursor. Try refreshing the list.")
+                if not cursor:
+                    return list(dict.fromkeys(models))
+                if cursor in cursors:
+                    raise ValueError("The provider repeated a model-list page. Try refreshing the list.")
+                cursors.add(cursor)
+                params["pageToken" if provider == "gemini" else "after_id"] = cursor
+        raise ValueError("The provider's model list could not be completed. Try refreshing the list.")
 
     async def test_web_search(self, url="", allow_insecure=False, provider="searxng", key=None, agent_id=None):
         """Return a probe result count, reusing the saved hosted search key if needed."""

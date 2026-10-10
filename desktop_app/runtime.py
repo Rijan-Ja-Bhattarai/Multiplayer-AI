@@ -166,6 +166,8 @@ class DesktopRuntime:
                     chat["messages"] = [["user" if message["role"] == "user" and message["from"] == engine.active_id
                         else "member:" + message["from"] if message["role"] == "user" else message["role"], content_summary(message["content"])]
                         for message in room["messages"]]
+                    chat["responders"] = {str(index): message["responder"] for index, message in enumerate(room["messages"])
+                                          if message["role"] == "assistant" and message.get("responder")}
                 engine.history_store.save("ui", "state", state)
             return
         if not self.ready or event == "ready":

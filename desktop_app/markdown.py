@@ -22,20 +22,42 @@ class MarkdownMessage(QTextBrowser):
         foreground = color(theme_name, "text")
         background = color(theme_name, "surface")
         link = color(theme_name, "agent_title")
-        self.setStyleSheet("QTextBrowser { background: " + background + "; color: " + foreground
-                          + "; border: none; padding: 0; selection-background-color: "
+        self.setStyleSheet("QTextBrowser { background: transparent; color: " + foreground
+                          + "; font-size: 14px; border: none; padding: 0; selection-background-color: "
                           + color(theme_name, "accent") + "; selection-color: "
                           + color(theme_name, "on_accent") + "; }")
         palette = self.palette()
         palette.setColor(QPalette.ColorRole.Link, QColor(link))
         palette.setColor(QPalette.ColorRole.Text, QColor(foreground))
-        palette.setColor(QPalette.ColorRole.Base, QColor(background))
+        palette.setColor(QPalette.ColorRole.Base, QColor(Qt.GlobalColor.transparent))
         self.setPalette(palette)
+        self.setAutoFillBackground(False)
+        self.viewport().setAutoFillBackground(False)
         document = self.document()
         document.setDocumentMargin(0)
         document.setDefaultStyleSheet("a { color: " + link + "; } pre, code { font-family: Consolas, monospace; }")
         document.setMarkdown(text, QTextDocument.MarkdownFeature.MarkdownDialectGitHub
                              | QTextDocument.MarkdownFeature.MarkdownNoHTML)
+        # Only fenced code and inline code receive a separate surface.
+        block = document.begin()
+        while block.isValid():
+            if block.blockFormat().hasProperty(QTextCharFormat.Property.BlockCodeFence):
+                cursor = QTextCursor(block)
+                block_format = block.blockFormat()
+                block_format.setBackground(QColor(background))
+                cursor.setBlockFormat(block_format)
+            fragment_iterator = block.begin()
+            while not fragment_iterator.atEnd():
+                fragment = fragment_iterator.fragment()
+                if fragment.isValid() and fragment.charFormat().fontFixedPitch():
+                    cursor = QTextCursor(document)
+                    cursor.setPosition(fragment.position())
+                    cursor.setPosition(fragment.position() + fragment.length(), QTextCursor.MoveMode.KeepAnchor)
+                    code_format = QTextCharFormat()
+                    code_format.setBackground(QColor(background))
+                    cursor.mergeCharFormat(code_format)
+                fragment_iterator += 1
+            block = block.next()
         # The Markdown importer assigns its own link colour; keep links readable
         # on the dark chat surface without changing their other formatting.
         links = []

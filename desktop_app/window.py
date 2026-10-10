@@ -10,9 +10,9 @@ from datetime import datetime
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QSize, Qt, QTimer, QUrl, Slot
 from PySide6.QtGui import (QGuiApplication, QIcon, QKeySequence, QPixmap, QPainter,
                            QColor, QDesktopServices, QFont, QPalette, QShortcut)
-from PySide6.QtWidgets import (QApplication, QCheckBox, QFileDialog,
+from PySide6.QtWidgets import (QApplication, QFileDialog,
     QFormLayout, QFrame, QGraphicsOpacityEffect, QGridLayout, QHBoxLayout,
-    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
+    QLabel, QLineEdit, QListWidget, QMainWindow, QMessageBox,
     QPlainTextEdit, QProgressBar, QScrollArea, QSizePolicy, QStackedWidget,
     QVBoxLayout,
     QWidget)
@@ -34,7 +34,7 @@ from .resources import ResourceSampler
 from .theme import (DARK, LIGHT, PROVIDER_NAMES, THEME_CHOICES, color,
                    provider_entry, provider_names, resolve_theme, stylesheet,
                    system_theme)
-from .widgets import (Composer, ErrorLine, HoverRow, OrbitArt, Select, WorkspaceButton,
+from .widgets import (Composer, ErrorLine, HoverRow, OrbitArt, Select, TickCheckBox, WorkspaceButton,
                      action, app_mark, label)
 
 
@@ -171,6 +171,7 @@ class MainWindow(QMainWindow):
         self.live_requests = set()
         self.workspace_buttons = {}
         self.callbacks = {}
+        self.sidebar_expanded = False
         self.busy = False
         # Every message a card shows, keyed by the card that owns it. Held
         # here rather than in the card's widgets because cards are rebuilt on
@@ -232,6 +233,7 @@ class MainWindow(QMainWindow):
         root = QWidget()
         self.setCentralWidget(root)
         shell = QHBoxLayout(root)
+        self.shell_layout = shell
         shell.setContentsMargins(0, 0, 0, 0)
         shell.setSpacing(0)
         rail, rail_layout = frame("rail")
@@ -284,7 +286,13 @@ class MainWindow(QMainWindow):
         side.setSpacing(8)
         outer.addWidget(body, 1)
         self.workspace_label = label("My workspace", "heading", True)
-        side.addWidget(self.workspace_label)
+        workspace_heading = QHBoxLayout()
+        workspace_heading.addWidget(self.workspace_label, 1)
+        self.sidebar_close = action("×", self.toggle_sidebar, name="ghost")
+        self.sidebar_close.setFixedSize(26, 26)
+        self.sidebar_close.setToolTip("Close the sidebar")
+        workspace_heading.addWidget(self.sidebar_close)
+        side.addLayout(workspace_heading)
         self.workspace_settings_button = action("Workspace settings", self.manage_workspace, name="ghost")
         self.workspace_settings_button.setEnabled(False)
         self.workspace_settings_button.setToolTip(
@@ -301,33 +309,7 @@ class MainWindow(QMainWindow):
             button.setToolTip(PAGE_HELP[key])
             self.nav_buttons.append(button)
             side.addWidget(button)
-        side.addSpacing(16)
-        chats = QHBoxLayout()
-        chats.setContentsMargins(15, 0, 15, 0)
-        self.chats_heading = label("CHATS AND AGENTS", "eyebrow")
-        chats.addWidget(self.chats_heading)
-        chats.addStretch()
-        # The list below is blank until something is connected, which read as
-        # a hole in the sidebar rather than as an absence of anything.
-        self.chats_hint = label("Nothing yet", "muted", True)
-        self.chats_hint.setStyleSheet("font-size:11px")
-        # The sidebar is 238px wide; letting this wrap put it on a line of its
-        # own under the heading, which read as a mistake rather than a note.
-        self.chats_hint.setWordWrap(False)
-        chats.addWidget(self.chats_hint)
-        side.addLayout(chats)
-        self.sidebar_agents = QListWidget()
-        self.sidebar_agents.setMaximumHeight(245)
-        # A long agent name used to grow a horizontal scrollbar under the
-        # list, which reads as a control that has more to say sideways.
-        # The names wrap instead, and there is nothing to scroll to.
-        self.sidebar_agents.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.sidebar_agents.setWordWrap(True)
-        self.sidebar_agents.setToolTip("Every conversation and agent you can open")
-        self.sidebar_agents.itemClicked.connect(lambda item: self.select_agent(item.data(Qt.ItemDataRole.UserRole)))
-        side.addWidget(self.sidebar_agents)
-        side.addStretch()
+        side.addStretch(1)
         self.connection_status = label("●  Starting your network…", "online", True)
         self.connection_status.setToolTip(
             "Whether this device is talking to its own relay. Unlocked keys are needed to send.")
@@ -361,6 +343,9 @@ class MainWindow(QMainWindow):
         top.setFixedHeight(68)
         top_layout.setContentsMargins(28, 0, 25, 0)
         self.page_title = label("#  overview", "heading")
+        self.sidebar_toggle = action("Menu", self.toggle_sidebar, name="ghost")
+        self.sidebar_toggle.setToolTip("Show workspace navigation")
+        top_layout.addWidget(self.sidebar_toggle)
         top_layout.addWidget(self.page_title)
         top_layout.addStretch()
         self.invite_button = action("Invite a device", self.invite_device)
@@ -440,17 +425,23 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+R"), self).activated.connect(self.refresh_resources)
 
     def apply_sidebar_density(self):
-        """Hide the agent sidebar on a window too narrow to carry it.
-
-        The chat page carries its own agent list as well as the one in the
-        sidebar, and with nothing connected both were empty 200px columns
-        either side of the conversation. Each is hidden when it has nothing
-        in it, so the room is left until there is something to pick.
-        """
+        """Keep workspace navigation reachable in a narrow window."""
         collapse = sidebar_should_collapse(self.width(), self.primary_screen_size())
-        self.sidebar.setVisible(not collapse)
-        if getattr(self, "chat_agents", None) is not None:
-            self.chat_agents.setVisible(not collapse and self.chat_agents.count() > 0)
+        if collapse:
+            self.shell_layout.removeWidget(self.sidebar)
+            self.sidebar.setGeometry(72, 0, 238, self.centralWidget().height())
+            if self.sidebar_expanded:
+                self.sidebar.raise_()
+        elif self.shell_layout.indexOf(self.sidebar) < 0:
+            self.shell_layout.insertWidget(1, self.sidebar)
+        self.sidebar.setVisible(not collapse or self.sidebar_expanded)
+        self.sidebar_close.setVisible(collapse)
+        if hasattr(self, "sidebar_toggle"):
+            self.sidebar_toggle.setVisible(collapse)
+
+    def toggle_sidebar(self):
+        self.sidebar_expanded = not self.sidebar_expanded
+        self.apply_sidebar_density()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -630,6 +621,9 @@ class MainWindow(QMainWindow):
         self.model_id.setEditable(True)
         self.model_id.lineEdit().setPlaceholderText("Model ID, e.g. llama3.2")
         self.model_models_button = action("Find models", self.find_models)
+        self.model_models_button.setToolTip("Refresh the available models from this provider")
+        self.model_id.setToolTip("Choose an available model, or enter a model ID")
+        self.model_id.setMaxVisibleItems(20)
         model_row = QHBoxLayout()
         model_row.addWidget(self.model_id, 1)
         model_row.addWidget(self.model_models_button)
@@ -640,6 +634,8 @@ class MainWindow(QMainWindow):
         self.model_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.model_key.setPlaceholderText("API key · leave blank to keep a saved key")
         form.addRow("API key", self.model_key)
+        self.model_catalog_status = label("", "muted", True)
+        form.addRow("", self.model_catalog_status)
         self.model_system = QPlainTextEdit()
         self.model_system.setMaximumHeight(90)
         self.model_system.setPlaceholderText("Optional instructions for this agent")
@@ -648,16 +644,16 @@ class MainWindow(QMainWindow):
 
         self.model_purpose = ModelPurpose()
         column.addWidget(self.model_purpose)
-        self.model_autostart = QCheckBox("Start this agent automatically when the app opens")
+        self.model_autostart = TickCheckBox("Start this agent automatically when the app opens")
         self.model_autostart.setChecked(True)
         self.model_autostart.setSizePolicy(
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         column.addWidget(self.model_autostart, 0, Qt.AlignmentFlag.AlignLeft)
-        self.model_insecure = QCheckBox("Allow a provider's HTTP endpoint on a trusted LAN")
+        self.model_insecure = TickCheckBox("Allow a provider's HTTP endpoint on a trusted LAN")
         self.model_insecure.setSizePolicy(
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         column.addWidget(self.model_insecure, 0, Qt.AlignmentFlag.AlignLeft)
-        self.model_vision = QCheckBox("Enable image support for this model")
+        self.model_vision = TickCheckBox("Enable image support for this model")
         self.model_vision.setSizePolicy(
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         column.addWidget(self.model_vision, 0, Qt.AlignmentFlag.AlignLeft)
@@ -666,7 +662,7 @@ class MainWindow(QMainWindow):
             "PDFs. Text PDFs work with any model.", "muted", True))
 
         column.addWidget(label("Internet access", "heading"))
-        self.model_internet = QCheckBox("Allow this model to search the web")
+        self.model_internet = TickCheckBox("Allow this model to search the web")
         self.model_internet.setSizePolicy(
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         column.addWidget(self.model_internet, 0, Qt.AlignmentFlag.AlignLeft)
@@ -693,7 +689,7 @@ class MainWindow(QMainWindow):
         self.model_search_form.addRow("Search API key", self.model_search_key)
         self.model_search_form.addRow("SearXNG server", self.model_search_url)
         search_layout.addLayout(self.model_search_form)
-        self.model_search_insecure = QCheckBox("Allow SearXNG over HTTP on a trusted LAN")
+        self.model_search_insecure = TickCheckBox("Allow SearXNG over HTTP on a trusted LAN")
         self.model_search_insecure.setSizePolicy(
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         search_layout.addWidget(self.model_search_insecure, 0, Qt.AlignmentFlag.AlignLeft)
@@ -725,7 +721,21 @@ class MainWindow(QMainWindow):
         # None means connecting a new model rather than editing one, which
         # decides whether the provider change may rename the field.
         self.model_profile_id = None
+        self.model_discovery_generation = 0
+        self.model_discovery_timer = QTimer(self)
+        self.model_discovery_timer.setSingleShot(True)
+        self.model_discovery_timer.setInterval(500)
+        self.model_discovery_timer.timeout.connect(lambda: self.find_models(automatic=True))
         self.model_provider.currentIndexChanged.connect(self.change_model_provider)
+        for signal in (self.model_base.textChanged, self.model_key.textChanged, self.model_insecure.toggled):
+            signal.connect(self.schedule_model_discovery)
+        self.model_error_fields = [self.model_name, self.model_provider, self.model_id, self.model_base,
+                                  self.model_key, self.model_purpose.purpose, *self.model_purpose.tasks.values(),
+                                  self.model_search_url, self.model_search_key]
+        for field in self.model_error_fields:
+            signal = (field.textChanged if isinstance(field, (QLineEdit, QPlainTextEdit)) else
+                      field.currentTextChanged if isinstance(field, Select) else field.toggled)
+            signal.connect(lambda *args, widget=field: self.clear_field_error(widget))
         self.model_internet.toggled.connect(self.change_model_internet)
         self.model_search_provider.currentIndexChanged.connect(
             self.change_model_internet)
@@ -744,30 +754,34 @@ class MainWindow(QMainWindow):
         layout = QHBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        self.chat_agents = QListWidget()
-        self.chat_agents.setFixedWidth(200)
-        self.chat_agents.itemClicked.connect(lambda item: self.select_agent(item.data(Qt.ItemDataRole.UserRole)))
-        layout.addWidget(self.chat_agents)
         panel = QWidget()
         column = QVBoxLayout(panel)
-        column.setContentsMargins(22, 22, 22, 20)
+        column.setContentsMargins(18, 18, 18, 16)
         self.chat_title = label("Choose an agent", "heading")
-        column.addWidget(self.chat_title)
+        heading = QHBoxLayout()
+        heading.addWidget(self.chat_title, 1)
+        self.conversation_picker = Select()
+        self.conversation_picker.setMinimumWidth(0)
+        self.conversation_picker.setMaximumWidth(300)
+        self.conversation_picker.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.conversation_picker.setToolTip("Switch between saved and shared conversations")
+        self.conversation_picker.setAccessibleName("Conversation")
+        self.conversation_picker.activated.connect(self.choose_conversation)
+        heading.addWidget(self.conversation_picker)
+        column.addLayout(heading)
         self.chat_subtitle = label("Start a conversation with a connected device.", "muted")
         column.addWidget(self.chat_subtitle)
-        coordinator_row = QHBoxLayout()
-        coordinator_row.addWidget(label("Jev coordinator", "muted"))
+        self.coordinator_controls = QWidget()
+        coordinator_row = QHBoxLayout(self.coordinator_controls)
+        coordinator_row.setContentsMargins(0, 0, 0, 0)
+        coordinator_row.addWidget(label("Default model", "muted"))
         self.coordinator_picker = Select()
-        self.coordinator_picker.setToolTip("Choose the model that reads general-chat requests and assigns work using model purposes")
+        self.coordinator_picker.setToolTip("The first imported model is used automatically. Choose another default here.")
         coordinator_row.addWidget(self.coordinator_picker, 1)
-        self.coordinator_save = action("Use coordinator", self.save_coordinator)
-        self.coordinator_save.setToolTip("Approve this model to receive General chat history and attachments across this workspace.")
-        self.coordinator_save.setToolTip("Save the selected coordinator for this workspace")
+        self.coordinator_save = action("Use model", self.save_coordinator)
+        self.coordinator_save.setToolTip("Save this workspace's default model for chat and routing")
         coordinator_row.addWidget(self.coordinator_save)
-        self.general_chat_button = action("General chat", lambda: self.select_agent(GENERAL_TARGET))
-        self.general_chat_button.setToolTip("Ask Jev to delegate a request to models using their purposes and permitted tasks")
-        coordinator_row.addWidget(self.general_chat_button)
-        column.addLayout(coordinator_row)
+        column.addWidget(self.coordinator_controls)
         self.share_conversation_button = action("Invite to conversation", self.invite_conversation)
         self.share_conversation_button.setToolTip(
             "Invite another device into this conversation")
@@ -781,6 +795,14 @@ class MainWindow(QMainWindow):
         column.addLayout(chat_actions)
         self.messages_scroll = QScrollArea()
         self.messages_scroll.setWidgetResizable(True)
+        self._messages_follow_end = True
+        self._rendering_messages = False
+        self._restoring_message_scroll = False
+        self.message_scroll_timer = QTimer(self)
+        self.message_scroll_timer.setSingleShot(True)
+        self.message_scroll_timer.timeout.connect(self.scroll_to_latest_message)
+        self.messages_scroll.verticalScrollBar().rangeChanged.connect(self.queue_message_scroll)
+        self.messages_scroll.verticalScrollBar().valueChanged.connect(self.remember_message_scroll)
         self.messages_widget = QWidget()
         self.messages = QVBoxLayout(self.messages_widget)
         self.messages.setContentsMargins(0, 16, 5, 16)
@@ -940,7 +962,7 @@ class MainWindow(QMainWindow):
         motion, column = frame("settings")
         column.setContentsMargins(22, 18, 22, 20)
         column.addWidget(label("Motion", "heading"))
-        self.launch_screen_toggle = QCheckBox("Show the launch screen")
+        self.launch_screen_toggle = TickCheckBox("Show the launch screen")
         self.launch_screen_toggle.setChecked(
             self.storage.settings.get("launch_screen", True) is not False)
         self.launch_screen_toggle.toggled.connect(self.launch_screen_changed)
@@ -949,7 +971,7 @@ class MainWindow(QMainWindow):
             "A brief branded screen while the network starts. Reduce "
             "animations below overrides it either way.", "muted", True))
         column.addSpacing(10)
-        self.reduce_motion = QCheckBox("Reduce animations")
+        self.reduce_motion = TickCheckBox("Reduce animations")
         self.reduce_motion.setChecked(self.storage.settings.get("reduce_motion", False))
         self.reduce_motion.toggled.connect(self.motion_changed)
         column.addWidget(self.reduce_motion, 0, Qt.AlignmentFlag.AlignLeft)
@@ -1261,8 +1283,8 @@ class MainWindow(QMainWindow):
             if target == GENERAL_TARGET:
                 agents = [agent for agent in agents if agent.get("orchestration_authorized", True)]
                 routing = (room or self.chats.get(self.selected, {})).get("routing", {})
-                coordinator = general_chat_state(agents, self.workspace_meta.get("coordinator"))["coordinator"]
-                identities = {coordinator["id"] if coordinator else None,
+                coordinator = general_chat_state(agents, self.workspace_meta.get("coordinator"))["conversation_model"]
+                identities = {routing.get("coordinator") or (coordinator["id"] if coordinator else None),
                               *(task["agent_id"] for task in routing.get("assignments", []))}
                 if not routing:
                     identities.update(agent["id"] for agent in agents if agent.get("delegation_enabled"))
@@ -1312,6 +1334,8 @@ class MainWindow(QMainWindow):
 
     def navigate(self, index):
         """Select a page, update navigation, and sample resources only while visible."""
+        self.sidebar_expanded = False
+        self.apply_sidebar_density()
         self.stack.setCurrentIndex(index)
         for number, button in enumerate(self.nav_buttons):
             button.setChecked(number == index)
@@ -1376,47 +1400,6 @@ class MainWindow(QMainWindow):
                     column.addLayout(row)
                 grid.addWidget(card, index // 3 if grid is self.overview_cards else index // 2,
                                index % 3 if grid is self.overview_cards else index % 2)
-        for listing in (self.sidebar_agents, self.chat_agents):
-            listing.clear()
-            if models or self.selected == GENERAL_TARGET:
-                item = QListWidgetItem("General chat")
-                item.setData(Qt.ItemDataRole.UserRole, GENERAL_TARGET)
-                item.setToolTip("Jev chooses models using their purposes and permitted tasks")
-                listing.addItem(item)
-                if self.selected == GENERAL_TARGET:
-                    listing.setCurrentItem(item)
-            for room in self.conversations.values():
-                unread = self.chats.get(room["id"], {}).get("unread", 0)
-                item = QListWidgetItem("▤  " + room["title"] + (f"  ({unread} new)" if unread else ""))
-                item.setData(Qt.ItemDataRole.UserRole, room["id"])
-                item.setToolTip("Shared conversation · " + ", ".join(room["members"]))
-                listing.addItem(item)
-                if room["id"] == self.selected:
-                    listing.setCurrentItem(item)
-            for agent in self.agents:
-                unread = self.chats.get(agent["id"], {}).get("unread", 0)
-                item = QListWidgetItem(("●  " if agent["online"] else "○  ") + agent["id"] + (f"  ({unread} new)" if unread else ""))
-                item.setData(Qt.ItemDataRole.UserRole, agent["id"])
-                item.setToolTip(agent.get("model") or "Connectivity agent")
-                listing.addItem(item)
-                if agent["id"] == self.selected:
-                    listing.setCurrentItem(item)
-            current_ids = {agent["id"] for agent in self.agents} | set(self.conversations) | {GENERAL_TARGET}
-            for target, chat in self.chats.items():
-                if target in current_ids or not chat.get("messages"):
-                    continue
-                item = QListWidgetItem("○  " + target + "  (saved)")
-                item.setData(Qt.ItemDataRole.UserRole, target)
-                item.setToolTip("Saved conversation")
-                listing.addItem(item)
-                if target == self.selected:
-                    listing.setCurrentItem(item)
-        # The list is blank until something is connected, which read as a
-        # hole in the sidebar rather than as an absence of anything. It was
-        # also never blank in practice, because this device is always one of
-        # its own entries, so the hint keyed off the count of rows never
-        # appeared. It now agrees with the welcome panel instead.
-        self.chats_hint.setVisible(not self.model_agents() and not self.conversations)
         self.stat_values[0].setText(str(len(models)))
         self.stat_values[1].setText(str(sum(agent["online"] for agent in models)))
         self.stat_values[2].setText(str(self.request_count))
@@ -1424,12 +1407,37 @@ class MainWindow(QMainWindow):
         self.update_chat_controls()
         self.render_imported_models()
 
+    def refresh_conversation_picker(self):
+        choices = [("Chat", GENERAL_TARGET)]
+        for room in self.conversations.values():
+            unread = self.chats.get(room["id"], {}).get("unread", 0)
+            choices.append((room["title"] + (f" ({unread} new)" if unread else ""), room["id"]))
+        included = {target for _, target in choices}
+        for target, chat in self.chats.items():
+            if target not in included and (chat.get("messages") or target == self.selected):
+                unread = chat.get("unread", 0)
+                choices.append((target + (f" ({unread} new)" if unread else ""), target))
+                included.add(target)
+        signature = (self.workspace_id, self.selected, tuple(choices))
+        if getattr(self, "_conversation_signature", None) != signature:
+            self._conversation_signature = signature
+            self.conversation_picker.clear()
+            for title, target in choices:
+                self.conversation_picker.addItem(title, target)
+            self.conversation_picker.setCurrentIndex(max(0, self.conversation_picker.findData(self.selected)))
+        self.conversation_picker.setVisible(len(choices) > 1)
+
+    def choose_conversation(self, index):
+        target = self.conversation_picker.itemData(index)
+        if target:
+            self.select_agent(target)
+
     @staticmethod
     def model_purpose_summary(agent):
         profile = agent.get("profile") or agent
-        tasks = ", ".join(TASK_TYPES[key] for key in profile.get("tasks", []) if key in TASK_TYPES)
-        return (profile.get("purpose") or "Set this model's purpose to use automatic delegation") + (
-            " · " + tasks if tasks else "") + (" · Jev enabled" if profile.get("delegation_enabled") else " · Direct chat only")
+        tasks = ", ".join(TASK_TYPES[key] for key in profile.get("tasks", []) if key in TASK_TYPES and key != "general")
+        return (profile.get("purpose") or "Ready to chat") + (" · " + tasks if tasks else "") + (
+            " · Specialist routing enabled" if profile.get("delegation_enabled") else "")
 
     def chat_target_agent(self):
         room = self.conversations.get(self.selected)
@@ -1438,6 +1446,8 @@ class MainWindow(QMainWindow):
             return next((item for item in self.agents if item["id"] == target), None)
         state = general_chat_state(self.model_agents(), self.workspace_meta.get("coordinator"))
         return {"id": GENERAL_TARGET, "kind": "model", "online": state["online"], "vision": state["vision"],
+                "conversation_model": state["conversation_model"]["id"] if state["conversation_model"] else None,
+                "coordinator_online": bool(state["coordinator"] and state["coordinator"].get("online")),
                 "delegating": state["delegating"], "coordinator": state["coordinator"]["id"] if state["coordinator"] else None}
 
     def refresh_coordinator_controls(self):
@@ -1448,22 +1458,23 @@ class MainWindow(QMainWindow):
         if getattr(self, "_coordinator_signature", None) != signature:
             self._coordinator_signature = signature
             self.coordinator_picker.clear()
-            self.coordinator_picker.addItem("Automatic · first connected model", None)
+            self.coordinator_picker.addItem("Automatic · first imported model", None)
             for agent in models:
                 self.coordinator_picker.addItem(agent["id"] + " · " + (agent.get("model") or "Configured model"), agent["id"])
             self.coordinator_picker.setCurrentIndex(max(0, self.coordinator_picker.findData(current)))
         self.coordinator_picker.setEnabled(self.ready and not self.remote)
         self.coordinator_save.setEnabled(self.ready and not self.remote)
-        self.general_chat_button.setEnabled(self.ready and bool(models))
 
     def save_coordinator(self):
         self.command("set_coordinator", self.coordinator_picker.currentData(),
-                     success=lambda result: self.notice("Jev coordinator saved for this workspace."))
+                     success=lambda result: self.notice("Default model saved for this workspace."))
 
     def update_chat_controls(self):
+        self.refresh_conversation_picker()
         self.refresh_coordinator_controls()
         room = self.conversations.get(self.selected)
         target = room["target"] if room else self.selected
+        self.coordinator_controls.setVisible(target == GENERAL_TARGET)
         agent = self.chat_target_agent()
         chat = self.chats.get(self.selected, {})
         pending = chat.get("pending") or chat.get("local_pending")
@@ -1473,19 +1484,21 @@ class MainWindow(QMainWindow):
         self.chat_agent_count.setText(f"{count} " + ("agent" if count == 1 else "agents"))
         self.chat_agent_count.setEnabled(bool(self.selected))
         self.send_button.setText("Working…" if pending else "Send request  ↑")
-        self.chat_title.setText(room["title"] if room else "General chat" if target == GENERAL_TARGET else self.selected or "Choose an agent")
+        self.chat_title.setText(room["title"] if room else "Chat" if target == GENERAL_TARGET else self.selected or "Choose an agent")
         subtitle = "Your agent is working…" if pending else "Online · Ready to collaborate" if agent and agent["online"] else "Start this agent on its device to continue" if agent else "Choose a connected agent to begin"
         if target == GENERAL_TARGET:
             if pending:
-                subtitle = "Jev is planning and delegating…" if agent["delegating"] else "Your model is working…"
+                subtitle = "Your model is working…"
             elif agent["online"]:
-                subtitle = "Jev assigns work using model purposes and permitted tasks" if agent["delegating"] else "Online · Ready to chat with " + agent["coordinator"]
+                subtitle = "Online · Ready to chat with " + agent["conversation_model"]
             else:
-                subtitle = "Start your coordinator and a model with delegation enabled" if agent["delegating"] else "Connect or start a model to use General chat"
+                subtitle = "Connect or start a model to chat"
         self.chat_subtitle.setText((f"Shared with {len(room['members'])} devices · " if room else "") + subtitle)
         self.share_conversation_button.setEnabled(bool(self.ready and not self.remote and agent and agent["online"] and not pending))
 
     def select_agent(self, agent_id):
+        self.sidebar_expanded = False
+        self.apply_sidebar_density()
         self.selected = agent_id
         self.chats.setdefault(agent_id, {"messages": [], "history": [], "pending": False})
         self.chats[agent_id]["unread"] = 0
@@ -1524,8 +1537,8 @@ class MainWindow(QMainWindow):
         self.chats = state.get("chats", {})
         self.conversations = state.get("conversations", {})
         for room in self.conversations.values():
-            if room["target"] == GENERAL_TARGET and room["title"] == "General chat · Jev":
-                room["title"] = "General chat"
+            if room["target"] == GENERAL_TARGET and room["title"] in ("General chat · Jev", "General chat"):
+                room["title"] = "Chat"
         self.workspace_meta = state.get("workspace_info", {})
         self.selected = state.get("selected")
         self.composer.setPlainText(state.get("draft", ""))
@@ -1585,7 +1598,25 @@ class MainWindow(QMainWindow):
         QApplication.clipboard().setText(text)
         self.notice("Message copied.")
 
+    def queue_message_scroll(self, *args):
+        if self._messages_follow_end:
+            self.message_scroll_timer.start(0)
+
+    def remember_message_scroll(self, value):
+        if self._rendering_messages or self._restoring_message_scroll or self.message_scroll_timer.isActive():
+            return
+        self._messages_follow_end = self.messages_scroll.verticalScrollBar().maximum() - value <= 2
+
+    def scroll_to_latest_message(self):
+        if self._messages_follow_end:
+            self._restoring_message_scroll = True
+            bar = self.messages_scroll.verticalScrollBar()
+            bar.setValue(bar.maximum())
+            self._restoring_message_scroll = False
+
     def render_messages(self):
+        self._rendering_messages = True
+        self._messages_follow_end = True
         clear_layout(self.messages)
         chat = self.chats.get(self.selected, {})
         if not chat.get("messages"):
@@ -1609,20 +1640,33 @@ class MainWindow(QMainWindow):
         if routing:
             assignments = ", ".join(task["agent_id"] + " (" + TASK_TYPES.get(task["task_type"], task["task_type"]) + ")"
                                     for task in routing.get("assignments", []))
-            detail = routing["reason"] if routing.get("mode") == "direct" else "Jev · " + (assignments or "Clarification") + (
+            detail = routing["reason"] if routing.get("mode") in ("direct", "conversation", "fallback") else "Models · " + (assignments or "Model reply") + (
                 " · " + routing["reason"] if routing.get("reason") else "")
             self.messages.addWidget(label(detail, "muted", True))
         previous = None
-        for role, text in chat.get("messages", []):
+        for index, (role, text) in enumerate(chat.get("messages", [])):
             speaker = role.removeprefix("member:") if role.startswith("member:") else names.get(role, room["target"] if room else self.selected)
-            if speaker == GENERAL_TARGET:
-                speaker = routing["coordinator"] if routing.get("mode") == "direct" else "Jev"
+            responder = chat.get("responders", {}).get(str(index), {}) if role == "assistant" else {}
+            if role == "assistant" and room and not responder:
+                message = room["messages"][index]
+                responder = message.get("responder", {})
+                speaker = message["from"]
+            if responder:
+                speaker = responder["agent_id"]
+            elif speaker == GENERAL_TARGET:
+                # Older replies have no per-message attribution. Do not assign
+                # the newest routing decision to all of the saved history.
+                speaker = "Model response"
+            agent = next((entry for entry in self.agents if entry["id"] == speaker), {})
+            speaker_name = (responder.get("model") or agent.get("model") or speaker) if role == "assistant" else speaker
             # Discord groups consecutive messages from one speaker under a
             # single header rather than boxing each one. A row per message
             # with a card around it reads as a stack of documents, which is
             # what this used to look like.
-            grouped = speaker == previous
+            speaker_key = (speaker, speaker_name)
+            grouped = speaker_key == previous
             row = HoverRow()
+            row.setProperty("invalid", role == "error")
             if grouped:
                 # Keep the text aligned under the first message's text
                 # rather than sliding it left under the absent avatar.
@@ -1636,7 +1680,7 @@ class MainWindow(QMainWindow):
             column.setSpacing(4)
             row.add_content(column, 1)
             if not grouped:
-                title = label(speaker)
+                title = label(speaker_name)
                 title.setStyleSheet("font-weight:650; color:"
                                     + color(self.theme, "error" if role == "error" else "agent_title") + ";")
                 column.addWidget(title)
@@ -1650,12 +1694,20 @@ class MainWindow(QMainWindow):
             copy.setToolTip("Copy this message")
             row.add_action(copy)
             self.messages.addWidget(row)
-            previous = speaker
+            previous = speaker_key
         if chat.get("pending") or chat.get("local_pending"):
             self.messages.addWidget(label("● ● ●   Waiting for your agent…", "muted"))
+        if chat.get("send_error") and (not chat.get("messages") or chat["messages"][-1][0] != "error"):
+            error_row = HoverRow()
+            error_row.setProperty("invalid", True)
+            error_row.add_content(label(chat["send_error"], "errorMessage", True), 1)
+            self.messages.addWidget(error_row)
         self.update_chat_controls()
         self.persist_history()
-        QTimer.singleShot(0, lambda: self.messages_scroll.verticalScrollBar().setValue(self.messages_scroll.verticalScrollBar().maximum()))
+        self._rendering_messages = False
+        # Markdown rows settle their heights after the initial render. Follow
+        # subsequent range changes instead of scrolling before layout finishes.
+        self.queue_message_scroll()
 
     def render_attachments(self):
         clear_layout(self.attachment_rows)
@@ -1727,7 +1779,7 @@ class MainWindow(QMainWindow):
             finished()
         def failed(message):
             finished()
-            self.notice(message)
+            self.record_chat_error(workspace_id, store, target, message)
         self.command("prepare_attachments", paths, agent.get("vision", False), success=success, failure=failed)
 
     def send_message(self):
@@ -1740,16 +1792,20 @@ class MainWindow(QMainWindow):
         if not text:
             text = "Please analyze the attached files."
         if len(json.dumps(text).encode()) > 180000:
-            self.notice("This message is too large. Send a shorter request.")
+            self.record_chat_error(self.workspace_id, self.history_store, self.selected,
+                                   "This message is too large. Send a shorter request.")
             return
         target = self.selected
         chat = self.chats[target]
+        chat.pop("send_error", None)
+        target_profile = dict(next((agent for agent in self.agents if agent["id"] == target), {}))
         content = [{"type": "text", "text": text}, *(part for item in attached for part in item["content"])] if attached else text
         try:
             content = validate_content(content)
         except ValueError as exc:
-            self.notice(str(exc))
+            self.record_chat_error(self.workspace_id, self.history_store, target, str(exc))
             return
+        self.composer.setFocus()
         display_text = content_summary(content)
         workspace_id, store = self.workspace_id, self.history_store
         self.live_requests.add((workspace_id, target))
@@ -1775,7 +1831,10 @@ class MainWindow(QMainWindow):
                         store.save("ui", "state", state)
             def failed(message):
                 finished(None)
-                self.notice(message)
+                chat["send_error"] = message
+                self.persist_reply(workspace_id, store, target, chat)
+                self.notice(message, error=True)
+                self.show_chat_error(workspace_id, target)
             self.command("send_conversation", target, content, success=finished, failure=failed)
             return
         payload = {"messages": model_context([*chat["history"], {"role": "user", "content": content}])} if chat["history"] or attached else {"text": text}
@@ -1793,20 +1852,50 @@ class MainWindow(QMainWindow):
             if not isinstance(response, str):
                 response = json.dumps(result, indent=2)
             chat["messages"].append(("assistant", response))
+            metadata = result if isinstance(result, dict) else {}
+            responder = metadata.get("responder") or {"agent_id": target,
+                "model": metadata.get("model") or target_profile.get("model") or target,
+                "provider": metadata.get("provider") or target_profile.get("provider") or "model"}
+            chat.setdefault("responders", {})[str(len(chat["messages"]) - 1)] = responder
             if isinstance(result, dict) and result.get("routing"):
                 chat["routing"] = result["routing"]
             if isinstance(result, dict) and result.get("provider"):
                 chat["history"] = [*chat["history"], {"role": "user", "content": content}, {"role": "assistant", "content": response}]
             chat["pending"] = False
             if workspace_id == self.workspace_id:
-                self.add_activity(f"{target} replied", "Request completed")
+                self.add_activity(f"{responder['model']} replied", "Request completed")
             self.persist_reply(workspace_id, store, target, chat)
         def failure(message):
             self.live_requests.discard((workspace_id, target))
             chat["pending"] = False
             chat["messages"].append(("error", message + "\nThe app did not replay this request."))
             self.persist_reply(workspace_id, store, target, chat)
+            self.show_chat_error(workspace_id, target)
         self.command("send", target, payload, success=success, failure=failure)
+
+    def show_chat_error(self, workspace_id, target):
+        """Open the conversation that failed, including after a workspace switch."""
+        def reveal(result=None):
+            if self.workspace_id == workspace_id:
+                self.select_agent(target)
+                self.composer.setFocus()
+        if workspace_id == self.workspace_id:
+            reveal()
+        elif any(entry["id"] == workspace_id for entry in self.workspace_list):
+            self.command("switch_workspace", workspace_id, success=reveal)
+
+    def record_chat_error(self, workspace_id, store, target, message):
+        """Keep input and attachment failures beside their conversation."""
+        if workspace_id == self.workspace_id:
+            chat = self.chats.get(target)
+        elif store:
+            chat = store.load("ui").get("state", {}).get("chats", {}).get(target)
+        else:
+            chat = None
+        if chat is not None:
+            chat["send_error"] = message
+            self.persist_reply(workspace_id, store, target, chat)
+            self.show_chat_error(workspace_id, target)
 
     def add_activity(self, title, detail):
         stamp = datetime.now().strftime("%H:%M")
@@ -1977,6 +2066,8 @@ class MainWindow(QMainWindow):
                 chat["messages"] = [("user" if message["role"] == "user" and message["from"] == self.identity
                     else "member:" + message["from"] if message["role"] == "user" else message["role"], content_summary(message["content"]))
                     for message in room["messages"]]
+                chat["responders"] = {str(index): message["responder"] for index, message in enumerate(room["messages"])
+                                      if message["role"] == "assistant" and message.get("responder")}
                 chat["pending"] = room["pending"]
                 if room.get("routing"):
                     chat["routing"] = room["routing"]
@@ -2036,10 +2127,13 @@ class MainWindow(QMainWindow):
             self.model_name.setReadOnly(True)
         self.model_base.setText(spec.base_url or "")
         self.model_base.setPlaceholderText("https://your-deployment.example.com/v1")
-        self.model_models_button.setVisible(key not in ("anthropic", "gemini"))
+        self.model_models_button.setVisible(True)
         self.model_key.setPlaceholderText(
             "Optional for local Ollama" if not spec.key_required
             else "API key · leave blank to keep a saved key")
+        self.model_id.clear()
+        self.model_id.clearEditText()
+        self.schedule_model_discovery()
 
     def change_model_internet(self):
         """Show the chosen search provider's fields and allow a test."""
@@ -2107,29 +2201,69 @@ class MainWindow(QMainWindow):
         hosted = self.model_search_provider.currentData() == "ollama"
         (self.model_search_key if hosted else self.model_search_url).setFocus()
 
-    def find_models(self):
-        """List the provider's models without blocking the page."""
+    def model_discovery_state(self):
+        return (self.workspace_id, self.model_provider.currentData(), self.model_base.text().strip(),
+                self.model_key.text(), self.model_insecure.isChecked(), self.model_profile_id)
+
+    def schedule_model_discovery(self, *args):
+        """Refresh the dropdown after provider connection settings settle."""
+        self.model_discovery_generation += 1
+        self.model_discovery_timer.stop()
+        self.model_models_button.setEnabled(True)
+        selected = self.model_id.currentText()
+        self.model_id.clear()
+        self.model_id.setCurrentText(selected)
+        if not self.model_base.text().strip():
+            self.model_catalog_status.setText("Enter the API root to load available models.")
+        elif (PROVIDERS[self.model_provider.currentData()].key_required
+              and not self.model_key.text().strip() and not self.model_profile_id):
+            self.model_catalog_status.setText("Enter your API key to load available models.")
+        else:
+            self.model_catalog_status.setText("Available models will load from this provider.")
+            if self.ready:
+                self.model_discovery_timer.start()
+
+    def find_models(self, automatic=False):
+        """Load every available model; discard replies for superseded settings."""
+        if automatic and self.stack.currentIndex() != AGENTS_PAGE:
+            return
+        self.model_discovery_timer.stop()
+        self.model_discovery_generation += 1
+        generation, state = self.model_discovery_generation, self.model_discovery_state()
         self.model_models_button.setEnabled(False)
+        self.model_catalog_status.setText("Loading available models…")
+
+        def current():
+            return generation == self.model_discovery_generation and state == self.model_discovery_state()
 
         def success(models):
+            if not current():
+                return
             self.model_models_button.setEnabled(True)
             selected = self.model_id.currentText()
             self.model_id.clear()
+            models = sorted(set(models))
             self.model_id.addItems(models)
             if selected:
                 self.model_id.setCurrentText(selected)
+            self.model_catalog_status.setText(f"{len(models)} models available · Select a model from the dropdown.")
             if not models:
+                self.model_catalog_status.setText("No models available from this endpoint.")
                 self.set_card_message(
                     self.model_error_line,
                     "No models found. Pull a model in Ollama or enter your "
                     "provider's model ID directly.")
 
         def failure(message):
+            if not current():
+                return
             self.model_models_button.setEnabled(True)
+            self.model_catalog_status.setText("Model discovery failed. You can still enter a model ID directly.")
+            if automatic and self.stack.currentIndex() != AGENTS_PAGE:
+                return
             self.set_card_message(
                 self.model_error_line,
-                "Could not list models. Check the API root and key, or enter "
-                "the model ID directly.")
+                "Could not list models. " + message + " Check the API root and key, or enter the model ID directly.")
 
         self.command("provider_models", self.model_provider.currentData(),
                      self.model_base.text().strip(), self.model_key.text() or None,
@@ -2311,7 +2445,46 @@ class MainWindow(QMainWindow):
         self.model_search_insecure.setChecked(profile.get("searxng_allow_insecure", False))
         self.change_model_internet()
         self.navigate(AGENTS_PAGE)
+        self.schedule_model_discovery()
         self.model_id.setFocus()
+
+    def set_field_error(self, widget, invalid):
+        widget.setProperty("invalid", invalid)
+        widget.style().unpolish(widget)
+        widget.style().polish(widget)
+        widget.update()
+
+    def clear_field_error(self, widget):
+        if widget.property("invalid"):
+            self.set_field_error(widget, False)
+            if not any(field.property("invalid") for field in self.model_error_fields):
+                self.clear_card_message(self.model_error_line)
+
+    def highlight_model_error(self, message):
+        """Mark the relevant input and scroll it into view on the Agents page."""
+        lower = message.lower()
+        lower = lower.replace("check the api root and key, or enter the model id directly.", "")
+        if "search" in lower or "searxng" in lower:
+            field = self.model_search_key if self.model_search_provider.currentData() == "ollama" else self.model_search_url
+        elif "name" in lower or "identity" in lower:
+            field = self.model_name
+        elif "purpose" in lower or "permitted task" in lower:
+            field = self.model_purpose.purpose if not self.model_purpose.purpose.toPlainText().strip() else next(iter(self.model_purpose.tasks.values()))
+        elif "key" in lower or "401" in lower or "403" in lower or "authentication" in lower:
+            field = self.model_key
+        elif "no models" in lower or "model id" in lower or "model" in lower and "list models" not in lower:
+            field = self.model_id
+        elif any(word in lower for word in ("api root", "url", "endpoint", "connect", "http", "list models")):
+            field = self.model_base
+        else:
+            field = self.model_save_button
+        self.set_field_error(self.model_card, True)
+        self.set_field_error(field, True)
+        self.navigate(AGENTS_PAGE)
+        field.setFocus()
+        page = self.stack.widget(AGENTS_PAGE)
+        page.ensureWidgetVisible(field, 24, 36)
+        QTimer.singleShot(0, lambda: page.ensureWidgetVisible(field, 24, 36))
 
     def name_rule(self):
         """The one wording for the workspace-name limit, used in both places."""
@@ -2327,11 +2500,16 @@ class MainWindow(QMainWindow):
         self.card_messages[line.key] = (message, tone)
         line.set_tone(tone)
         line.show_message(message)
+        if line is getattr(self, "model_error_line", None) and tone == "error" and message:
+            self.highlight_model_error(message)
 
     def clear_card_message(self, line):
         """Remove one card's message. Only its own action may do this for it."""
         self.card_messages.pop(line.key, None)
         line.clear()
+        if line is getattr(self, "model_error_line", None) and hasattr(self, "model_card"):
+            for field in [self.model_card, self.model_save_button, *self.model_error_fields]:
+                self.set_field_error(field, False)
 
     def refresh_card_messages(self):
         """Re-apply every stored message to the lines now on screen.
@@ -2419,7 +2597,7 @@ class MainWindow(QMainWindow):
             self.workspace_invite_typed)
         self.workspace_invite_name.returnPressed.connect(self.create_invitation)
         column.addWidget(self.workspace_invite_name)
-        self.workspace_invite_lan = QCheckBox("Share this relay on my local network")
+        self.workspace_invite_lan = TickCheckBox("Share this relay on my local network")
         self.workspace_invite_lan.setChecked(True)
         self.workspace_invite_lan.setSizePolicy(
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
@@ -2536,7 +2714,7 @@ class MainWindow(QMainWindow):
         self.workspace_token.setPlaceholderText("Your device's relay token")
         self.workspace_token.setEchoMode(QLineEdit.EchoMode.Password)
         column.addWidget(self.workspace_token)
-        self.workspace_lan = QCheckBox("Trusted LAN, so ws:// is allowed")
+        self.workspace_lan = TickCheckBox("Trusted LAN, so ws:// is allowed")
         # A checkbox's minimum is the width of its whole label and it has no
         # word wrap to fall back on, so a long one sets the width of its
         # card and of the page, and the page gains a horizontal scrollbar.
@@ -2861,8 +3039,10 @@ class MainWindow(QMainWindow):
             InviteDialog(self, conversation_id=self.selected).exec()
         else:
             chat = self.chats.get(self.selected, {})
-            history = [{"role": role, "content": text} for role, text in chat.get("messages", [])
-                       if role in ("user", "assistant")]
+            history = [{"role": role, "content": text,
+                        **({"responder": chat["responders"][str(index)]}
+                           if role == "assistant" and str(index) in chat.get("responders", {}) else {})}
+                       for index, (role, text) in enumerate(chat.get("messages", [])) if role in ("user", "assistant")]
             InviteDialog(self, target=self.selected, messages=history).exec()
 
     def closeEvent(self, event):

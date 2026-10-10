@@ -1,10 +1,11 @@
 import math
 
-from PySide6.QtCore import (Property, QAbstractAnimation, QEasingCurve, QRectF,
+from PySide6.QtCore import (Property, QAbstractAnimation, QEasingCurve, QPointF, QRectF,
                             QPropertyAnimation, Qt, Signal)
-from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import (QComboBox, QHBoxLayout, QLabel, QPushButton,
-                             QPlainTextEdit, QSizePolicy, QVBoxLayout, QWidget)
+from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QHBoxLayout, QLabel, QPushButton,
+                             QPlainTextEdit, QSizePolicy, QStyle, QStyleOptionButton,
+                             QVBoxLayout, QWidget)
 
 from .theme import DARK, color
 
@@ -47,6 +48,41 @@ def action(text, callback=None, primary=False, name=None):
     if callback:
         widget.clicked.connect(callback)
     return widget
+
+
+class TickCheckBox(QCheckBox):
+    """Keep native checkbox interaction and draw a visible tick when selected."""
+
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self._tick_color = self.palette().highlightedText().color()
+
+    def get_tick_color(self):
+        return self._tick_color
+
+    def set_tick_color(self, ink):
+        self._tick_color = QColor(ink)
+        self.update()
+
+    tickColor = Property(QColor, get_tick_color, set_tick_color)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if not self.isChecked():
+            return
+        option = QStyleOptionButton()
+        self.initStyleOption(option)
+        rect = self.style().subElementRect(QStyle.SubElement.SE_CheckBoxIndicator, option, self)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setOpacity(1 if self.isEnabled() else .5)
+        painter.setPen(QPen(self._tick_color, 2.2, Qt.PenStyle.SolidLine,
+                            Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        path = QPainterPath(QPointF(rect.x() + rect.width() * .16, rect.y() + rect.height() * .52))
+        path.lineTo(rect.x() + rect.width() * .4, rect.y() + rect.height() * .76)
+        path.lineTo(rect.x() + rect.width() * .86, rect.y() + rect.height() * .24)
+        painter.drawPath(path)
+        painter.end()
 
 
 class ErrorLine(QWidget):

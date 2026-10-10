@@ -64,13 +64,27 @@ class ProviderConfig:
             validate_search_settings(self.search_provider, self.searxng_url, self.search_api_key, self.searxng_allow_insecure)
 
 
+def response_schema(payload):
+    """An output constraint never changes provider, model, or credentials."""
+    if not isinstance(payload, dict) or "response_schema" not in payload:
+        return None
+    schema = payload["response_schema"]
+    try:
+        if not isinstance(schema, dict) or schema.get("type") != "object" or len(json.dumps(schema).encode()) > 64000:
+            raise ValueError()
+    except (ValueError, TypeError, RecursionError):
+        raise ProviderError("invalid_input", "Provide an object response schema within 64,000 bytes") from None
+    return schema
+
+
 def parse_messages(payload):
     """Accept text or caller-supplied history, never remote provider settings."""
+    response_schema(payload)
     if isinstance(payload, str):
         messages = [{"role": "user", "content": payload}]
-    elif isinstance(payload, dict) and set(payload) == {"text"}:
+    elif isinstance(payload, dict) and set(payload) in ({"text"}, {"text", "response_schema"}):
         messages = [{"role": "user", "content": payload["text"]}]
-    elif isinstance(payload, dict) and set(payload) == {"messages"}:
+    elif isinstance(payload, dict) and set(payload) in ({"messages"}, {"messages", "response_schema"}):
         messages = payload["messages"]
     else:
         raise ProviderError("invalid_input", "Send text, {text: ...}, or {messages: [...]} only")
@@ -138,13 +152,20 @@ class HTTPAdapter:
 
     async def __call__(self, payload, sender):
         messages = parse_messages(payload)
+        schema = response_schema(payload)
         if not self.config.vision and any(images(message["content"]) for message in messages):
             raise ProviderError("invalid_input", "Choose a vision-capable model and enable image support in its settings")
         # Bound queueing plus HTTP time; this also protects against slow streams.
         try:
             async with asyncio.timeout(self.config.timeout):
                 async with self.slots:
-                    text, usage, finish_reason, sources = await self.generate_with_search(messages)
+                    if schema is not None:
+                        # Planning is a protocol operation. Search instructions
+                        # request a different JSON object and can corrupt plans.
+                        text, usage, finish_reason = await self.generate_structured(messages, schema)
+                        sources = []
+                    else:
+                        text, usage, finish_reason, sources = await self.generate_with_search(messages)
         except TimeoutError:
             raise ProviderError("timeout", f"{self.config.provider} request timed out") from None
         except (KeyError, IndexError, TypeError, AttributeError):
@@ -161,6 +182,9 @@ class HTTPAdapter:
         if len(json.dumps(result).encode()) > 240000:
             raise ProviderError("invalid_response", "Provider output is too large for the relay")
         return result
+
+    async def generate_structured(self, messages, schema):
+        return await self.generate(messages, "Return only JSON matching this schema:\n" + json.dumps(schema))
 
     async def generate_with_search(self, messages):
         """Generate an answer with optional bounded web evidence and return source links."""

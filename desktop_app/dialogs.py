@@ -1,7 +1,7 @@
 import json
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import QCheckBox, QDialog, QFormLayout, QHBoxLayout, QLineEdit, QPlainTextEdit, QScrollArea, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QDialog, QFormLayout, QHBoxLayout, QLineEdit, QPlainTextEdit, QScrollArea, QVBoxLayout, QWidget
 
 from network_a2a.adapters import PROVIDERS
 from network_a2a.orchestration import GENERAL_TARGET
@@ -9,7 +9,7 @@ from network_a2a.web_search import validate_search_settings, validate_search_url
 
 from .theme import PROVIDER_NAMES, color
 from .lan import lan_addresses
-from .widgets import Select, action, label
+from .widgets import Select, TickCheckBox, action, label
 from .model_purpose import ModelPurpose
 
 
@@ -78,9 +78,9 @@ class AgentDialog(QDialog):
         self.system = QPlainTextEdit()
         self.system.setMaximumHeight(90)
         self.system.setPlaceholderText("Optional instructions for this agent")
-        self.autostart = QCheckBox("Start this agent automatically when the app opens")
+        self.autostart = TickCheckBox("Start this agent automatically when the app opens")
         self.autostart.setChecked(True)
-        self.insecure = QCheckBox("Allow a provider's HTTP endpoint on a trusted LAN")
+        self.insecure = TickCheckBox("Allow a provider's HTTP endpoint on a trusted LAN")
         form.addRow("Agent name", self.name)
         form.addRow("Provider", self.provider)
         form.addRow("Model", model_row)
@@ -92,11 +92,11 @@ class AgentDialog(QDialog):
         body_layout.addWidget(self.purpose_settings)
         body_layout.addWidget(self.autostart, 0, Qt.AlignmentFlag.AlignLeft)
         body_layout.addWidget(self.insecure, 0, Qt.AlignmentFlag.AlignLeft)
-        self.vision = QCheckBox("Enable image support for this model")
+        self.vision = TickCheckBox("Enable image support for this model")
         body_layout.addWidget(self.vision, 0, Qt.AlignmentFlag.AlignLeft)
         body_layout.addWidget(label("Select a vision-capable model to understand images and scanned PDFs. Text PDFs work with any model.", "muted", True))
         body_layout.addWidget(label("Internet access", "heading"))
-        self.internet = QCheckBox("Allow this model to search the web")
+        self.internet = TickCheckBox("Allow this model to search the web")
         body_layout.addWidget(self.internet, 0, Qt.AlignmentFlag.AlignLeft)
         self.search_settings = QWidget()
         search_layout = QVBoxLayout(self.search_settings)
@@ -119,7 +119,7 @@ class AgentDialog(QDialog):
         search_form.addRow("Search API key", self.search_key)
         search_form.addRow("SearXNG server", self.search_url)
         search_layout.addLayout(search_form)
-        self.search_insecure = QCheckBox("Allow SearXNG over HTTP on a trusted LAN")
+        self.search_insecure = TickCheckBox("Allow SearXNG over HTTP on a trusted LAN")
         search_layout.addWidget(self.search_insecure, 0, Qt.AlignmentFlag.AlignLeft)
         self.search_help = label("", "muted", True)
         self.search_help.setTextFormat(Qt.TextFormat.RichText)
@@ -392,7 +392,7 @@ class JoinDialog(QDialog):
         layout.addWidget(self.url)
         layout.addWidget(label("Device token", "muted"))
         layout.addWidget(self.token)
-        self.insecure = QCheckBox("This is a trusted LAN connection (allow ws://)")
+        self.insecure = TickCheckBox("This is a trusted LAN connection (allow ws://)")
         layout.addWidget(self.insecure, 0, Qt.AlignmentFlag.AlignLeft)
         self.error = label("", "muted", True)
         self.error.setStyleSheet("color:#f38a8e")
@@ -466,7 +466,7 @@ class InviteDialog(QDialog):
             layout.addWidget(label("This invitation shares the conversation's messages and AI replies with the other device.", "muted", True))
         self.name = QLineEdit()
         self.name.setPlaceholderText("e.g. alex-laptop")
-        self.lan = QCheckBox("Share this relay on my local network")
+        self.lan = TickCheckBox("Share this relay on my local network")
         self.lan.setChecked(True)
         self.url = QLineEdit()
         self.network_address = Select()

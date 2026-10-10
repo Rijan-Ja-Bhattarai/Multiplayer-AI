@@ -78,71 +78,107 @@ the invitation is forgotten locally; the owner can revoke it on the host.
 
 ## Connect a model
 
-Open **Providers** or click **Connect a model**. Choose a provider, enter its
-model ID, configure the API root if needed, and enter its API key. Click
+Open **Providers** or click **Connect a model**. Choose a provider, configure
+the API root if needed, and enter its API key. Available models load into the
+**Model** dropdown automatically. Select a model or enter its ID directly. Click
 **Connect agent**; the app launches the adapter in its own networking thread.
 There is no generated terminal command or separate agent process to start.
 
 For Ollama, start the Ollama application and install your chosen model first.
-**Find models** lists installed Ollama models or models available at a compatible
-provider's API root. You can always enter the model ID directly.
+**Find models** refreshes installed Ollama models or available models from the
+selected provider, including Claude and Gemini. Paginated catalogs are collected
+in full; Gemini's list includes models that support chat generation. Discovery
+uses the [Claude Models API](https://platform.claude.com/docs/en/api/models/list)
+and [Gemini Models API](https://ai.google.dev/api/models) for those providers.
+You can always enter the model ID directly.
 For Bionic GPT or a custom compatible endpoint, enter your deployment's API root.
+
+Import errors outline the affected field and form in red, open **Agents**, and
+scroll to that field. Editing the field clears its error highlight.
 
 The **Providers** page lists imported models. Click **Edit model** to change the
 model, instructions, image support, or internet access. Models running on another
 device are edited on that device. Model names stay fixed so existing chats and
 invitations keep their identity.
 
-## General chat and Jev orchestration
+## Chat and model orchestration
 
-General chat works as soon as a model connects. It replies through the selected
+Chat works as soon as a model connects. It replies through the default
 model directly until you configure automatic delegation. You can send requests
 such as "Make a hello world program" without entering a purpose, selecting task
-types, or enabling delegation. An empty saved coordinator is repaired automatically.
+types, or enabling delegation. The first imported model is the automatic default,
+even when a later model starts first. An empty saved default is repaired automatically.
+Greetings such as "hello", "hey there", and "good morning" always go directly
+to one connected imported model, even when delegation is enabled. They require
+neither JSON planning nor a separate chat permission. If the default is offline,
+another available imported model handles both conversation and work requests.
+Greeting-prefixed requests such as
+"Hello, debug this function" still use the coordinator to plan specialist work.
 
 Each imported model has its own purpose and permitted tasks, regardless of its
 provider or model ID. In **Connect a model** or **Edit model**, describe what you
 want it used for, select tasks such as **Coding**, **Debugging**, **Reasoning /
-problem solving**, or **General chat**, and enable **Allow Jev to assign work to
-this model**. For example, permit coding and debugging on your chosen specialist
-and only general chat on a conversational model. Existing profiles remain outside
+problem solving**, **Research**, or **Writing**, and enable **Allow automatic delegation
+to this model**. For example, permit coding and debugging on your chosen specialist.
+A conversational model needs no task permissions.
+Selected options show a tick. Existing profiles remain outside
 automatic delegation until you configure them. Direct model chats remain available.
 
-Connecting a model opens **General chat** automatically. The first connected
-model becomes the default coordinator; additional models join the same chat
-without replacing its history or coordinator. Saved models also open General chat
+Connecting a model opens **Chat** automatically. The first imported
+model becomes the default; additional models join the same chat
+without replacing its history or default. Saved models also open Chat
 on startup when no conversation was previously selected.
 New connections get an unused agent name, such as `ollama-agent-2`, so importing
 another model from the same provider preserves the first model.
 
-In **Conversations**, you can change the model in **Jev coordinator** and click
-**Use coordinator**. The coordinator is a model you
-choose, not a built-in model or a provider-specific agent. The workspace owner
-sets it; invited members use the same coordinator. The choice is saved per workspace.
-For automatic delegation, choose a model that follows JSON planning instructions
-reliably. Basic General chat does not require JSON planning.
+In **Conversations**, you can change **Default model** and click **Use model**.
+The workspace owner sets this optional preference; invited members use the same
+default. The choice is saved per workspace. **Automatic · first imported model**
+restores the original default. Specialist routing works best with a model that
+follows JSON planning instructions reliably. Basic chat does not require planning.
 
 Automatic routing uses only models imported by the workspace owner or explicitly
 selected by the owner as coordinator. These actions approve the model to receive
-General chat context across the workspace, including retained text and attachments.
+chat context across the workspace, including retained text and attachments.
 An invited device's published purpose and delegation preferences do not grant
 this access. Other invited models remain available through explicitly targeted
 chats; joining the workspace or a conversation alone does not approve automatic routing.
 
 Write requests naturally: "Code a parser", "Debug this function", or "Solve this"
-followed by code. Jev reads the conversation and your model-purpose descriptions
+followed by code. The coordinator reads the conversation and your model-purpose descriptions
 to select a worker, or up to three ordered tasks for a compound request. Later
 workers receive earlier results; the coordinator combines multiple results into
 one answer. It can ask for clarification when no model fits. The relay checks
 online status, workspace access, and permitted task types before dispatching.
 Selection and task classification come from the coordinator, so their quality
-depends on the model you choose; there are no keyword or model-name routing rules.
+depends on the model you choose. Standalone greetings use the direct chat route;
+specialist work is planned from the full conversation, without model-name rules.
 
-Chat shows the chosen models and Jev's brief selection explanation. History, code,
-and attachments reach the assigned workers; image-bearing history requires a
+Greetings, thanks, and ordinary conversation can be answered by the coordinator
+without assigning a specialist. When no specialist is available, the default
+answers directly. Unreadable planning JSON gets one repair attempt. If that fails,
+or the planning request fails or times out, an available default model receives
+the original history and attachments without planning instructions. Image history
+requires a model with image support. Invalid assignments also fall back without
+dispatching the rejected tasks. Worker requests are not replayed after failures.
+
+Chat shows the chosen models and the coordinator's brief selection explanation.
+Each reply names the model that produced its text: the worker for a single
+assignment, or the coordinator when it combines several results or asks for
+clarification. This identity is saved with each reply and shared with invited
+devices. Regular answers have no filled background; code retains its highlighting.
+Individual model chats hide default-model controls to leave more room for messages.
+The sidebar contains workspace navigation. Open an individual model's chat from
+**Agents**, and switch saved or shared chats with the compact conversation picker
+on the chat page. The picker stays hidden when there is only one chat.
+In a narrow window, **Menu** opens navigation. A failed request opens its conversation
+and shows its error beside the messages; input and attachment errors remain
+beside the affected chat.
+
+History, code, and attachments reach the assigned workers; image-bearing history requires a
 worker with image support enabled during delegation, or a vision-capable selected
 model in basic chat. During delegation a text coordinator receives image names
-rather than image pixels. **Invite to conversation** also shares a general chat and its
+rather than image pixels. **Invite to conversation** also shares a chat and its
 assignments. Purpose descriptions are shared with the workspace; the coordinator
 receives those descriptions and conversation text. Provider keys, API roots, and
 private model instructions stay on each model's device.
@@ -356,7 +392,7 @@ An ordinary **Invite a device** invitation connects the workspace without sharin
 a chat. Shared chats are visible only to their invited devices.
 
 The dark theme uses black backgrounds and white text, with a workspace rail and
-agent sidebar. **Settings → Theme** also offers Light, Miku, and Follow system.
+navigation sidebar. **Settings → Theme** also offers Light, Miku, and Follow system.
 **Reduce animations** in Settings disables page fades. **Resources** shows local
 CPU, memory, and disk usage while that page is open.
 
