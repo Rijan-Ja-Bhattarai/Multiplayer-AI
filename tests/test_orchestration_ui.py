@@ -103,7 +103,10 @@ class OrchestrationUITests(unittest.TestCase):
                     return JSONResponse({"message": {"content": answer}, "done": True, "done_reason": "stop"})
 
                 window.network.runtime.app.router.routes.append(Route("/mock/api/chat", provider, methods=["POST"]))
+                ollama_available = True
                 async def model_catalog(request):
+                    if not ollama_available:
+                        return JSONResponse({"error": "Ollama unavailable"}, 503)
                     return JSONResponse({"models": [{"name": "first-model-id"}, {"name": "second-model-id"}]})
                 window.network.runtime.app.router.routes.append(Route("/mock/api/tags", model_catalog))
                 for model in ("first-model-id", "second-model-id"):
@@ -150,8 +153,19 @@ class OrchestrationUITests(unittest.TestCase):
                 self.assertEqual(seen[-1]["messages"][-1]["content"], "Add error handling to the function")
                 self.assertEqual(window.chats[GENERAL_TARGET]["routing"]["mode"], "direct")
                 self.assertEqual(window.chats[GENERAL_TARGET]["routing"]["assignments"], [])
-                self.assertEqual(window.coordinator_picker.currentData(), "ollama-agent")
+                self.assertEqual(window.coordinator_picker.currentData(), "ollama-agent-2")
+                self.assertEqual(window.coordinator_picker.findData("ollama-agent"), -1)
                 self.assertEqual(window.workspace_meta["coordinator"], "ollama-agent")
+                ollama_available = False
+                self.wait(lambda: not window.send_button.isEnabled()
+                          and all(not agent["online"] for agent in window.model_agents()))
+                self.assertEqual(window.coordinator_picker.count(), 1)
+                self.assertEqual(window.coordinator_picker.currentText(), "No active models")
+                self.assertFalse(window.coordinator_save.isEnabled())
+                ollama_available = True
+                self.wait(lambda: window.send_button.isEnabled()
+                          and window.coordinator_picker.currentData() == "ollama-agent-2")
+                self.assertEqual(len(seen), 3, "Health checks must never replay chat requests")
             finally:
                 window.close()
                 self.wait(lambda: not window.network.isRunning())

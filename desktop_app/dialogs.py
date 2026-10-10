@@ -169,6 +169,8 @@ class AgentDialog(QDialog):
 
     def change_provider(self):
         key = self.provider.currentData()
+        self.model.clear()
+        self.model.clearEditText()
         spec = PROVIDERS[key]
         if not self.profile:
             self.name.setText(available_agent_name(key, self.window.agents))
@@ -188,13 +190,21 @@ class AgentDialog(QDialog):
                 self.models_button.setEnabled(True)
                 self.model.clear()
                 self.model.addItems(models)
-                if selected:
+                if selected and (self.provider.currentData() != "ollama" or selected in models):
                     self.model.setCurrentText(selected)
+                elif not models:
+                    self.model.clearEditText()
                 if not models:
                     self.error.setText("No models found. Pull a model in Ollama or enter your provider's model ID.")
         def fail(message):
             if self.isVisible():
                 self.models_button.setEnabled(True)
+                selected = self.model.currentText()
+                self.model.clear()
+                if self.provider.currentData() == "ollama":
+                    self.model.clearEditText()
+                else:
+                    self.model.setCurrentText(selected)
                 self.error.setText("Could not list models. Check the API root and key, or enter the model ID directly.")
         self.window.command("provider_models", self.provider.currentData(), self.base.text().strip(),
                             self.key.text() or None, self.insecure.isChecked(),

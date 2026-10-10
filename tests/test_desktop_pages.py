@@ -2378,6 +2378,49 @@ def test_model_list_results_for_an_old_endpoint_are_ignored(window) -> None:
     assert window.model_models_button.isEnabled()
 
 
+def test_default_model_dropdown_only_offers_active_models_and_recovers(window) -> None:
+    window.ready = True
+    window.workspace_meta["coordinator"] = "stopped"
+    window.agents = [{"id": "stopped", "kind": "model", "model": "saved-model", "online": False},
+                     {"id": "active", "kind": "model", "model": "active-model", "online": True}]
+    window.refresh_coordinator_controls()
+    assert window.coordinator_picker.findData("stopped") == -1
+    assert window.coordinator_picker.currentData() == "active"
+    assert window.workspace_meta["coordinator"] == "stopped"
+    window.agents[1]["online"] = False
+    window.refresh_coordinator_controls()
+    assert window.coordinator_picker.count() == 1
+    assert window.coordinator_picker.itemText(0) == "No active models"
+    assert not window.coordinator_picker.isEnabled()
+    assert not window.coordinator_save.isEnabled()
+    window.agents[0]["online"] = True
+    window.refresh_coordinator_controls()
+    assert window.coordinator_picker.currentData() == "stopped"
+    assert window.coordinator_picker.isEnabled()
+
+
+def test_ollama_catalog_failure_removes_stale_models_and_a_restart_restores_choices(window) -> None:
+    window.ready = True
+    window.add_agent("ollama")
+    callbacks = {}
+    window.command = lambda name, *args, **kwargs: callbacks.update(kwargs)
+    window.find_models()
+    callbacks["success"](["first", "second"])
+    window.model_id.setCurrentText("removed-model")
+    window.find_models()
+    callbacks["success"](["first"])
+    assert window.model_id.currentText() == "first"
+    window.find_models()
+    callbacks["failure"]("Connection refused")
+    assert window.model_id.count() == 0
+    assert window.model_id.currentText() == ""
+    assert "Ollama is unavailable" in window.model_catalog_status.text()
+    window.refresh_ollama_catalog()
+    callbacks["success"](["returned-model"])
+    assert window.model_id.currentText() == "returned-model"
+    assert window.model_error_line.message.text() == ""
+
+
 def test_attachment_failure_returns_to_its_chat_and_preserves_the_draft(window) -> None:
     window.ready = True
     window.workspace_id = "test-workspace"

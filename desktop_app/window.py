@@ -752,6 +752,10 @@ class MainWindow(QMainWindow):
         self.model_discovery_timer.setSingleShot(True)
         self.model_discovery_timer.setInterval(500)
         self.model_discovery_timer.timeout.connect(lambda: self.find_models(automatic=True))
+        self.model_catalog_timer = QTimer(self)
+        self.model_catalog_timer.setInterval(5000)
+        self.model_catalog_timer.timeout.connect(self.refresh_ollama_catalog)
+        self.model_catalog_timer.start()
         self.model_provider.currentIndexChanged.connect(self.change_model_provider)
         for signal in (self.model_base.textChanged, self.model_key.textChanged, self.model_insecure.toggled):
             signal.connect(self.schedule_model_discovery)
@@ -1742,19 +1746,20 @@ class MainWindow(QMainWindow):
                 "delegating": state["delegating"], "coordinator": state["coordinator"]["id"] if state["coordinator"] else None}
 
     def refresh_coordinator_controls(self):
-        models = self.model_agents()
-        coordinator = general_chat_state(models, self.workspace_meta.get("coordinator"))["coordinator"]
+        models = [agent for agent in self.model_agents()
+                  if agent.get("online") and agent.get("orchestration_authorized", True)]
+        coordinator = general_chat_state(models, self.workspace_meta.get("coordinator"))["conversation_model"]
         current = coordinator["id"] if coordinator else None
         signature = (self.workspace_id, current, tuple((agent["id"], agent.get("model")) for agent in models))
         if getattr(self, "_coordinator_signature", None) != signature:
             self._coordinator_signature = signature
             self.coordinator_picker.clear()
-            self.coordinator_picker.addItem("Automatic · first imported model", None)
+            self.coordinator_picker.addItem("Automatic · first available model" if models else "No active models", None)
             for agent in models:
                 self.coordinator_picker.addItem(agent["id"] + " · " + (agent.get("model") or "Configured model"), agent["id"])
             self.coordinator_picker.setCurrentIndex(max(0, self.coordinator_picker.findData(current)))
-        self.coordinator_picker.setEnabled(self.ready and not self.remote)
-        self.coordinator_save.setEnabled(self.ready and not self.remote)
+        self.coordinator_picker.setEnabled(bool(models) and self.ready and not self.remote)
+        self.coordinator_save.setEnabled(bool(models) and self.ready and not self.remote)
 
     def save_coordinator(self):
         self.command("set_coordinator", self.coordinator_picker.currentData(),
@@ -2873,31 +2878,50 @@ class MainWindow(QMainWindow):
             self.model_id.clear()
             models = sorted(set(models))
             self.model_id.addItems(models)
-            if selected:
+            if models and self.model_error_line.message.text() == getattr(self, "_model_catalog_error", None):
+                self.clear_card_message(self.model_error_line)
+                self._model_catalog_error = None
+            if selected and (self.model_provider.currentData() != "ollama" or selected in models):
                 self.model_id.setCurrentText(selected)
+            elif not models:
+                self.model_id.clearEditText()
             self.model_catalog_status.setText(f"{len(models)} models available · Select a model from the dropdown.")
             if not models:
                 self.model_catalog_status.setText("No models available from this endpoint.")
-                self.set_card_message(
-                    self.model_error_line,
-                    "No models found. Pull a model in Ollama or enter your "
-                    "provider's model ID directly.")
+                self._model_catalog_error = "No models found. Pull a model in Ollama or enter your provider's model ID directly."
+                self.set_card_message(self.model_error_line, self._model_catalog_error)
 
         def failure(message):
             if not current():
                 return
             self.model_models_button.setEnabled(True)
-            self.model_catalog_status.setText("Model discovery failed. You can still enter a model ID directly.")
+            selected = self.model_id.currentText()
+            self.model_id.clear()
+            if self.model_provider.currentData() == "ollama":
+                self.model_id.clearEditText()
+            else:
+                self.model_id.setCurrentText(selected)
+            ollama = self.model_provider.currentData() == "ollama"
+            self.model_catalog_status.setText("Ollama is unavailable. Start Ollama to load models." if ollama else
+                                             "Model discovery failed. You can still enter a model ID directly.")
             if automatic and self.stack.currentIndex() != AGENTS_PAGE:
                 return
-            self.set_card_message(
-                self.model_error_line,
-                "Could not list models. " + message + " Check the API root and key, or enter the model ID directly.")
+            self._model_catalog_error = "Could not list models. " + message + (
+                " Start Ollama and check the API root." if ollama else
+                " Check the API root and key, or enter the model ID directly.")
+            self.set_card_message(self.model_error_line, self._model_catalog_error)
 
         self.command("provider_models", self.model_provider.currentData(),
                      self.model_base.text().strip(), self.model_key.text() or None,
                      self.model_insecure.isChecked(), self.model_profile_id,
                      success=success, failure=failure)
+
+    def refresh_ollama_catalog(self):
+        """Remove stale choices when Ollama stops while the import form is open."""
+        if (self.ready and self.model_provider.currentData() == "ollama"
+                and self.stack.currentIndex() == AGENTS_PAGE
+                and self.model_models_button.isEnabled() and not self.model_discovery_timer.isActive()):
+            self.find_models(automatic=True)
 
     def test_web_search(self):
         """Test the configured search service, and report it where it is set."""

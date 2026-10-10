@@ -85,6 +85,8 @@ the API root if needed, and enter its API key. Available models load into the
 There is no generated terminal command or separate agent process to start.
 
 For Ollama, start the Ollama application and install your chosen model first.
+Its dropdown refreshes while the import form is open and clears when Ollama
+cannot be reached. Removed models are also dropped from the choices.
 **Find models** refreshes installed Ollama models or available models from the
 selected provider, including Claude and Gemini. Paginated catalogs are collected
 in full; Gemini's list includes models that support chat generation. Discovery
@@ -133,8 +135,13 @@ another model from the same provider preserves the first model.
 
 In **Conversations**, you can change **Default model** and click **Use model**.
 The workspace owner sets this optional preference; invited members use the same
-default. The choice is saved per workspace. **Automatic · first imported model**
-restores the original default. Specialist routing works best with a model that
+default. The choice is saved per workspace. Only active models appear in this
+dropdown; when none are available it shows **No active models**. Ollama models
+are available only while their server can be reached and the model is installed.
+Stopping Ollama hides its models; starting it again restores running agents
+automatically. A saved default remains saved while unavailable.
+**Automatic · first available model** restores the original default and uses
+an available model while that default is offline. Specialist routing works best with a model that
 follows JSON planning instructions reliably. Basic chat does not require planning.
 
 Automatic routing uses only models imported by the workspace owner or explicitly

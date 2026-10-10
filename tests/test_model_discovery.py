@@ -17,6 +17,59 @@ class ModelDiscoveryTests(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(runtime.http.aclose)
         return runtime
 
+    async def test_ollama_outage_and_recovery_update_model_availability_without_replaying_work(self):
+        reachable, requests, changes = True, [], []
+        profiles = [{"id": "chat", "provider": "ollama", "model": "chat"},
+                    {"id": "missing", "provider": "ollama", "model": "missing:latest"},
+                    {"id": "stopped", "provider": "ollama", "model": "chat:latest"}]
+
+        def provider(request):
+            requests.append(request)
+            self.assertEqual(request.url.path, "/api/tags")
+            if not reachable:
+                raise httpx.ConnectError("Ollama stopped", request=request)
+            return httpx.Response(200, json={"models": [{"name": "chat:latest"}]})
+
+        runtime = self.runtime(provider, profiles)
+        runtime.generation = 0
+        runtime.runners = {"chat": object(), "missing": object()}
+        runtime._ollama_availability = {}
+        async def publish(profile, running=True):
+            changes.append((profile["id"], running))
+            return True
+        runtime.publish_profile = publish
+        profiles = {profile["id"]: profile for profile in profiles}
+        await runtime.refresh_ollama_availability(profiles)
+        self.assertEqual(changes, [("chat", True), ("missing", False)])
+        self.assertEqual(len(requests), 1, "Models at the same endpoint share one health check")
+        await runtime.refresh_ollama_availability(profiles)
+        self.assertEqual(len(changes), 2, "Unchanged health must not rewrite saved profiles")
+        reachable = False
+        await runtime.refresh_ollama_availability(profiles)
+        self.assertEqual(changes[-1], ("chat", False))
+        reachable = True
+        await runtime.refresh_ollama_availability(profiles)
+        self.assertEqual(changes[-1], ("chat", True))
+        self.assertTrue(all(identity != "stopped" for identity, _ in changes))
+
+    async def test_ollama_health_for_a_previous_workspace_is_discarded(self):
+        runtime = self.runtime(lambda request: None)
+        runtime.generation = 0
+        runtime.runners = {"chat": object()}
+        runtime._ollama_availability = {}
+        changes = []
+        def provider(request):
+            runtime.generation += 1
+            return httpx.Response(200, json={"models": [{"name": "chat:latest"}]})
+        await runtime.http.aclose()
+        runtime.http = httpx.AsyncClient(transport=httpx.MockTransport(provider))
+        self.addAsyncCleanup(runtime.http.aclose)
+        async def publish(profile, running=True):
+            changes.append(running)
+        runtime.publish_profile = publish
+        await runtime.refresh_ollama_availability({"chat": {"id": "chat", "provider": "ollama", "model": "chat"}})
+        self.assertEqual(changes, [])
+
     async def test_ollama_lists_every_installed_model_and_removes_duplicates(self):
         def provider(request):
             self.assertEqual(request.url.path, "/api/tags")
